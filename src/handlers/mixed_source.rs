@@ -98,6 +98,10 @@ impl MixedSourceHandler {
                 self.cache_handler.clone(),
                 key.to_string(),
                 (start, end),
+                // 混合源路径不参与去重：进到这里说明缓存里已有可用前缀，
+                // 每个请求要补的尾段各不相同，没有「同一个区间被重复拉取」
+                // 可言。去重只装在完全走网络那条路径上。
+                None,
             );
 
             log_info!(
@@ -168,6 +172,8 @@ impl MixedSourceHandler {
             self.cache_handler.clone(),
             key.to_string(),
             (cached_end, end),
+            // 同上：混合源不参与去重。
+            None,
         );
 
         // 创建合并的流
