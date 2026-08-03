@@ -318,32 +318,106 @@ impl StorageEngine for DiskStorage {
         let mut writer = tokio_io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
 
         let mut written = 0u64;
+
+        // 提前中止的原因，留到 flush + 记账之后再上抛。
+        //
+        // 之所以不直接 `return Err(..)`：`BufWriter` 每攒满 256KB 就下发一次
+        // 真实 write，所以中止时前面的字节**已经在文件里了**。直接返回会跳过
+        // `record_completed_range`，那些字节就成了幽灵——占着磁盘、计入容量
+        // 簿记（`enumerate` 按文件长度统计）、却不在 ranges.json 里，于是永远
+        // 不会被任何读命中，只能等整条缓存被淘汰时一起消失。
+        let mut failure = None;
+
+        // 中止时 `written` 这个前缀能不能记账。三条中止路径的答案并不相同，
+        // 所以逐条判断，不做统一处理：
+        //
+        // - **超出声明范围**：能记。检查发生在写这一块**之前**，`written` 是
+        //   精确值；而这些字节正是上游 `Content-Range` 承诺的那一段（该头已由
+        //   `net_source` 校验过），tee 也已经把它们发给客户端了。记下来既准确，
+        //   又让缓存和客户端拿到的内容保持一致。
+        // - **`write_all` 失败**：不能记。`write_all` 出错时不会告诉你写进去了
+        //   多少字节，`written` 此刻是个高估值。记账就等于把可能并不存在的
+        //   字节标记成已缓存，后续读会拿到空洞。
+        // - **上游流报错**：不能记。这一条是 `failed_stream_does_not_mark_partial_write_complete`
+        //   钉住的既有约定。此处 `written` 其实是精确的，因此改成记账在技术上
+        //   站得住（和短响应体保留前缀是同一个道理），但那是在放宽一条刻意
+        //   收紧的语义，不属于「修记账漏洞」的范围，留给显式决定。
+        let mut prefix_is_recordable = true;
+
         while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
-            let chunk = chunk?;
-            let next_written = written
-                .checked_add(chunk.len() as u64)
-                .ok_or_else(|| ProxyError::Storage("写入字节数溢出".to_string()))?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    failure = Some(error);
+                    prefix_is_recordable = false;
+                    break;
+                }
+            };
+            let Some(next_written) = written.checked_add(chunk.len() as u64) else {
+                failure = Some(ProxyError::Storage("写入字节数溢出".to_string()));
+                prefix_is_recordable = false;
+                break;
+            };
             if max_length.is_some_and(|maximum| next_written > maximum) {
-                return Err(ProxyError::Storage(
+                failure = Some(ProxyError::Storage(
                     "上游响应体超过请求的缓存范围".to_string(),
                 ));
+                break;
             }
-            writer.write_all(&chunk).await?;
+            if let Err(error) = writer.write_all(&chunk).await {
+                failure = Some(error.into());
+                prefix_is_recordable = false;
+                break;
+            }
             written = next_written;
         }
 
-        // flush 把缓冲交给内核，sync_data 才是让内核落盘。两步都不能少，
-        // 且必须都在 record_completed_range 之前 —— 否则元数据可能先于数据
-        // 落盘，崩溃后区间被标记完整而内容还是空洞。
-        writer.flush().await?;
-        writer.into_inner().sync_data().await?;
-        if written > 0 {
-            let end = range
-                .0
-                .checked_add(written - 1)
-                .ok_or_else(|| ProxyError::Storage("写入范围溢出".to_string()))?;
-            self.record_completed_range(key, range.0, end).await?;
+        let mut sync_failure = None;
+
+        if written > 0 && prefix_is_recordable {
+            // flush 把缓冲交给内核，sync_data 才是让内核落盘。两步都不能少，
+            // 且必须都在 record_completed_range 之前 —— 否则元数据可能先于数据
+            // 落盘，崩溃后区间被标记完整而内容还是空洞。
+            //
+            // `?` 换成显式处理，是为了不让 flush 自己的错误盖掉 `failure` 里那个
+            // 更能说明问题的原因。
+            match writer.flush().await {
+                Ok(()) => {
+                    if let Err(error) = writer.into_inner().sync_data().await {
+                        sync_failure = Some(ProxyError::from(error));
+                    }
+                }
+                Err(error) => sync_failure = Some(ProxyError::from(error)),
+            }
+
+            // 落盘失败时绝不能记账：那会把可能并不在磁盘上的字节标记成已缓存。
+            if sync_failure.is_none() {
+                let end = range
+                    .0
+                    .checked_add(written - 1)
+                    .ok_or_else(|| ProxyError::Storage("写入范围溢出".to_string()))?;
+                self.record_completed_range(key, range.0, end).await?;
+            }
         }
+        // 不记账的中止路径上连 flush 都不做，直接把 writer 丢掉。
+        //
+        // tokio 的 `BufWriter` 在 drop 时不会（也无法）异步 flush，所以缓冲里
+        // 那最多 256KB 还没下发的字节就随之丢弃了——既然不会记账，写进文件
+        // 只是白占磁盘。循环中途按 256KB 已经下发过的部分收不回来，那是
+        // 缓冲写入固有的代价；它们会在下一次对同一区间的成功写入中被覆盖并
+        // 正确记账，不会永久留着。
+
+        if let Some(error) = failure.or(sync_failure) {
+            log_info!(
+                "Storage",
+                "写入中止: {:?}, 已落盘并记账 {} 字节, 原因: {}",
+                file_path,
+                written,
+                error
+            );
+            return Err(error);
+        }
+
         log_info!(
             "Storage",
             "写入完成: {:?}, 写入字节数: {}",
@@ -579,7 +653,12 @@ impl StorageEngine for DiskStorage {
             };
 
             while let Some(second) = level2.next_entry().await? {
-                if !second.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                if !second
+                    .file_type()
+                    .await
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let mut files = match tokio_fs::read_dir(second.path()).await {
@@ -955,6 +1034,51 @@ mod tests {
         assert_eq!(storage.get_size("asset").await.unwrap(), Some(0));
     }
 
+    /// 超范围中止时，中止**之前**已经收下的那些块必须记账。
+    ///
+    /// 上面那条测试用的是单独一个超长块：越界在写第一块时就发现了，`written`
+    /// 还是 0，于是「有没有记前缀」这件事根本没被走到。多块才走得到——而这条
+    /// 路径上原先是直接 `return Err`，跳过了 flush 和 `record_completed_range`。
+    /// 后果不只是少缓存一段：`BufWriter` 每攒满 256KB 就真的下发一次 write，
+    /// 所以大响应体里那些字节**已经在磁盘上**，占着空间、被 `enumerate` 计入
+    /// 容量簿记，却不在 ranges.json 里，任何读都命不中，只能等整条缓存被淘汰
+    /// 时一起消失。
+    #[tokio::test]
+    async fn overrun_still_records_the_prefix_received_before_the_abort() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+
+        // 声明范围 10-14（5 字节），分两块共给 6 字节：第二块才把总数推到越界。
+        let result = storage
+            .write(
+                "asset",
+                stream::iter([
+                    Ok(Bytes::from_static(b"abc")),
+                    Ok(Bytes::from_static(b"def")),
+                ]),
+                (10, 14),
+            )
+            .await;
+
+        // 中止依然作为错误上抛：上游违反了自己声明的范围，这个信号不能吞掉。
+        assert!(result.is_err());
+
+        // 但先收到的 3 字节是这段范围货真价实的前缀，必须可读、可命中。
+        assert!(
+            storage.check_range("asset", (10, 12)).await.unwrap(),
+            "中止前已落盘的前缀没有被记账"
+        );
+        let mut stream = storage.read("asset", (10, 12)).await.unwrap();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(bytes, b"abc");
+
+        // 记的只能是前缀，绝不能把没拿到的字节也标记成已缓存。
+        assert!(!storage.check_range("asset", (10, 14)).await.unwrap());
+    }
+
     #[tokio::test]
     async fn write_accepts_short_body_as_only_the_completed_prefix() {
         let dir = tempfile::tempdir().unwrap();
@@ -986,7 +1110,11 @@ mod tests {
             .await
             .unwrap();
         storage
-            .write("second", stream::iter([Ok(Bytes::from_static(b"xy"))]), (0, 1))
+            .write(
+                "second",
+                stream::iter([Ok(Bytes::from_static(b"xy"))]),
+                (0, 1),
+            )
             .await
             .unwrap();
 
@@ -1012,7 +1140,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = storage(dir.path());
         storage
-            .write("asset", stream::iter([Ok(Bytes::from_static(b"ab"))]), (0, 1))
+            .write(
+                "asset",
+                stream::iter([Ok(Bytes::from_static(b"ab"))]),
+                (0, 1),
+            )
             .await
             .unwrap();
 
