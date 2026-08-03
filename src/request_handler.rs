@@ -2,8 +2,8 @@ use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
 use crate::utils::error::{ProxyError, Result};
-use hyper::header::{CACHE_CONTROL, CONTENT_TYPE};
-use hyper::{Body, Method, Request, Response};
+use hyper::header::{HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE};
+use hyper::{Body, Method, Request, Response, StatusCode};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -58,10 +58,50 @@ impl RequestHandler {
             _ => self.source_manager.process_request(&data_request).await,
         }?;
 
+        let response = full_content_if_no_range_requested(response, &data_request);
+
         // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
         // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
         Ok(guard_response(response, permit))
     }
+}
+
+/// 客户端没发 `Range` 时把 206 改写成 200。
+///
+/// 内部管线一律按范围请求处理：缺 `Range` 头时 `DataRequest` 会合成一个
+/// `bytes=0-`，于是所有路径产出的都是 206。但 RFC 7233 讲得很明确，206 只能
+/// 用来回应带 `Range` 的请求，普通 GET 必须得到 200。
+///
+/// 这不是洁癖。Safari 和 AVPlayer 打开资源时先发一个不带 `Range` 的 GET 探路，
+/// 拿到 206 会认为服务器不守规矩，有的播放器就此不再发起后续的 seek。
+///
+/// 改写在这一层而不是往下传一个 bool：产出 206 的地方有四处（缓存命中、
+/// 网络回源、混合源的快路径和拼接路径），而「客户端到底发没发 Range」是纯
+/// HTTP 边界的信息，四条路径本身都不关心。放在这里也保证以后新增的响应
+/// 路径自动被覆盖。
+///
+/// 改写是安全的：缺 `Range` 时合成的是 `bytes=0-`，`resolve_range` 会把它
+/// 收敛成整个资源（总长度未知时它直接报错，根本走不到这里），所以此处的 206
+/// 必然覆盖全资源——正是 200 该有的语义。因此无需再去检查区间是否真的完整。
+fn full_content_if_no_range_requested(
+    mut response: Response<Body>,
+    request: &DataRequest,
+) -> Response<Body> {
+    // 状态码判断把 m3u8 那条本来就返回 200 的路径自动排除在外。
+    if request.client_sent_range() || response.status() != StatusCode::PARTIAL_CONTENT {
+        return response;
+    }
+
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    // `Content-Range` 在 200 里没有意义，留着反而自相矛盾。
+    // `Content-Length` 此刻已等于整个资源长度，原样保留。
+    headers.remove(CONTENT_RANGE);
+    // 200 响应里 `Accept-Ranges` 是客户端唯一能看到的「可以 seek」信号——206
+    // 本身就隐含了范围支持，而一个不带这个头的 200 会被当成不可 seek 的资源。
+    // 代理对「自己支不支持范围请求」是权威的，这里直接写死。
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response
 }
 
 fn guard_response(response: Response<Body>, permit: OwnedSemaphorePermit) -> Response<Body> {
@@ -93,6 +133,79 @@ mod tests {
             assert!(matches!(error, ProxyError::MethodNotAllowed));
             assert_eq!(error.status_code(), hyper::StatusCode::METHOD_NOT_ALLOWED);
         }
+    }
+
+    /// 造一个 `DataRequest`，`range` 传 `None` 表示客户端没发 Range 头。
+    fn request(range: Option<&str>) -> DataRequest {
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri("http://127.0.0.1/playback")
+            .header("X-Original-Url", "https://media.example/song.mp4")
+            .header("X-Cache-Asset-Id", "asset-1")
+            .header("X-Cache-Asset-Revision", "1");
+        if let Some(range) = range {
+            builder = builder.header(hyper::header::RANGE, range);
+        }
+        DataRequest::new(&builder.body(Body::empty()).unwrap()).unwrap()
+    }
+
+    fn partial_response() -> Response<Body> {
+        let mut response = Response::new(Body::from("media"));
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        response
+            .headers_mut()
+            .insert(CONTENT_RANGE, HeaderValue::from_static("bytes 0-4999/5000"));
+        response
+            .headers_mut()
+            .insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(5000));
+        response
+    }
+
+    #[test]
+    fn no_range_header_gets_200_without_content_range() {
+        let response = full_content_if_no_range_requested(partial_response(), &request(None));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !response.headers().contains_key(CONTENT_RANGE),
+            "200 响应不该带 Content-Range"
+        );
+        // 长度必须留着，否则客户端不知道要读多少。
+        assert_eq!(response.headers()[hyper::header::CONTENT_LENGTH], "5000");
+        // 这是 200 里唯一能告诉播放器「可以 seek」的头。
+        assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+    }
+
+    #[test]
+    fn explicit_range_header_keeps_206() {
+        // 客户端明确发了 `bytes=0-`，和「没发 Range」在内部表示上完全一样
+        // （都被规范成 `bytes=0-`），必须靠标记区分。这一条就是压着那个标记的。
+        for range in ["bytes=0-", "bytes=0-4999", "bytes=100-199"] {
+            let response =
+                full_content_if_no_range_requested(partial_response(), &request(Some(range)));
+            assert_eq!(
+                response.status(),
+                StatusCode::PARTIAL_CONTENT,
+                "客户端发了 {range}，必须保持 206"
+            );
+            assert_eq!(response.headers()[CONTENT_RANGE], "bytes 0-4999/5000");
+        }
+    }
+
+    #[test]
+    fn non_partial_responses_are_left_alone() {
+        // m3u8 那条路径本来就返回 200，不能被这里再动一次（尤其不能被塞上
+        // Accept-Ranges——播放列表不是可 seek 的字节流）。
+        let mut original = Response::new(Body::from("#EXTM3U"));
+        original.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-mpegURL"),
+        );
+
+        let response = full_content_if_no_range_requested(original, &request(None));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key(ACCEPT_RANGES));
     }
 
     #[tokio::test]
