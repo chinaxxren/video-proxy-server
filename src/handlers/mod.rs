@@ -1,9 +1,9 @@
 mod cache;
-mod network;
 mod mixed_source;
+pub mod network;
 mod response;
 
 pub use cache::CacheHandler;
-pub use network::NetworkHandler;
 pub use mixed_source::MixedSourceHandler;
-pub use response::ResponseBuilder; 
+pub use network::{FetchedUpstream, NetworkHandler};
+pub use response::ResponseBuilder;

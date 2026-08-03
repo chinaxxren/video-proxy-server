@@ -1,16 +1,19 @@
 use proxy_server::server::ProxyServer;
 use std::error::Error;
-use tokio;
-use reqwest;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     println!("[INFO] 启动代理服务器...");
     
-    // 创建并启动代理服务器
-    let server = ProxyServer::new(8080, "./cache");
-    let server_handle = tokio::spawn(async move {
+    // 创建并启动代理服务器。
+    // 上游主机必须显式加入白名单：默认策略是全部拒绝，用来挡住 SSRF。
+    let server = ProxyServer::with_allowed_hosts(
+        8080,
+        "./cache",
+        ["devstreaming-cdn.apple.com", "devimages.apple.com"],
+    );
+    let _server_handle = tokio::spawn(async move {
         if let Err(e) = server.start().await {
             eprintln!("Server error: {}", e);
         }
@@ -30,7 +33,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     
     for &test_url in &test_urls {
-        println!("\n[INFO] 测试 URL: {}", test_url);
+        println!("\n[INFO] 开始 HLS 测试");
         let proxy_url = format!("http://127.0.0.1:8080/proxy/{}", test_url);
         
         // 1. 测试主播放列表
@@ -135,4 +138,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     println!("\n[INFO] 测试完成！");
     Ok(())
-} 
+}

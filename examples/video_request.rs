@@ -1,5 +1,4 @@
 use hyper::{Client, Request, Body};
-use tokio;
 use proxy_server::{log_info, server};
 
 #[tokio::main]

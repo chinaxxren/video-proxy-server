@@ -1,9 +1,8 @@
-use std::path::PathBuf;
-use futures::Stream;
-use bytes::Bytes;
 use crate::utils::error::Result;
+use bytes::Bytes;
+use futures::Stream;
+use std::path::PathBuf;
 
-pub mod block;
 pub mod disk;
 pub mod manager;
 
@@ -22,9 +21,38 @@ pub trait StorageEngine: Send + Sync {
     where
         S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static;
 
-    async fn read(&self, key: &str, range: (u64, u64)) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>>;
+    async fn read(
+        &self,
+        key: &str,
+        range: (u64, u64),
+    ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>>;
 
     async fn get_size(&self, key: &str) -> Result<Option<u64>>;
 
     async fn check_range(&self, key: &str, range: (u64, u64)) -> Result<bool>;
-} 
+
+    async fn delete(&self, key: &str) -> Result<()>;
+
+    /// 持久化上游元数据（总长度、Content-Type）。
+    ///
+    /// 缓存命中时用它替代「再向上游发一次 `bytes=0-0` 探针」取这些值，
+    /// 否则上游不可达会让已完整缓存的请求整体失败。
+    async fn record_upstream_meta(&self, key: &str, meta: &UpstreamMeta) -> Result<()>;
+
+    /// 读取已持久化的上游元数据；字段未知时为 `None`。
+    async fn upstream_meta(&self, key: &str) -> Result<UpstreamMeta>;
+}
+
+/// 缓存命中时重建响应头所需的上游元数据。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpstreamMeta {
+    /// 资源总长度，用于收敛开区间 range 和构建 `Content-Range`。
+    pub total_size: Option<u64>,
+    pub content_type: Option<String>,
+}
+
+impl UpstreamMeta {
+    pub fn is_empty(&self) -> bool {
+        self.total_size.is_none() && self.content_type.is_none()
+    }
+}

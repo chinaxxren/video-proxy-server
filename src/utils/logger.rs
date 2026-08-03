@@ -1,5 +1,6 @@
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::fmt;
+#[cfg(debug_assertions)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub enum LogLevel {
     INFO,
@@ -11,21 +12,21 @@ pub enum LogLevel {
 pub struct Logger;
 
 impl Logger {
+    /// 只在 debug 构建里用得到：release 下 [`Logger::log`] 编译成空函数。
+    #[cfg(debug_assertions)]
     fn format_time(duration: std::time::Duration) -> String {
         let total_secs = duration.as_secs();
         let hours = (total_secs / 3600) % 24;
         let minutes = (total_secs / 60) % 60;
         let seconds = total_secs % 60;
-        
+
         format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     }
 
     #[cfg(debug_assertions)]
     pub fn log<D: fmt::Display>(level: LogLevel, module: &str, message: D) {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap();
-            
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+
         let level_str = match level {
             LogLevel::INFO => "\x1b[32mINFO\x1b[0m",   // 绿色
             LogLevel::WARN => "\x1b[33mWARN\x1b[0m",   // 黄色
@@ -76,4 +77,4 @@ macro_rules! log_debug {
     ($module:expr, $($arg:tt)*) => ({
         $crate::utils::Logger::debug($module, format_args!($($arg)*))
     })
-} 
+}

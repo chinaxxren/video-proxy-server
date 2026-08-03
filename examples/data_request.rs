@@ -1,6 +1,5 @@
 use hyper::{Client, Request, Body};
 use hyper_tls::HttpsConnector;
-use tokio;
 use proxy_server::{log_info, server};
 
 #[tokio::main]
@@ -8,8 +7,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动代理服务器
     tokio::spawn(async {
         log_info!("Example", "启动代理服务器...");
-        let server = server::ProxyServer::new(8080, "./cache");
-        server.start().await;
+        // 默认策略是 deny-all，必须显式放行本例要访问的上游主机。
+        let server =
+            server::ProxyServer::with_allowed_hosts(8080, "./cache", ["www.w3school.com.cn"]);
+        if let Err(e) = server.start().await {
+            eprintln!("代理服务器退出: {}", e);
+        }
     });
 
     // 等待服务器启动
@@ -69,4 +72,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log_info!("Example", "响应头: {:#?}", resp4.headers());
 
     Ok(())
-} 
+}

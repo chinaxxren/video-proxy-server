@@ -12,12 +12,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "https://media.w3.org/2010/05/sintel/trailer.mp4"
     };
+    let allowed_host = url::Url::parse(target_url)?
+        .host_str()
+        .ok_or("target URL has no host")?
+        .to_string();
 
     // 启动代理服务器
-    tokio::spawn(async {
+    tokio::spawn(async move {
         log_info!("Server", "启动代理服务器...");
-        let server = server::ProxyServer::new(8080, "./cache");
-        server.start().await;
+        let server = server::ProxyServer::with_allowed_hosts(8080, "./cache", [allowed_host]);
+        let _ = server.start().await;
     });
 
     // 等待服务器启动
@@ -32,12 +36,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
 
     // 构建请求
-    log_info!("Client", "代理URL: {}", proxy_url);
-    log_info!("Client", "目标URL: {}", target_url);
-
     let req = Request::builder()
         .method("GET")
         .uri(&proxy_url)
+        .header("X-Cache-User-Id", "example-user")
+        .header("X-Cache-Asset-Id", "sintel-trailer")
+        .header("X-Cache-Asset-Revision", "1")
         .body(Body::empty())?;
 
     // 发送请求

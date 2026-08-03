@@ -1,6 +1,5 @@
 use hyper::{Client, Request, Body};
 use hyper_tls::HttpsConnector;
-use tokio;
 use proxy_server::{log_info, server};
 
 #[tokio::main]
@@ -8,8 +7,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 启动代理服务器
     tokio::spawn(async {
         log_info!("Example", "启动代理服务器...");
-        let server = server::ProxyServer::new(8080, "./cache");
-        server.start().await;
+        // 默认策略是 deny-all，必须显式放行本例要访问的上游主机。
+        let server = server::ProxyServer::with_allowed_hosts(8080, "./cache", ["media.w3.org"]);
+        if let Err(e) = server.start().await {
+            eprintln!("代理服务器退出: {}", e);
+        }
     });
 
     // 等待服务器启动
@@ -21,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 测试 HTTPS URL
     let https_url = "https://media.w3.org/2010/05/sintel/trailer.mp4";
 
-    log_info!("Example", "发送 HTTPS 请求: {}", https_url);
+    log_info!("Example", "发送 HTTPS 请求");
     let req = Request::builder()
         .method("GET")
         .uri("http://127.0.0.1:8080")
