@@ -41,6 +41,17 @@ pub trait StorageEngine: Send + Sync {
 
     /// 读取已持久化的上游元数据；字段未知时为 `None`。
     async fn upstream_meta(&self, key: &str) -> Result<UpstreamMeta>;
+
+    /// 枚举已落盘的缓存条目，返回 `(key, 已占用字节数)`。
+    ///
+    /// [`StorageManager`] 启动时用它重建磁盘用量簿记。缺了这一步，重启后
+    /// 管理器认为磁盘是空的，LRU 清理永远不触发，缓存目录无上界增长。
+    ///
+    /// 默认返回空表：不支持枚举的引擎退化成「重启后从零开始记账」，
+    /// 行为与加这个方法之前一致。
+    async fn enumerate(&self) -> Result<Vec<(String, u64)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// 缓存命中时重建响应头所需的上游元数据。

@@ -117,15 +117,9 @@ impl DataRequest {
     /// 后者仍然保留：签名 URL 的 query 每次都变，不能进键，而同一个 path
     /// 在不同用户/版本下可能需要分开存（见 `X-Cache-Asset-Revision`）。
     fn build_cache_key(url: &Url, headers: &HeaderMap) -> Result<Option<String>> {
-        let names = [
-            "X-Cache-User-Id",
-            "X-Cache-Asset-Id",
-            "X-Cache-Asset-Revision",
-        ];
+        let names = ["X-Cache-Asset-Id", "X-Cache-Asset-Revision"];
 
         // 直接往一个 String 里追加，不再 `Vec<String>` + `format!` 每段 + `join`。
-        // 原先四段各分配一次、长度前缀又各分配一次、join 再分配一次结果，
-        // 一共九次分配；现在只有身份串和结果两次。
         let mut key = String::new();
         push_component(&mut key, &canonical_upstream_identity(url)?);
         for name in names {
@@ -175,8 +169,7 @@ impl DataRequest {
     pub fn get_cache_key(&self) -> Result<&str> {
         self.cache_key.as_deref().ok_or_else(|| {
             ProxyError::Request(
-                "缺少稳定缓存身份头: X-Cache-User-Id, X-Cache-Asset-Id, X-Cache-Asset-Revision"
-                    .to_string(),
+                "缺少稳定缓存身份头: X-Cache-Asset-Id, X-Cache-Asset-Revision".to_string(),
             )
         })
     }
@@ -247,7 +240,6 @@ mod tests {
             Request::builder()
                 .uri("/proxy/placeholder")
                 .header("X-Original-Url", url)
-                .header("X-Cache-User-Id", "user-1")
                 .header("X-Cache-Asset-Id", "song-2")
                 .header("X-Cache-Asset-Revision", "7")
                 .body(Body::empty())
@@ -351,13 +343,12 @@ mod tests {
 
     #[test]
     fn length_prefixed_cache_key_avoids_component_ambiguity() {
-        let build = |user: &str, asset: &str| {
+        let build = |asset: &str, revision: &str| {
             Request::builder()
                 .uri("/proxy/placeholder")
                 .header("X-Original-Url", "https://media.example/song")
-                .header("X-Cache-User-Id", user)
                 .header("X-Cache-Asset-Id", asset)
-                .header("X-Cache-Asset-Revision", "1")
+                .header("X-Cache-Asset-Revision", revision)
                 .body(Body::empty())
                 .unwrap()
         };
@@ -377,7 +368,6 @@ mod tests {
             Request::builder()
                 .uri("/proxy/placeholder")
                 .header("X-Original-Url", url)
-                .header("X-Cache-User-Id", "user-1")
                 .header("X-Cache-Asset-Id", "same-asset-id")
                 .header("X-Cache-Asset-Revision", "1")
                 .body(Body::empty())
@@ -392,7 +382,6 @@ mod tests {
             "不同上游 path 在同一组身份头下仍然必须落到不同缓存键"
         );
 
-        // 换 host 同样要分开。
         let other_host = DataRequest::new(&build("https://evil.example/private/a.mp4")).unwrap();
         assert_ne!(
             victim.get_cache_key().unwrap(),
@@ -425,8 +414,7 @@ mod tests {
         let request = Request::builder()
             .uri("/proxy/placeholder")
             .header("X-Original-Url", "https://media.example/song")
-            .header("X-Cache-User-Id", " ")
-            .header("X-Cache-Asset-Id", "asset")
+            .header("X-Cache-Asset-Id", " ")
             .header("X-Cache-Asset-Revision", "1")
             .body(Body::empty())
             .unwrap();

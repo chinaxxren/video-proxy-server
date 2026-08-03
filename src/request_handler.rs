@@ -20,10 +20,20 @@ impl RequestHandler {
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
     ) -> Self {
+        Self::with_limit(source_manager, hls_handler, MAX_CONCURRENT_REQUESTS)
+    }
+
+    /// 指定并发上限。0 会被抬到 1：`Semaphore::new(0)` 会让所有请求永久
+    /// 挂起，看起来是服务器卡死而不是配置写错。
+    pub fn with_limit(
+        source_manager: Arc<DataSourceManager>,
+        hls_handler: Arc<DefaultHlsHandler>,
+        max_concurrent_requests: usize,
+    ) -> Self {
         Self {
             source_manager,
             hls_handler,
-            request_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
         }
     }
 
@@ -44,14 +54,8 @@ impl RequestHandler {
                     .body(Body::from(content))
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
-            crate::data_request::RequestType::Segment => {
-                // 保留原请求中的稳定缓存身份头，走统一分片缓存路径。
-                self.source_manager.process_request(&data_request).await
-            }
-            _ => {
-                // 处理普通请求
-                self.source_manager.process_request(&data_request).await
-            }
+            // Segment 和 Normal 走同一缓存路径；DataRequest::new 已完成缓存身份键构造。
+            _ => self.source_manager.process_request(&data_request).await,
         }?;
 
         // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续

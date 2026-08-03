@@ -8,7 +8,7 @@ use hyper_tls::HttpsConnector;
 use crate::log_info;
 use crate::utils::error::Result;
 use crate::utils::network_policy::{NetworkPolicy, PublicOnlyResolver};
-use crate::utils::range::parse_range;
+use crate::utils::range::{parse_range, OPEN_ENDED};
 use crate::{data_request::DataRequest, utils::error::ProxyError};
 
 /// 复用的 HTTPS 客户端类型。
@@ -121,13 +121,14 @@ impl NetSource {
             )));
         }
 
-        // 上游可以合法地忽略 Range 而返回 200 + 整个文件。此时响应体从偏移 0
-        // 开始，只有 start == 0 时才能按请求的偏移落盘；否则会把整个文件写到
-        // start 处，污染缓存并被记为「该区间已完整」。
-        if status != StatusCode::PARTIAL_CONTENT && start > 0 {
+        // 上游可以合法地忽略 Range 而返回 200 + 整个文件。
+        // - start > 0：缓存偏移会对不上，拒绝。
+        // - end 有限：请求了明确的截止位置，200 无法保证只返回该范围，拒绝。
+        // - bytes=0-（end == OPEN_ENDED）：整段从头开始，200 等同于完整文件，允许。
+        if status != StatusCode::PARTIAL_CONTENT && (start > 0 || end != OPEN_ENDED) {
             return Err(ProxyError::Network(format!(
-                "上游忽略了 Range 请求（状态 {}），拒绝按偏移 {} 落盘",
-                status, start
+                "上游忽略了 Range 请求（状态 {}），要求 206 但收到其他状态码（range: {}-{}）",
+                status, start, end
             )));
         }
 

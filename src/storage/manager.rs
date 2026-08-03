@@ -23,11 +23,10 @@ pub struct StorageManagerConfig {
 mod tests {
     use super::*;
     use crate::utils::error::ProxyError;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
     struct DeleteTrackingStorage {
-        deleted: Arc<AtomicBool>,
+        deleted: Arc<Notify>,
     }
 
     #[async_trait::async_trait]
@@ -65,14 +64,14 @@ mod tests {
         }
 
         async fn delete(&self, _key: &str) -> Result<()> {
-            self.deleted.store(true, Ordering::SeqCst);
+            self.deleted.notify_one();
             Ok(())
         }
     }
 
     #[tokio::test]
     async fn cleanup_uses_storage_delete() {
-        let deleted = Arc::new(AtomicBool::new(false));
+        let deleted = Arc::new(Notify::new());
         let manager = StorageManager::new(
             DeleteTrackingStorage {
                 deleted: deleted.clone(),
@@ -92,13 +91,9 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !deleted.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cleanup did not delete the cache entry");
+        tokio::time::timeout(Duration::from_secs(1), deleted.notified())
+            .await
+            .expect("cleanup did not delete the cache entry");
     }
 
     struct CoordinatedStorage {
@@ -199,6 +194,79 @@ mod tests {
 
         assert_eq!(&*data.lock().await, b"new");
     }
+
+    /// 上一次运行留在盘上的条目，必须能被本次运行的 LRU 清理看到。
+    struct PreexistingStorage {
+        deleted: Arc<Mutex<Vec<String>>>,
+        notify: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageEngine for PreexistingStorage {
+        async fn write<S>(&self, _key: &str, _stream: S, _range: (u64, u64)) -> Result<u64>
+        where
+            S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
+        {
+            Ok(0)
+        }
+
+        async fn read(
+            &self,
+            _key: &str,
+            _range: (u64, u64),
+        ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> {
+            Err(ProxyError::Storage("not implemented in test".to_string()))
+        }
+
+        async fn get_size(&self, _key: &str) -> Result<Option<u64>> {
+            Ok(None)
+        }
+        async fn check_range(&self, _key: &str, _range: (u64, u64)) -> Result<bool> {
+            Ok(false)
+        }
+        async fn record_upstream_meta(&self, _key: &str, _meta: &UpstreamMeta) -> Result<()> {
+            Ok(())
+        }
+        async fn upstream_meta(&self, _key: &str) -> Result<UpstreamMeta> {
+            Ok(UpstreamMeta::default())
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.deleted.lock().await.push(key.to_string());
+            self.notify.notify_one();
+            Ok(())
+        }
+
+        async fn enumerate(&self) -> Result<Vec<(String, u64)>> {
+            Ok(vec![("from-last-run".to_string(), 4096)])
+        }
+    }
+
+    /// 重启后磁盘用量簿记必须重建，否则旧数据永不淘汰、缓存目录无上界。
+    ///
+    /// 断言方式：清理任务只认簿记里的条目。它能删掉 `from-last-run`，
+    /// 就证明预热确实把这个磁盘上已存在的 key 记了进来。
+    #[tokio::test]
+    async fn warm_up_lets_cleanup_evict_entries_left_by_a_previous_run() {
+        let deleted = Arc::new(Mutex::new(Vec::new()));
+        let notify = Arc::new(Notify::new());
+        let _manager = StorageManager::new(
+            PreexistingStorage {
+                deleted: deleted.clone(),
+                notify: notify.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 0,
+                max_file_count: 0,
+                cleanup_interval: Duration::from_millis(5),
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("预热没有把上次运行的条目记入簿记，清理任务看不到它");
+        assert_eq!(&*deleted.lock().await, &["from-last-run".to_string()]);
+    }
 }
 
 impl Default for StorageManagerConfig {
@@ -246,9 +314,72 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
             cleanup_shutdown: Arc::new(Notify::new()),
         };
 
-        // 启动清理任务
+        // 先把磁盘上已有的条目读回簿记，再启动清理任务。
+        manager.start_index_warm_up();
         manager.start_cleanup();
         manager
+    }
+
+    /// 后台重建磁盘用量簿记。
+    ///
+    /// 不这样做的话，重启后 `total_size` 从 0 开始，而磁盘上可能已经躺着
+    /// 上一次运行留下的几个 GB：LRU 清理要等到本次运行**新写入**的量超过
+    /// 上限才触发，旧数据永远不会被淘汰，缓存目录实际没有上界。
+    ///
+    /// 放后台而不是在 `new` 里 await：构造函数是同步的，而枚举要扫整个
+    /// 缓存目录。预热期间的写入正常记账，两边都走同一把 `total_size` 写锁，
+    /// 预热只补表里还没有的 key，不会重复计数。
+    ///
+    /// 取锁顺序与 `write` 和清理任务一致（先 `cache_entries` 后 `total_size`），
+    /// 不能颠倒，否则与并发写入互相等待。
+    fn start_index_warm_up(&self) {
+        let engine = self.engine.clone();
+        let cache_entries = self.cache_entries.clone();
+        let total_size = self.total_size.clone();
+
+        tokio::spawn(async move {
+            let entries = match engine.enumerate().await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    log_info!("Cache", "重建缓存索引失败: {}", error);
+                    return;
+                }
+            };
+            if entries.is_empty() {
+                return;
+            }
+
+            let count = entries.len();
+            let mut table = cache_entries.write().await;
+            let mut total = total_size.write().await;
+            let mut recovered = 0u64;
+
+            for (key, size) in entries {
+                // 预热开始后写入的 key 已经记过账，不能再加一遍。
+                if table.contains_key(&key) {
+                    continue;
+                }
+                table.insert(
+                    key.clone(),
+                    CacheEntry {
+                        key,
+                        total_size: size,
+                        // UNIX_EPOCH 让上一次运行留下的条目在 LRU 里排最前，
+                        // 优先于本次运行访问过的条目被淘汰。
+                        last_access: SystemTime::UNIX_EPOCH,
+                    },
+                );
+                recovered = recovered.saturating_add(size);
+            }
+            *total = total.saturating_add(recovered);
+
+            log_info!(
+                "Cache",
+                "缓存索引重建完成: {} 个条目, {} 字节",
+                count,
+                recovered
+            );
+        });
     }
 
     fn start_cleanup(&self) {

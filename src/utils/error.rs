@@ -12,7 +12,6 @@ pub enum ProxyError {
     Cache(String),
     Network(String),
     InvalidRange(String),
-    Range(String),
     Request(String),
     Storage(String),
     Parse(String),
@@ -26,7 +25,6 @@ impl fmt::Display for ProxyError {
             ProxyError::Cache(msg) => write!(f, "Cache error: {}", msg),
             ProxyError::Network(msg) => write!(f, "Network error: {}", msg),
             ProxyError::InvalidRange(msg) => write!(f, "Invalid range error: {}", msg),
-            ProxyError::Range(msg) => write!(f, "Range error: {}", msg),
             ProxyError::Request(msg) => write!(f, "Request error: {}", msg),
             ProxyError::Storage(msg) => write!(f, "Storage error: {}", msg),
             ProxyError::Parse(msg) => write!(f, "Parse error: {}", msg),
@@ -49,9 +47,7 @@ impl ProxyError {
     /// 「服务端故障」，播放器也就无法据此重试或调整请求。
     pub fn status_code(&self) -> hyper::StatusCode {
         match self {
-            ProxyError::InvalidRange(_) | ProxyError::Range(_) => {
-                hyper::StatusCode::RANGE_NOT_SATISFIABLE
-            }
+            ProxyError::InvalidRange(_) => hyper::StatusCode::RANGE_NOT_SATISFIABLE,
             ProxyError::Request(_) => hyper::StatusCode::BAD_REQUEST,
             ProxyError::Network(_) => hyper::StatusCode::BAD_GATEWAY,
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => {
@@ -67,7 +63,7 @@ impl ProxyError {
     /// 只暴露错误类别，不回显内部消息（内部消息含缓存路径、上游 URL 等）。
     pub fn public_message(&self) -> &'static str {
         match self {
-            ProxyError::InvalidRange(_) | ProxyError::Range(_) => "Requested range not satisfiable",
+            ProxyError::InvalidRange(_) => "Requested range not satisfiable",
             ProxyError::Request(_) => "Bad request",
             ProxyError::Network(_) | ProxyError::Parse(_) => "Upstream error",
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => "Internal error",
@@ -133,11 +129,6 @@ mod tests {
         let cases = [
             (
                 ProxyError::InvalidRange("secret".into()),
-                416,
-                "Requested range not satisfiable",
-            ),
-            (
-                ProxyError::Range("secret".into()),
                 416,
                 "Requested range not satisfiable",
             ),

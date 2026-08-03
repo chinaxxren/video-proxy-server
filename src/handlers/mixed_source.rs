@@ -1,4 +1,5 @@
 use crate::handlers::network::FetchedUpstream;
+use crate::handlers::tee::tee_to_cache;
 use crate::handlers::{CacheHandler, NetworkHandler, ResponseBuilder};
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
@@ -90,6 +91,15 @@ impl MixedSourceHandler {
             let (headers, meta, network_stream) = fetched.into_parts();
             let total_file_size = meta.total_size.unwrap_or(0);
 
+            // 这条快路径同样要写回缓存。否则「缓存段太小」的请求永远只走网络，
+            // 缓存一直停在那不足 8KB 的开头，下一次请求还是全量回源。
+            let client_stream = tee_to_cache(
+                Box::pin(network_stream),
+                self.cache_handler.clone(),
+                key.to_string(),
+                (start, end),
+            );
+
             log_info!(
                 "Cache",
                 "创建响应 - 范围: {}-{}, 总大小: {}",
@@ -98,7 +108,7 @@ impl MixedSourceHandler {
                 total_file_size
             );
             return self.response_builder.build_partial_content_response(
-                Box::new(network_stream),
+                Box::new(client_stream),
                 headers,
                 start,
                 end,
@@ -149,6 +159,16 @@ impl MixedSourceHandler {
                 return Err(e);
             }
         };
+
+        // 网络段先 tee 一份写回缓存，再喂给合并流。少了这一步，混合源请求
+        // 每次都只读旧缓存 + 回源拉新数据，缓存永远停在原来的边界上，
+        // 「边播边缓存」实际只在纯网络路径生效。
+        let network_stream = tee_to_cache(
+            Box::pin(network_stream),
+            self.cache_handler.clone(),
+            key.to_string(),
+            (cached_end, end),
+        );
 
         // 创建合并的流
         let combined_stream = self.create_mixed_stream(

@@ -57,6 +57,13 @@ pub struct DiskStorage {
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct RangeMetadata {
     completed: Vec<(u64, u64)>,
+    /// 该元数据所属的缓存键。
+    ///
+    /// 文件路径是 key 的 MD5，不可逆，所以启动扫描无法从路径反推 key，
+    /// 而淘汰时要拿 key 去调 `delete`。`serde(default)` 让本字段出现之前
+    /// 写下的元数据仍能解析——它们只是不会进入启动簿记，下次写入时补上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
     /// 上游声明的资源总长度。`serde(default)` 保证旧元数据文件仍可读。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     total_size: Option<u64>,
@@ -140,6 +147,13 @@ impl DiskStorage {
 
         if !edit(&mut metadata) {
             return Ok(());
+        }
+
+        // 每次落盘都盖上 key。这是 `enumerate` 唯一的反查依据——路径里只有
+        // MD5，摘要不可逆。旧元数据文件没有这个字段，重启枚举时会被跳过，
+        // 等它下次被写入时补上。
+        if metadata.key.as_deref() != Some(key) {
+            metadata.key = Some(key.to_string());
         }
 
         self.write_metadata(key, &metadata).await?;
@@ -537,6 +551,74 @@ impl StorageEngine for DiskStorage {
         }
         Ok(())
     }
+
+    /// 扫两层哈希目录，从每个 `*.ranges.json` 里取回 key 和数据文件长度。
+    ///
+    /// 目录结构是 `<root>/<hash[0..2]>/<hash[2..4]>/<hash>`，哈希不可逆，
+    /// 所以 key 只能从元数据文件内部读回来（`RangeMetadata::key`）。
+    /// 该字段是后加的，旧缓存文件里没有——这类条目无法归属到某个 key，
+    /// 直接跳过：宁可少算一点用量，也不能编一个错的 key 出来，那会让
+    /// 清理任务去删一个不存在的条目、真正的旧文件却永远留在盘上。
+    async fn enumerate(&self) -> Result<Vec<(String, u64)>> {
+        let mut entries = Vec::new();
+
+        // 根目录不存在（冷启动、还没写过任何缓存）不是错误。
+        let mut level1 = match tokio_fs::read_dir(&self.config.root_path).await {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(entries),
+            Err(error) => return Err(error.into()),
+        };
+
+        while let Some(first) = level1.next_entry().await? {
+            if !first.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let mut level2 = match tokio_fs::read_dir(first.path()).await {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+
+            while let Some(second) = level2.next_entry().await? {
+                if !second.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let mut files = match tokio_fs::read_dir(second.path()).await {
+                    Ok(dir) => dir,
+                    Err(_) => continue,
+                };
+
+                while let Some(file) = files.next_entry().await? {
+                    let path = file.path();
+                    // 只认已 rename 到位的元数据文件，.tmp 是写入中途的残留。
+                    if !path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.ends_with(".ranges.json"))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
+                    let Some(metadata) = tokio_fs::read(&path)
+                        .await
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<RangeMetadata>(&bytes).ok())
+                    else {
+                        continue;
+                    };
+                    let Some(key) = metadata.key else { continue };
+
+                    // 用数据文件长度而不是 completed 的最大右端点：管理器的
+                    // 簿记记的就是「最高写入偏移」，稀疏文件下两者一致，
+                    // 而元数据可能记着尚未落盘的区间。
+                    let size = self.data_file_size(&key).await.unwrap_or(0);
+                    entries.push((key, size));
+                }
+            }
+        }
+
+        Ok(entries)
+    }
 }
 
 #[cfg(test)]
@@ -888,5 +970,61 @@ mod tests {
 
         assert!(storage.check_range("asset", (10, 12)).await.unwrap());
         assert!(!storage.check_range("asset", (10, 19)).await.unwrap());
+    }
+    /// `enumerate` 必须能把落盘的条目连同 key 一起报回来，
+    /// 这是重启后重建磁盘用量簿记的唯一依据。
+    #[tokio::test]
+    async fn enumerate_reports_keys_and_sizes_of_cached_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        storage
+            .write(
+                "first",
+                stream::iter([Ok(Bytes::from_static(b"abcdefghij"))]),
+                (0, 9),
+            )
+            .await
+            .unwrap();
+        storage
+            .write("second", stream::iter([Ok(Bytes::from_static(b"xy"))]), (0, 1))
+            .await
+            .unwrap();
+
+        let mut found = storage.enumerate().await.unwrap();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![("first".to_string(), 10), ("second".to_string(), 2)]
+        );
+    }
+
+    /// 冷启动（缓存目录还不存在）不是错误，只是没有条目。
+    #[tokio::test]
+    async fn enumerate_on_a_missing_cache_dir_is_empty_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(&dir.path().join("not-created-yet"));
+        assert!(storage.enumerate().await.unwrap().is_empty());
+    }
+
+    /// 加 `key` 字段之前写下的元数据没有 key，无法归属，必须跳过而不是猜。
+    #[tokio::test]
+    async fn enumerate_skips_legacy_metadata_without_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        storage
+            .write("asset", stream::iter([Ok(Bytes::from_static(b"ab"))]), (0, 1))
+            .await
+            .unwrap();
+
+        // 模拟旧格式：抹掉 key 字段后原样写回。
+        let path = storage.get_metadata_path("asset");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&tokio_fs::read(&path).await.unwrap()).unwrap();
+        metadata.as_object_mut().unwrap().remove("key");
+        tokio_fs::write(&path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(storage.enumerate().await.unwrap().is_empty());
     }
 }

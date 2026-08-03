@@ -1,5 +1,7 @@
 use crate::data_request::DataRequest;
-use crate::handlers::{CacheHandler, MixedSourceHandler, NetworkHandler, ResponseBuilder};
+use crate::handlers::{
+    tee_to_cache, CacheHandler, MixedSourceHandler, NetworkHandler, ResponseBuilder,
+};
 use crate::log_info;
 use crate::storage::{
     DiskStorage, StorageConfig, StorageManager, StorageManagerConfig, UpstreamMeta,
@@ -7,18 +9,10 @@ use crate::storage::{
 use crate::utils::error::Result;
 use crate::utils::network_policy::NetworkPolicy;
 use crate::utils::range::{parse_range, resolve_range};
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
 use hyper::header::{HeaderMap, CONTENT_TYPE};
 use hyper::{Body, Response};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-
-/// 转发通道容量（数据块个数）。上下游之间的缓冲窗口。
-const FORWARD_CHANNEL_CAPACITY: usize = 32;
 
 pub struct DataSourceManager {
     cache_handler: Arc<CacheHandler>,
@@ -33,6 +27,18 @@ impl DataSourceManager {
     }
 
     pub fn new_with_policy(cache_dir: PathBuf, policy: Arc<NetworkPolicy>) -> Self {
+        Self::with_config(cache_dir, policy, StorageManagerConfig::default())
+    }
+
+    /// 完整构造入口：缓存容量与清理周期由调用方决定。
+    ///
+    /// 宿主进程对「这个缓存目录最多能占多少盘」的要求各不相同，写死在
+    /// [`StorageManagerConfig::default`] 里的 1GB 只是一个能跑起来的默认值。
+    pub fn with_config(
+        cache_dir: PathBuf,
+        policy: Arc<NetworkPolicy>,
+        manager_config: StorageManagerConfig,
+    ) -> Self {
         log_info!("Cache", "初始化数据源管理器，缓存目录: {:?}", cache_dir);
 
         let storage_config = StorageConfig {
@@ -43,7 +49,6 @@ impl DataSourceManager {
             chunk_size: 64 * 1024,
         };
 
-        let manager_config = StorageManagerConfig::default();
         let storage_engine = DiskStorage::new(storage_config);
         let storage_manager = Arc::new(StorageManager::new(storage_engine, manager_config));
 
@@ -184,83 +189,21 @@ impl DataSourceManager {
             log_info!("Cache", "记录上游元数据失败: {}", error);
         }
 
-        let (client_tx, client_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
-        let (cache_tx, cache_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
-
-        tokio::spawn(forward_upstream(Box::pin(upstream), client_tx, cache_tx));
-
-        // 缓存写入独立后台运行。绝不能在返回响应前 await 它：
-        // 那样 hyper 还没开始 poll 响应体，转发任务就会被通道容量卡死。
-        let cache_handler = self.cache_handler.clone();
-        let cache_key = key.to_string();
-        tokio::spawn(async move {
-            let stream = Box::pin(ReceiverStream::new(cache_rx));
-            if let Err(error) = cache_handler
-                .write_stream(&cache_key, (start, end), stream)
-                .await
-            {
-                log_info!("Cache", "缓存写入失败: {}", error);
-            }
-        });
+        // 上游响应体 tee 给客户端和缓存写入器，两侧互不影响。
+        let client_stream = tee_to_cache(
+            Box::pin(upstream),
+            self.cache_handler.clone(),
+            key.to_string(),
+            (start, end),
+        );
 
         self.response_builder.build_partial_content_response(
-            Box::new(ReceiverStream::new(client_rx)),
+            Box::new(client_stream),
             headers,
             start,
             end,
             total_size,
         )
-    }
-}
-
-/// 把上游响应体同时喂给客户端和缓存写入器。
-///
-/// 两侧互不影响是这个函数的全部要点，四条约束：
-///
-/// 1. 用 `send().await` 而非 `try_send`——后者在通道满时失败并丢弃余下全部
-///    数据，客户端会收到截断的响应体，而缓存仍被标记为完整。
-/// 2. 客户端断开只停发客户端侧，缓存侧继续写完，避免留下半截缓存。
-/// 3. **缓存侧失败只停发缓存侧，客户端侧必须继续。** 之前这里是 `break`：
-///    磁盘写满、上游响应体超出请求范围等任何让写入任务提前退出的情况，都会
-///    连带把客户端的响应体截断在半路——而 `Content-Length` 已经按完整长度
-///    发出去了，播放器只会看到一个卡住的流，日志里也只有一行缓存写入失败。
-/// 4. 两侧都关了才 `break`。此时再读上游没有任何意义，提前 drop 掉响应体
-///    可以立刻释放连接。
-async fn forward_upstream(
-    mut upstream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
-    client_tx: mpsc::Sender<Result<Bytes>>,
-    cache_tx: mpsc::Sender<Result<Bytes>>,
-) {
-    let mut client_open = true;
-    let mut cache_open = true;
-
-    while let Some(item) = upstream.next().await {
-        match item {
-            Ok(chunk) => {
-                // Bytes 是引用计数的，clone 只加一次计数，不复制数据。
-                if cache_open && cache_tx.send(Ok(chunk.clone())).await.is_err() {
-                    log_info!("Cache", "缓存写入端已关闭，继续向客户端转发");
-                    cache_open = false;
-                }
-                if client_open && client_tx.send(Ok(chunk)).await.is_err() {
-                    log_info!("Cache", "客户端已断开，继续写入缓存");
-                    client_open = false;
-                }
-                if !client_open && !cache_open {
-                    break;
-                }
-            }
-            Err(error) => {
-                if cache_open {
-                    // 让写入端看到错误，它才不会把这段标记成完整区间。
-                    let _ = cache_tx.send(Err(error.clone())).await;
-                }
-                if client_open {
-                    let _ = client_tx.send(Err(error)).await;
-                }
-                break;
-            }
-        }
     }
 }
 
@@ -281,6 +224,7 @@ fn headers_from_meta(meta: &UpstreamMeta) -> HeaderMap {
 mod tests {
     use super::*;
     use crate::storage::StorageEngine;
+    use bytes::Bytes;
     use futures::stream;
     use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
 
@@ -288,103 +232,12 @@ mod tests {
         let request = hyper::Request::builder()
             .uri("/proxy/media")
             .header("X-Original-Url", url)
-            .header("X-Cache-User-Id", "user-1")
             .header("X-Cache-Asset-Id", asset)
             .header("X-Cache-Asset-Revision", "1")
             .header(hyper::header::RANGE, range)
             .body(Body::empty())
             .unwrap();
         DataRequest::new(&request).unwrap()
-    }
-
-    /// 收集通道里剩下的全部数据，遇错即停。
-    async fn drain(mut rx: mpsc::Receiver<Result<Bytes>>) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        while let Some(item) = rx.recv().await {
-            bytes.extend_from_slice(&item?);
-        }
-        Ok(bytes)
-    }
-
-    fn upstream_of(
-        chunks: Vec<Result<Bytes>>,
-    ) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
-        Box::pin(stream::iter(chunks))
-    }
-
-    #[tokio::test]
-    async fn forwards_the_whole_body_to_both_sides() {
-        let (client_tx, client_rx) = mpsc::channel(4);
-        let (cache_tx, cache_rx) = mpsc::channel(4);
-        let upstream = upstream_of(vec![
-            Ok(Bytes::from_static(b"abc")),
-            Ok(Bytes::from_static(b"de")),
-        ]);
-
-        let forwarding = tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
-        let (client, cache) = tokio::join!(drain(client_rx), drain(cache_rx));
-        forwarding.await.unwrap();
-
-        assert_eq!(client.unwrap(), b"abcde");
-        assert_eq!(cache.unwrap(), b"abcde");
-    }
-
-    /// 缓存写入器提前退出时，客户端必须仍然收到完整响应体。
-    ///
-    /// 这是修掉的那个 bug：原实现在 `cache_tx.send` 失败时 `break`，于是磁盘
-    /// 写满或上游响应体超出请求范围时，客户端拿到的是一个长度短于
-    /// `Content-Length` 的响应体——播放器表现为卡死，日志里只有一行缓存失败。
-    #[tokio::test]
-    async fn cache_writer_failure_does_not_truncate_the_client_body() {
-        let (client_tx, client_rx) = mpsc::channel(4);
-        let (cache_tx, cache_rx) = mpsc::channel(4);
-        drop(cache_rx);
-        let upstream = upstream_of(vec![
-            Ok(Bytes::from_static(b"abc")),
-            Ok(Bytes::from_static(b"de")),
-        ]);
-
-        let forwarding = tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
-        let client = drain(client_rx).await;
-        forwarding.await.unwrap();
-
-        assert_eq!(client.unwrap(), b"abcde");
-    }
-
-    /// 客户端断开时缓存侧必须写完，否则会留下半截缓存。
-    #[tokio::test]
-    async fn client_disconnect_does_not_truncate_the_cached_body() {
-        let (client_tx, client_rx) = mpsc::channel(4);
-        let (cache_tx, cache_rx) = mpsc::channel(4);
-        drop(client_rx);
-        let upstream = upstream_of(vec![
-            Ok(Bytes::from_static(b"abc")),
-            Ok(Bytes::from_static(b"de")),
-        ]);
-
-        let forwarding = tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
-        let cache = drain(cache_rx).await;
-        forwarding.await.unwrap();
-
-        assert_eq!(cache.unwrap(), b"abcde");
-    }
-
-    /// 上游报错必须同时传达给两侧：缓存侧靠它避免把半截数据标记成完整区间。
-    #[tokio::test]
-    async fn upstream_error_reaches_both_sides() {
-        let (client_tx, client_rx) = mpsc::channel(4);
-        let (cache_tx, cache_rx) = mpsc::channel(4);
-        let upstream = upstream_of(vec![
-            Ok(Bytes::from_static(b"abc")),
-            Err(crate::utils::error::ProxyError::Network("连接中断".to_string())),
-        ]);
-
-        let forwarding = tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
-        let (client, cache) = tokio::join!(drain(client_rx), drain(cache_rx));
-        forwarding.await.unwrap();
-
-        assert!(client.is_err());
-        assert!(cache.is_err());
     }
 
     fn disk(root: &std::path::Path) -> DiskStorage {
