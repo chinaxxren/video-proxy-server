@@ -5,7 +5,9 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
 
 /// 转发通道容量（数据块个数）。上下游之间的缓冲窗口。
@@ -42,18 +44,29 @@ pub fn tee_to_cache(
     ReceiverStream::new(client_rx)
 }
 
+/// 缓存侧被阻塞时最多等多久。超过就放弃缓存，只喂客户端。
+///
+/// 客户端的播放体验优先于缓存完整性：这段时间内播放器拿不到任何字节。
+/// 1 秒足够熬过一次磁盘 flush，又不至于让播放器察觉到明显卡顿。
+const CACHE_BACKPRESSURE_GRACE: Duration = Duration::from_secs(1);
+
 /// 把上游响应体同时喂给客户端和缓存写入器。
 ///
-/// 两侧互不影响是这个函数的全部要点，四条约束：
+/// 两侧互不影响是这个函数的全部要点：
 ///
-/// 1. 用 `send().await` 而非 `try_send`——后者在通道满时失败并丢弃余下全部
-///    数据，客户端会收到截断的响应体，而缓存仍被标记为完整。
+/// 1. 客户端侧用 `send().await`，绝不用 `try_send`——后者在通道满时失败，
+///    客户端会收到截断的响应体，而 `Content-Length` 已按完整长度发出。
 /// 2. 客户端断开只停发客户端侧，缓存侧继续写完，避免留下半截缓存。
 /// 3. **缓存侧失败只停发缓存侧，客户端侧必须继续。** 之前这里是 `break`：
 ///    磁盘写满、上游响应体超出请求范围等任何让写入任务提前退出的情况，都会
-///    连带把客户端的响应体截断在半路——而 `Content-Length` 已经按完整长度
-///    发出去了，播放器只会看到一个卡住的流，日志里也只有一行缓存写入失败。
-/// 4. 两侧都关了才 `break`。此时再读上游没有任何意义，提前 drop 掉响应体
+///    连带把客户端的响应体截断在半路——播放器只会看到一个卡住的流。
+/// 4. **缓存侧不能无限期阻塞客户端。** 发送顺序是先缓存后客户端，而
+///    `DiskStorage::write` 在整个流式写入期间持有该 key 的写锁。同一资源的
+///    并发请求（播放器 seek 就会产生）里，后到的那个缓存写入任务卡在抢锁上，
+///    `cache_rx` 攒满通道容量后 `cache_tx.send().await` 再也不返回——下面那行
+///    喂客户端的代码根本执行不到，响应就此挂死。所以缓存侧只给一个有界的
+///    宽限期，超时即放弃：已发出的前缀仍会落盘，缓存下次继续往前推进。
+/// 5. 两侧都关了才 `break`。此时再读上游没有任何意义，提前 drop 掉响应体
 ///    可以立刻释放连接。
 pub async fn forward_upstream(
     mut upstream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
@@ -67,8 +80,7 @@ pub async fn forward_upstream(
         match item {
             Ok(chunk) => {
                 // Bytes 是引用计数的，clone 只加一次计数，不复制数据。
-                if cache_open && cache_tx.send(Ok(chunk.clone())).await.is_err() {
-                    log_info!("Cache", "缓存写入端已关闭，继续向客户端转发");
+                if cache_open && !send_to_cache(&cache_tx, Ok(chunk.clone())).await {
                     cache_open = false;
                 }
                 if client_open && client_tx.send(Ok(chunk)).await.is_err() {
@@ -82,13 +94,45 @@ pub async fn forward_upstream(
             Err(error) => {
                 if cache_open {
                     // 让写入端看到错误，它才不会把这段标记成完整区间。
-                    let _ = cache_tx.send(Err(error.clone())).await;
+                    send_to_cache(&cache_tx, Err(error.clone())).await;
                 }
                 if client_open {
                     let _ = client_tx.send(Err(error)).await;
                 }
                 break;
             }
+        }
+    }
+}
+
+/// 往缓存侧发一块数据，返回「缓存侧是否还可用」。
+///
+/// 先 `try_send`：通道有空位时这是纯同步操作，不碰定时器。只有真的满了才
+/// 退到带超时的 `send`，避免在正常路径上为每块数据都创建一个 timer。
+async fn send_to_cache(cache_tx: &mpsc::Sender<Result<Bytes>>, item: Result<Bytes>) -> bool {
+    let item = match cache_tx.try_send(item) {
+        Ok(()) => return true,
+        Err(mpsc::error::TrySendError::Full(item)) => item,
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            log_info!("Cache", "缓存写入端已关闭，继续向客户端转发");
+            return false;
+        }
+    };
+
+    match timeout(CACHE_BACKPRESSURE_GRACE, cache_tx.send(item)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => {
+            log_info!("Cache", "缓存写入端已关闭，继续向客户端转发");
+            false
+        }
+        Err(_) => {
+            // 放弃缓存而不是拖着客户端一起等。已送达的前缀照常落盘。
+            log_info!(
+                "Cache",
+                "缓存写入端阻塞超过 {:?}，放弃本次缓存以免拖住客户端",
+                CACHE_BACKPRESSURE_GRACE
+            );
+            false
         }
     }
 }
@@ -188,6 +232,35 @@ mod tests {
 
         assert!(client.is_err());
         assert!(cache.is_err());
+    }
+
+    /// 缓存写入端暂时不消费时，客户端不能被无限期卡住。
+    ///
+    /// 触发条件很日常：同一 key 的第二个请求（播放器 seek 就会产生）让缓存
+    /// 写入任务卡在抢 `DiskStorage` 的写锁上——那把锁在整个流式写入期间都被
+    /// 前一个请求持有。于是 `cache_rx` 不再被消费，而发送顺序是「先缓存、
+    /// 后客户端」且两侧都是 `send().await`：缓存通道一满，`cache_tx.send()`
+    /// 就再也不返回，下面那行发给客户端的代码根本执行不到。
+    ///
+    /// 客户端表现为响应体停在半路且 `Content-Length` 已按完整长度发出——
+    /// 和之前修掉的截断 bug 症状完全一样，只是这次是卡住而不是提前结束。
+    #[tokio::test]
+    async fn a_stalled_cache_writer_does_not_stall_the_client() {
+        let (client_tx, client_rx) = mpsc::channel(64);
+        // 持有 rx 但从不消费，模拟卡在抢写锁上的写入任务。
+        let (cache_tx, _cache_rx) = mpsc::channel(2);
+        let upstream = upstream_of(
+            (0..10)
+                .map(|_| Ok(Bytes::from_static(b"chunk")))
+                .collect::<Vec<_>>(),
+        );
+
+        tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
+
+        let client = tokio::time::timeout(std::time::Duration::from_secs(2), drain(client_rx))
+            .await
+            .expect("缓存侧不消费时客户端被卡死");
+        assert_eq!(client.unwrap().len(), 50);
     }
 
     /// `tee_to_cache` 必须真的把数据落盘，而且客户端拿到的是同一份字节。
