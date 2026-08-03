@@ -5,18 +5,13 @@ use futures::Stream;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Body, HeaderMap, Response};
 
-/// 逐跳头（RFC 7230 6.1）与由本层重新计算的头，均不得从上游透传给客户端。
-const BLOCKED_HEADERS: [HeaderName; 10] = [
-    hyper::header::CONNECTION,
-    hyper::header::TRANSFER_ENCODING,
-    hyper::header::CONTENT_ENCODING,
-    hyper::header::CONTENT_LENGTH,
-    hyper::header::CONTENT_RANGE,
-    hyper::header::TRAILER,
-    hyper::header::TE,
-    hyper::header::UPGRADE,
-    hyper::header::PROXY_AUTHENTICATE,
-    hyper::header::PROXY_AUTHORIZATION,
+/// 允许透传给客户端的安全响应头。范围和长度由代理重新计算，不在此列表中。
+pub(crate) const ALLOWED_UPSTREAM_HEADERS: [HeaderName; 5] = [
+    hyper::header::CONTENT_TYPE,
+    hyper::header::CACHE_CONTROL,
+    hyper::header::ACCEPT_RANGES,
+    hyper::header::ETAG,
+    hyper::header::LAST_MODIFIED,
 ];
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -63,7 +58,10 @@ impl ResponseBuilder {
         {
             let out = response.headers_mut();
             for (key, value) in headers.iter() {
-                if BLOCKED_HEADERS.iter().any(|blocked| blocked == key) {
+                if !ALLOWED_UPSTREAM_HEADERS
+                    .iter()
+                    .any(|allowed| allowed == key)
+                {
                     continue;
                 }
                 out.insert(key, value.clone());
@@ -80,8 +78,8 @@ impl ResponseBuilder {
 mod tests {
     use super::*;
     use hyper::header::{
-        ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE,
-        TRANSFER_ENCODING,
+        ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION,
+        SET_COOKIE, TRANSFER_ENCODING,
     };
 
     fn body() -> Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> {
@@ -128,6 +126,27 @@ mod tests {
             .unwrap();
         assert_eq!(response.headers()[CONTENT_RANGE], "bytes 0-5/*");
         assert_eq!(response.headers()[CONTENT_LENGTH], "6");
+    }
+
+    #[test]
+    fn drops_sensitive_and_redirect_upstream_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, "session=secret".parse().unwrap());
+        headers.insert(
+            LOCATION,
+            "https://signed.example/file?token=secret".parse().unwrap(),
+        );
+        headers.insert("x-upstream-token", "secret".parse().unwrap());
+        headers.insert(CONTENT_TYPE, "audio/mpeg".parse().unwrap());
+
+        let response = ResponseBuilder::new()
+            .build_partial_content_response(body(), headers, 0, 5, 6)
+            .unwrap();
+
+        assert!(!response.headers().contains_key(SET_COOKIE));
+        assert!(!response.headers().contains_key(LOCATION));
+        assert!(!response.headers().contains_key("x-upstream-token"));
+        assert_eq!(response.headers()[CONTENT_TYPE], "audio/mpeg");
     }
 
     #[test]

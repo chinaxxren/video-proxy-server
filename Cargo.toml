@@ -2,10 +2,33 @@
 name = "proxy-server"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
+# feature 按实际用到的收窄，不用 "full"。
+#
+# `tokio = ["full"]` 会带上 process、signal、io-std 等本项目完全不碰的模块，
+# `hyper = ["full"]` 同理。对桌面构建只是多编一会儿，但这个 crate 要往
+# iOS/Android 上搬的话，包体积和构建时间都是直接成本。
 [dependencies]
-hyper = { version = "0.14", features = ["full"] }
-tokio = { version = "1.0", features = ["full"] }
+hyper = { version = "0.14", features = [
+    "client",
+    "server",
+    "http1",
+    "http2",
+    # Body 要当 Stream 用（handlers/network.rs 直接 map 它）。
+    "stream",
+    "runtime",
+    "tcp",
+] }
+tokio = { version = "1.0", features = [
+    "fs",
+    "io-util",
+    "net",
+    "sync",
+    "time",
+    "rt-multi-thread",
+    "macros",
+] }
 futures = "0.3"
 bytes = "1.0"
 lazy_static = "1.4"
@@ -16,16 +39,14 @@ serde_json = "1.0"
 url = "2.2"
 urlencoding = "2.1.0"
 m3u8-rs = "5.0"
-regex = "1.5"
 async-trait = "0.1"
-reqwest = "0.11"
-async-stream = "0.3"
 md5 = "0.7"
 tokio-stream = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["full", "test-util"] }
-hyper = { version = "0.14", features = ["full"] }
+# test-util 提供 tokio::time::pause/advance，TTL 相关的测试靠它免去真实等待。
+tokio = { version = "1.0", features = ["test-util"] }
 tempfile = "3"
-
-
+# 只有 examples 在用（hls_test、mixed_source_test），不该进主依赖：
+# 它自己会再拖一份 native-tls 和一整套 HTTP 栈。
+reqwest = "0.11"

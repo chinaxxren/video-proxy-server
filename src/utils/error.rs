@@ -17,6 +17,7 @@ pub enum ProxyError {
     Storage(String),
     Parse(String),
     IO(String),
+    MethodNotAllowed,
 }
 
 impl fmt::Display for ProxyError {
@@ -30,6 +31,7 @@ impl fmt::Display for ProxyError {
             ProxyError::Storage(msg) => write!(f, "Storage error: {}", msg),
             ProxyError::Parse(msg) => write!(f, "Parse error: {}", msg),
             ProxyError::IO(msg) => write!(f, "IO error: {}", msg),
+            ProxyError::MethodNotAllowed => write!(f, "Method not allowed"),
         }
     }
 }
@@ -56,6 +58,7 @@ impl ProxyError {
                 hyper::StatusCode::INTERNAL_SERVER_ERROR
             }
             ProxyError::Parse(_) => hyper::StatusCode::BAD_GATEWAY,
+            ProxyError::MethodNotAllowed => hyper::StatusCode::METHOD_NOT_ALLOWED,
         }
     }
 
@@ -68,6 +71,7 @@ impl ProxyError {
             ProxyError::Request(_) => "Bad request",
             ProxyError::Network(_) | ProxyError::Parse(_) => "Upstream error",
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => "Internal error",
+            ProxyError::MethodNotAllowed => "Method not allowed",
         }
     }
 }
@@ -163,6 +167,7 @@ mod tests {
                 500,
                 "Internal error",
             ),
+            (ProxyError::MethodNotAllowed, 405, "Method not allowed"),
         ];
 
         for (error, status, message) in cases {

@@ -10,14 +10,16 @@ pub mod server;
 pub mod hls;
 pub mod request_handler;
 
+/// 写一行 INFO 日志。调用语法与之前完全一致。
+///
+/// 展开成 `logger::info($tag, format_args!(...))`，而不是原先的
+/// `println!("...{}", format!(...))`。差别有两处：消息不再先落成一个临时
+/// String（`format_args!` 只持有实参引用，格式化推迟到真正写出去时），
+/// 以及日志关闭时整个格式化过程被跳过。
 #[macro_export]
 macro_rules! log_info {
     ($tag:expr, $($arg:tt)*) => {
-        println!("[{} INFO {}] {}", 
-            chrono::Local::now().format("%H:%M:%S"),
-            $tag,
-            format!($($arg)*)
-        )
+        $crate::utils::logger::info($tag, format_args!($($arg)*))
     };
 }
 

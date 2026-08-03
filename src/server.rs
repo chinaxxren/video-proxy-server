@@ -63,8 +63,12 @@ impl ProxyServer {
                                 // 详细原因只进日志；响应体只给类别，避免回显
                                 // 缓存路径、上游 URL 等内部信息。
                                 log_info!("Server", "请求失败: {}", e);
-                                Ok(hyper::Response::builder()
-                                    .status(e.status_code())
+                                let mut builder =
+                                    hyper::Response::builder().status(e.status_code());
+                                if matches!(e, ProxyError::MethodNotAllowed) {
+                                    builder = builder.header(hyper::header::ALLOW, "GET");
+                                }
+                                Ok(builder
                                     .body(hyper::Body::from(e.public_message()))
                                     .unwrap_or_else(|_| {
                                         let mut fallback =

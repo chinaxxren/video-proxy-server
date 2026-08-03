@@ -159,4 +159,6 @@ git diff --check
 
 ## License
 
-[MIT](LICENSE)
+Licensed under the [Apache License 2.0](LICENSE). You may use, modify, and
+distribute this project, including for commercial purposes, subject to the
+terms of the license.

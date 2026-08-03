@@ -4,6 +4,9 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), ProxyError> {
+    // 日志开关：`PROXY_LOG=0` 关掉。放在最前面，后面所有 log_info! 才受它管。
+    proxy_server::utils::logger::init_from_env();
+
     // 解析命令行参数
     let args: Vec<String> = env::args().collect();
 

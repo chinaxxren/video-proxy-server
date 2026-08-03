@@ -1,13 +1,16 @@
 use bytes::Bytes;
 use futures::Stream;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use super::{StorageEngine, UpstreamMeta};
 use crate::log_info;
 use crate::utils::error::Result;
+
+const MUTATION_LOCK_SHARDS: usize = 64;
 
 #[derive(Clone)]
 pub struct StorageManagerConfig {
@@ -21,6 +24,7 @@ mod tests {
     use super::*;
     use crate::utils::error::ProxyError;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     struct DeleteTrackingStorage {
         deleted: Arc<AtomicBool>,
@@ -39,14 +43,26 @@ mod tests {
             Ok(total)
         }
 
-        async fn read(&self, _key: &str, _range: (u64, u64)) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> {
+        async fn read(
+            &self,
+            _key: &str,
+            _range: (u64, u64),
+        ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> {
             Err(ProxyError::Storage("not implemented in test".to_string()))
         }
 
-        async fn get_size(&self, _key: &str) -> Result<Option<u64>> { Ok(None) }
-        async fn check_range(&self, _key: &str, _range: (u64, u64)) -> Result<bool> { Ok(false) }
-        async fn record_upstream_meta(&self, _key: &str, _meta: &UpstreamMeta) -> Result<()> { Ok(()) }
-        async fn upstream_meta(&self, _key: &str) -> Result<UpstreamMeta> { Ok(UpstreamMeta::default()) }
+        async fn get_size(&self, _key: &str) -> Result<Option<u64>> {
+            Ok(None)
+        }
+        async fn check_range(&self, _key: &str, _range: (u64, u64)) -> Result<bool> {
+            Ok(false)
+        }
+        async fn record_upstream_meta(&self, _key: &str, _meta: &UpstreamMeta) -> Result<()> {
+            Ok(())
+        }
+        async fn upstream_meta(&self, _key: &str) -> Result<UpstreamMeta> {
+            Ok(UpstreamMeta::default())
+        }
 
         async fn delete(&self, _key: &str) -> Result<()> {
             self.deleted.store(true, Ordering::SeqCst);
@@ -58,20 +74,130 @@ mod tests {
     async fn cleanup_uses_storage_delete() {
         let deleted = Arc::new(AtomicBool::new(false));
         let manager = StorageManager::new(
-            DeleteTrackingStorage { deleted: deleted.clone() },
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
             StorageManagerConfig {
                 max_cache_size: 0,
                 max_file_count: 0,
                 cleanup_interval: Duration::from_millis(5),
             },
         );
-        manager.write("asset", futures::stream::iter([Ok(Bytes::from_static(b"data"))]), (0, 3)).await.unwrap();
+        manager
+            .write(
+                "asset",
+                futures::stream::iter([Ok(Bytes::from_static(b"data"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !deleted.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("cleanup did not delete the cache entry");
+        })
+        .await
+        .expect("cleanup did not delete the cache entry");
+    }
+
+    struct CoordinatedStorage {
+        data: Arc<Mutex<Vec<u8>>>,
+        delete_started: Arc<Notify>,
+        allow_delete: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageEngine for CoordinatedStorage {
+        async fn write<S>(&self, _key: &str, mut stream: S, _range: (u64, u64)) -> Result<u64>
+        where
+            S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
+        {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+                bytes.extend_from_slice(&chunk?);
+            }
+            let len = bytes.len() as u64;
+            *self.data.lock().await = bytes;
+            Ok(len)
+        }
+
+        async fn read(
+            &self,
+            _key: &str,
+            _range: (u64, u64),
+        ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> {
+            let bytes = self.data.lock().await.clone();
+            Ok(Box::new(futures::stream::iter([Ok(Bytes::from(bytes))])))
+        }
+
+        async fn get_size(&self, _key: &str) -> Result<Option<u64>> {
+            Ok(None)
+        }
+        async fn check_range(&self, _key: &str, _range: (u64, u64)) -> Result<bool> {
+            Ok(true)
+        }
+        async fn record_upstream_meta(&self, _key: &str, _meta: &UpstreamMeta) -> Result<()> {
+            Ok(())
+        }
+        async fn upstream_meta(&self, _key: &str) -> Result<UpstreamMeta> {
+            Ok(UpstreamMeta::default())
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            self.delete_started.notify_one();
+            self.allow_delete.notified().await;
+            self.data.lock().await.clear();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn rewrite_waits_for_cleanup_delete_and_survives() {
+        let data = Arc::new(Mutex::new(Vec::new()));
+        let delete_started = Arc::new(Notify::new());
+        let allow_delete = Arc::new(Notify::new());
+        let manager = Arc::new(StorageManager::new(
+            CoordinatedStorage {
+                data: data.clone(),
+                delete_started: delete_started.clone(),
+                allow_delete: allow_delete.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 0,
+                max_file_count: 0,
+                cleanup_interval: Duration::from_millis(5),
+            },
+        ));
+        manager
+            .write(
+                "asset",
+                futures::stream::iter([Ok(Bytes::from_static(b"old"))]),
+                (0, 2),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), delete_started.notified())
+            .await
+            .expect("cleanup did not begin deletion");
+        let writer = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .write(
+                        "asset",
+                        futures::stream::iter([Ok(Bytes::from_static(b"new"))]),
+                        (0, 2),
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        allow_delete.notify_one();
+        writer.await.unwrap().unwrap();
+
+        assert_eq!(&*data.lock().await, b"new");
     }
 }
 
@@ -97,6 +223,16 @@ pub struct StorageManager<E> {
     config: StorageManagerConfig,
     cache_entries: Arc<RwLock<HashMap<String, CacheEntry>>>,
     total_size: Arc<RwLock<u64>>,
+    mutation_locks: Arc<Vec<Mutex<()>>>,
+    cleanup_shutdown: Arc<Notify>,
+}
+
+impl<E> Drop for StorageManager<E> {
+    fn drop(&mut self) {
+        // notify_one stores a permit if the task has not reached notified() yet,
+        // so shutdown cannot be lost during construction or between timer ticks.
+        self.cleanup_shutdown.notify_one();
+    }
 }
 
 impl<E: StorageEngine + 'static> StorageManager<E> {
@@ -106,6 +242,8 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
             config,
             cache_entries: Arc::new(RwLock::new(HashMap::new())),
             total_size: Arc::new(RwLock::new(0)),
+            mutation_locks: Arc::new((0..MUTATION_LOCK_SHARDS).map(|_| Mutex::new(())).collect()),
+            cleanup_shutdown: Arc::new(Notify::new()),
         };
 
         // 启动清理任务
@@ -118,10 +256,15 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
         let total_size = self.total_size.clone();
         let config = self.config.clone();
         let engine = self.engine.clone();
+        let mutation_locks = self.mutation_locks.clone();
+        let cleanup_shutdown = self.cleanup_shutdown.clone();
 
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(config.cleanup_interval).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(config.cleanup_interval) => {}
+                    _ = cleanup_shutdown.notified() => break,
+                }
 
                 // 阶段一：持锁挑选淘汰对象。只读取簿记，不做 IO。
                 let to_remove = {
@@ -153,24 +296,32 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     victims
                 };
 
-                // 阶段二：不持锁做删除 IO。tokio 的 RwLock 是写优先的，
-                // 持写锁跨 await 会让清理期间所有请求路径的读操作排队。
-                let mut deleted = Vec::new();
+                // 阶段二：同 key 的淘汰与写入共用变更锁。不同 key 分布到固定
+                // 数量的锁分片，避免全局串行，也避免锁表随缓存键无界增长。
                 for entry in to_remove {
-                    match engine.delete(&entry.key).await {
-                        Ok(()) => deleted.push(entry.key),
-                        Err(e) => log_info!("Cache", "清理缓存条目失败 {}: {}", entry.key, e),
-                    }
-                }
-
-                // 阶段三：重新持锁更新簿记。此时才读取条目的当前大小，
-                // 避免用阶段一的快照值去减一个可能已被并发写扩展过的条目。
-                if !deleted.is_empty() {
+                    let shard = mutation_shard(&entry.key);
+                    let _mutation = mutation_locks[shard].lock().await;
                     let mut entries = cache_entries.write().await;
                     let mut total = total_size.write().await;
-                    for key in deleted {
-                        if let Some(removed) = entries.remove(&key) {
-                            *total = total.saturating_sub(removed.total_size);
+
+                    // 选中后若被读取或重写，last_access 会变化；该快照已经过期，
+                    // 不能删除刚写入的新内容。
+                    let unchanged = entries
+                        .get(&entry.key)
+                        .map(|current| current.last_access == entry.last_access)
+                        .unwrap_or(false);
+                    if !unchanged {
+                        continue;
+                    }
+
+                    match engine.delete(&entry.key).await {
+                        Ok(()) => {
+                            if let Some(removed) = entries.remove(&entry.key) {
+                                *total = total.saturating_sub(removed.total_size);
+                            }
+                        }
+                        Err(e) => {
+                            log_info!("Cache", "清理缓存条目失败 {}: {}", entry.key, e)
                         }
                     }
                 }
@@ -182,6 +333,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
     where
         S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
     {
+        let _mutation = self.mutation_locks[mutation_shard(key)].lock().await;
         let bytes_written = self.engine.write(key, stream, range).await?;
 
         // 更新缓存信息
@@ -194,7 +346,9 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
             // 更新文件的总大小（如果新写入的范围扩展了文件）
             if end_pos > entry.total_size {
                 // saturating：记账漂移时宁可低估，不要在减法上 panic。
-                *total = total.saturating_sub(entry.total_size).saturating_add(end_pos);
+                *total = total
+                    .saturating_sub(entry.total_size)
+                    .saturating_add(end_pos);
                 entry.total_size = end_pos;
             }
             entry.last_access = SystemTime::now();
@@ -251,4 +405,10 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
     pub async fn upstream_meta(&self, key: &str) -> Result<UpstreamMeta> {
         self.engine.upstream_meta(key).await
     }
+}
+
+fn mutation_shard(key: &str) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % MUTATION_LOCK_SHARDS
 }

@@ -245,7 +245,9 @@ fn merge_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
     {
         Some(touching) => (
             touching[0].0.min(start),
-            touching.iter().fold(end, |widest, range| widest.max(range.1)),
+            touching
+                .iter()
+                .fold(end, |widest, range| widest.max(range.1)),
         ),
         None => (start, end),
     };
@@ -409,7 +411,10 @@ impl StorageEngine for DiskStorage {
                 // take 限制这一轮最多读 to_read 字节：read_buf 会尽量填满备用
                 // 容量，而 with_capacity 给出的容量可能大于 to_read，不限制就会
                 // 越过请求区间的右边界。
-                let n = (&mut file).take(to_read as u64).read_buf(&mut buffer).await?;
+                let n = (&mut file)
+                    .take(to_read as u64)
+                    .read_buf(&mut buffer)
+                    .await?;
                 if n == 0 {
                     // check_range 已承诺该区间完整，读到 EOF 说明数据文件被
                     // 外部截断。静默返回 None 会让响应体短于 Content-Length，
@@ -441,7 +446,9 @@ impl StorageEngine for DiskStorage {
     async fn check_range(&self, key: &str, range: (u64, u64)) -> Result<bool> {
         let requested_end = if range.1 == OPEN_ENDED {
             // 开区间：优先用已知总长度收敛，否则退回文件长度。
-            let known_total = self.with_metadata(key, |metadata| metadata.total_size).await;
+            let known_total = self
+                .with_metadata(key, |metadata| metadata.total_size)
+                .await;
             let known_end = match known_total {
                 Some(total) => total.checked_sub(1),
                 None => match self.data_file_size(key).await {
@@ -514,7 +521,8 @@ impl StorageEngine for DiskStorage {
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let _guard = self.metadata_lock_for(key).lock().await;
+        let _write_guard = self.write_lock_for(key).lock().await;
+        let _metadata_guard = self.metadata_lock_for(key).lock().await;
 
         // 先摘掉内存索引再删文件。反过来的话，两者之间的窗口里有请求进来，
         // 会从索引里读到「已缓存」，而文件已经没了。

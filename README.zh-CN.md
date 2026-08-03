@@ -159,4 +159,5 @@ git diff --check
 
 ## 许可证
 
-[MIT](LICENSE)
+本项目采用 [Apache License 2.0](LICENSE) 开源协议。在遵守协议条款的前提下，
+可自由使用、修改和分发，包括商业用途。

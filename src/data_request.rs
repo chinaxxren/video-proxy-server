@@ -69,7 +69,7 @@ impl DataRequest {
         // 提前解析不改变错误行为：`build_cache_key` 本来就无条件调
         // `canonical_upstream_identity`，URL 不合法时同样是在这个位置返回错误。
         let parsed =
-            Url::parse(&url).map_err(|_| ProxyError::Request(format!("无效的上游 URL: {}", url)))?;
+            Url::parse(&url).map_err(|_| ProxyError::Request("无效的上游 URL".to_string()))?;
 
         let cache_key = Self::build_cache_key(&parsed, req.headers())?;
 
@@ -311,6 +311,22 @@ mod tests {
             .unwrap();
 
         assert!(DataRequest::new(&request).is_err());
+    }
+
+    #[test]
+    fn malformed_signed_url_is_not_exposed_in_error_text() {
+        let request = Request::builder()
+            .uri("/proxy/not-a-url%3Ftoken%3Dsuper-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let error = match DataRequest::new(&request) {
+            Ok(_) => panic!("malformed upstream URL was accepted"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(!text.contains("super-secret"));
+        assert!(!text.contains("token="));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::data_source::net_source::{shared_client, SharedClient};
 use crate::data_source::NetSource;
+use crate::handlers::response::ALLOWED_UPSTREAM_HEADERS;
 use crate::log_info;
 use crate::storage::UpstreamMeta;
 use crate::utils::error::{ProxyError, Result};
@@ -86,7 +87,10 @@ impl NetworkHandler {
     pub fn extract_headers(&self, resp: &Response<Body>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         for (key, value) in resp.headers().iter() {
-            if key != hyper::header::CONTENT_RANGE && key != hyper::header::CONTENT_LENGTH {
+            if ALLOWED_UPSTREAM_HEADERS
+                .iter()
+                .any(|allowed| allowed == key)
+            {
                 headers.insert(key, value.clone());
             }
         }
@@ -107,7 +111,7 @@ fn total_size_from_content_range(resp: &Response<Body>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE};
+    use hyper::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, LOCATION, SET_COOKIE};
 
     #[test]
     fn extracts_upstream_headers_without_range_specific_values() {
@@ -116,6 +120,8 @@ mod tests {
             .header(CONTENT_LENGTH, "10")
             .header(CONTENT_TYPE, "audio/mp4")
             .header(CACHE_CONTROL, "private")
+            .header(SET_COOKIE, "session=secret")
+            .header(LOCATION, "https://example.test/redirect")
             .body(Body::empty())
             .unwrap();
         let handler = NetworkHandler::new(Arc::new(NetworkPolicy::deny_all()));
@@ -123,6 +129,8 @@ mod tests {
         let headers = handler.extract_headers(&response);
         assert!(!headers.contains_key(CONTENT_RANGE));
         assert!(!headers.contains_key(CONTENT_LENGTH));
+        assert!(!headers.contains_key(SET_COOKIE));
+        assert!(!headers.contains_key(LOCATION));
         assert_eq!(headers[CONTENT_TYPE], "audio/mp4");
         assert_eq!(headers[CACHE_CONTROL], "private");
     }
@@ -136,7 +144,10 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(total_size_from_content_range(&with_range("bytes 0-9/100")), 100);
+        assert_eq!(
+            total_size_from_content_range(&with_range("bytes 0-9/100")),
+            100
+        );
         // `*` 表示上游不知道总长度，必须当作未知而不是 0 长度资源。
         assert_eq!(total_size_from_content_range(&with_range("bytes 0-9/*")), 0);
         assert_eq!(
