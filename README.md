@@ -32,7 +32,72 @@ cargo build --locked
 cargo test --locked
 ```
 
-The current suite covers stable cache keys, sparse-range correctness, range metadata persistence, physical deletion, cleanup behavior, block-lock regression, and core network-policy rejection cases.
+The unit suite covers stable cache keys, sparse-range correctness, range metadata
+persistence, physical deletion, cleanup behavior, block-lock regression, tee
+fan-out, startup index warm-up, and core network-policy rejection cases.
+
+### End-to-end HTTP tests
+
+`tests/end_to_end.rs` drives the real server over real HTTP against a local
+origin that speaks `Range`. It needs the `allow-private-upstream` feature,
+because the origin binds `127.0.0.1` and the production policy rejects
+loopback upstreams:
+
+```bash
+cargo test --locked --features allow-private-upstream
+```
+
+It asserts served-then-cached behavior, cache hits for subranges, mixed
+cache-plus-network stitching (including the write-back of the network part),
+open-ended ranges, concurrent identical ranges, disjoint seeks, rejection of an
+origin that ignores `Range`, cache survival across a restart, and that error
+bodies leak neither the upstream URL nor the cache path.
+
+It also covers the acceptance items from
+[docs/mobile-client-integration.md](docs/mobile-client-integration.md): a
+rotated signed URL hits the same cache entry (query is not part of the cache
+identity), a cached range still replays after the origin goes offline, two
+players asking for overlapping ranges each get correct bytes, an ExoPlayer-style
+sequence of open-ended seeks returns correct bytes and `Content-Range` at every
+step, and a client that disconnects mid-transfer still leaves a complete cache
+entry behind.
+
+Two of those tests need a specific origin shape to mean anything, both found by
+mutation testing rather than by reasoning:
+
+- The disconnect test uses a raw socket, not `hyper::Client`. The client pools
+  connections, so dropping a `Response` makes it *drain* the rest of the body to
+  reuse the socket — the proxy sees a well-behaved client and there is no
+  disconnect to observe. It also needs an origin that emits many small chunks;
+  with a single-chunk body the forwarding loop finishes before the drop happens.
+- The offline test asserts an *uncached* range fails before trusting that the
+  origin is down. `JoinHandle::abort()` is not enough to take a hyper server
+  down: it stops the accept loop, but each live connection is its own task, and
+  the proxy's pooled keep-alive connection kept being served normally.
+
+The feature only widens `is_allowed_target` to accept loopback and private
+addresses, and any binary built with it prints a warning to stderr on first
+upstream admission. **Never enable it in a shipped build.** Link-local
+addresses, including cloud metadata endpoints, stay rejected either way.
+
+### Manual testing with a real player
+
+```bash
+# synthetic bytes, protocol correctness only
+cargo run --features allow-private-upstream --example local_playground
+
+# a real media file you can actually play and seek
+cargo run --features allow-private-upstream --example local_playground -- /path/to/video.mp4
+```
+
+This starts the fake origin and the proxy together, logs every upstream range
+the origin receives, and prints ready-to-paste `curl`, `ffplay`, and `mpv`
+commands. Watching the origin log while seeking shows which ranges come from
+cache.
+
+A browser page cannot drive the proxy: `<video>` cannot send the custom
+identity headers the request contract requires, so use a client that can set
+headers.
 
 ## Run
 
@@ -123,10 +188,11 @@ File length alone is never treated as proof that a range is cached. Sidecar upda
 ## Known Limitations
 
 - No Android JNI, iOS XCFramework, or HarmonyOS N-API adapter
-- No public start/stop/lifecycle API suitable for mobile hosts
-- No concurrent request coalescing for the same missing range
-- No full Range, HLS, corruption-recovery, or process-restart integration suite
-- DNS policy validation and the connector's later DNS lookup are not yet pinned to the same resolved address, leaving a DNS-rebinding time-of-check/time-of-use gap
+- `start`/`stop` and a config struct exist, but `start` binds a fixed port; binding port 0 and reporting the assigned port is still missing, and the lifecycle has no explicit state machine
+- No concurrent request coalescing for the same missing range. Concurrent identical ranges are correct but redundant: each fetches upstream separately, and a cache writer blocked on the per-key write lock is abandoned after a one-second grace period rather than merged
+- Range and process-restart behavior now have an end-to-end suite; HLS and corruption-recovery still do not
+- A request without a `Range` header answers `206` rather than `200`. Most players tolerate it, but it is not what RFC 7233 specifies
+- DNS policy validation and the connector's DNS lookup are two separate lookups, so they are not pinned to the same address. Both filter to public addresses, so rebinding cannot reach `connect`. For IP-literal upstreams the connector skips the resolver entirely, which makes `NetworkPolicy::validate` the only line of defense; every new upstream path must therefore call it
 - The dependency graph still contains overlapping HTTP clients and broad Tokio features
 
 ## Client Integration
