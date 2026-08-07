@@ -1,6 +1,6 @@
 use crate::data_request::DataRequest;
 use crate::handlers::{
-    tee_to_cache, CacheHandler, Follower, Join, LeaderGuard, MixedSourceHandler, NetworkHandler,
+    tee_to_cache, BackgroundTasks, CacheHandler, Follower, Join, LeaderGuard, MixedSourceHandler, NetworkHandler,
     ResponseBuilder, SingleFlight,
 };
 use crate::log_info;
@@ -22,6 +22,7 @@ pub struct DataSourceManager {
     response_builder: ResponseBuilder,
     /// 同一 `(key, 区间)` 的并发回源合并表，见 [`SingleFlight`]。
     single_flight: Arc<SingleFlight>,
+    tasks: Arc<BackgroundTasks>,
 }
 
 impl DataSourceManager {
@@ -42,6 +43,15 @@ impl DataSourceManager {
         policy: Arc<NetworkPolicy>,
         manager_config: StorageManagerConfig,
     ) -> Self {
+        Self::with_tasks(cache_dir, policy, manager_config, BackgroundTasks::new())
+    }
+
+    pub fn with_tasks(
+        cache_dir: PathBuf,
+        policy: Arc<NetworkPolicy>,
+        manager_config: StorageManagerConfig,
+        tasks: Arc<BackgroundTasks>,
+    ) -> Self {
         log_info!("Cache", "初始化数据源管理器，缓存目录: {:?}", cache_dir);
 
         let storage_config = StorageConfig {
@@ -57,7 +67,7 @@ impl DataSourceManager {
 
         let cache_handler = Arc::new(CacheHandler::new(storage_manager));
         let network_handler = NetworkHandler::new(policy.clone());
-        let mixed_source_handler = MixedSourceHandler::new(cache_handler.clone(), policy);
+        let mixed_source_handler = MixedSourceHandler::with_tasks(cache_handler.clone(), policy, tasks.clone());
         let response_builder = ResponseBuilder::new();
 
         Self {
@@ -66,6 +76,7 @@ impl DataSourceManager {
             mixed_source_handler,
             response_builder,
             single_flight: Arc::new(SingleFlight::new()),
+            tasks,
         }
     }
 
@@ -274,6 +285,7 @@ impl DataSourceManager {
             key.to_string(),
             (start, end),
             guard,
+            self.tasks.clone(),
         );
 
         self.response_builder.build_partial_content_response(

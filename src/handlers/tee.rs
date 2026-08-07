@@ -14,6 +14,30 @@ use tokio_stream::wrappers::ReceiverStream;
 /// 转发通道容量（数据块个数）。上下游之间的缓冲窗口。
 pub const FORWARD_CHANNEL_CAPACITY: usize = 32;
 
+/// Tracks detached forwarding tasks so a host can cancel them during shutdown.
+#[derive(Default)]
+pub struct BackgroundTasks {
+    handles: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+impl BackgroundTasks {
+    pub fn new() -> Arc<Self> { Arc::new(Self::default()) }
+
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut handles = self.handles.lock().expect("background task lock poisoned");
+        handles.retain(|handle| !handle.is_finished());
+        handles.push(tokio::spawn(future).abort_handle());
+    }
+
+    pub fn abort_all(&self) {
+        let mut handles = self.handles.lock().expect("background task lock poisoned");
+        for handle in handles.drain(..) { handle.abort(); }
+    }
+}
+
 /// 把上游响应体分叉：一份返回给客户端，一份在后台写进缓存。
 ///
 /// 缓存写入是 best-effort —— 失败只记日志，绝不影响返回给客户端的流。
@@ -34,15 +58,16 @@ pub fn tee_to_cache(
     key: String,
     range: (u64, u64),
     guard: Option<LeaderGuard>,
+    tasks: Arc<BackgroundTasks>,
 ) -> ReceiverStream<Result<Bytes>> {
     let (client_tx, client_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
     let (cache_tx, cache_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
 
-    tokio::spawn(forward_upstream(upstream, client_tx, cache_tx));
+    tasks.spawn(forward_upstream(upstream, client_tx, cache_tx));
 
     // 缓存写入独立后台运行。绝不能在返回响应前 await 它：
     // 那样 hyper 还没开始 poll 响应体，转发任务就会被通道容量卡死。
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         // 显式绑定：守卫要活到这个任务结束，不能被优化掉，也不能提前 drop。
         let _leader = guard;
         let stream = Box::pin(ReceiverStream::new(cache_rx));
@@ -293,7 +318,14 @@ mod tests {
             Ok(Bytes::from_static(b"abcde")),
             Ok(Bytes::from_static(b"fghij")),
         ]);
-        let mut client = tee_to_cache(upstream, cache.clone(), "k".to_string(), (0, 9), None);
+        let mut client = tee_to_cache(
+            upstream,
+            cache.clone(),
+            "k".to_string(),
+            (0, 9),
+            None,
+            BackgroundTasks::new(),
+        );
 
         let mut received = Vec::new();
         while let Some(chunk) = client.next().await {

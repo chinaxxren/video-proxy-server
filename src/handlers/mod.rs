@@ -10,4 +10,4 @@ pub use mixed_source::MixedSourceHandler;
 pub use network::{FetchedUpstream, NetworkHandler};
 pub use response::ResponseBuilder;
 pub use single_flight::{Follower, Join, LeaderGuard, SingleFlight};
-pub use tee::tee_to_cache;
+pub use tee::{tee_to_cache, BackgroundTasks};

@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. Mobile FFI, request coalescing, and broader end-to-end coverage are still pending.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. Mobile FFI and the authenticated localhost boundary are still pending.
 
 ## Features
 
@@ -87,17 +87,25 @@ addresses, including cloud metadata endpoints, stay rejected either way.
 cargo run --features allow-private-upstream --example local_playground
 
 # a real media file you can actually play and seek
-cargo run --features allow-private-upstream --example local_playground -- /path/to/video.mp4
+cargo run --features allow-private-upstream --example local_playground -- ./aa.mp4
 ```
 
-This starts the fake origin and the proxy together, logs every upstream range
-the origin receives, and prints ready-to-paste `curl`, `ffplay`, and `mpv`
-commands. Watching the origin log while seeking shows which ranges come from
-cache.
+This starts the local Range origin, proxy, and browser test page together. Open
+the printed Web test URL to play and seek `aa.mp4`, issue custom byte ranges,
+run repeated/overlapping range checks, and load a real fMP4 HLS stream. When
+`ffmpeg` is available, the playground remuxes `aa.mp4` into a local m3u8,
+initialization segment, and media segments at startup. The HLS check verifies
+playlist MIME, rewritten URIs, every segment response, browser MediaSource
+decoding, and a repeated segment cache hit.
 
-A browser page cannot drive the proxy: `<video>` cannot send the custom
-identity headers the request contract requires, so use a client that can set
-headers.
+The same-origin development gateway adds the identity headers that `<video>`
+cannot send itself; all media bytes still pass through the real proxy core. The
+terminal logs every upstream range and HLS asset, so a repeated cached request
+should not produce another origin log entry.
+
+The command also prints ready-to-paste `curl`, `ffplay`, and `mpv` commands.
+`allow-private-upstream` and the development gateway are only for local tests
+and are not included in the production server path.
 
 ## Run
 
@@ -114,6 +122,12 @@ cargo run -- 8080 ./cache media.example.com,cdn.example.com
 ```
 
 If the allowlist is omitted, the server starts but rejects every upstream request. It always binds to `127.0.0.1`.
+
+Optional limits can be set with environment variables. `PROXY_SHUTDOWN_TIMEOUT_MS`
+controls the bounded graceful-drain period (default `5000`); after it expires,
+the server cancels its outstanding upstream/cache forwarding tasks. The other
+limits are `PROXY_MAX_CACHE_BYTES`, `PROXY_MAX_FILES`, `PROXY_MAX_CONCURRENT`,
+and `PROXY_CLEANUP_SECS`.
 
 You can also run the maintained client example:
 
@@ -145,24 +159,23 @@ async fn main() {
 
 ## Proxy Request Contract
 
-Send the current upstream URL in `X-Original-Url` and provide all three stable cache identity headers:
+Send the current upstream URL in `X-Original-Url` and provide the two cache identity headers currently supported by the core:
 
 ```bash
 curl 'http://127.0.0.1:8080/proxy/media' \
   -H 'X-Original-Url: https://media.example.com/audio/song.m4a?token=short-lived' \
   -H 'Range: bytes=0-65535' \
-  -H 'X-Cache-User-Id: user-123' \
   -H 'X-Cache-Asset-Id: song-456' \
   -H 'X-Cache-Asset-Revision: 7'
 ```
 
-The cache identity is derived only from:
+The current cache identity is derived from the upstream scheme/host/port/path plus:
 
 ```text
-userId + assetId + assetRevision
+assetId + assetRevision
 ```
 
-The signed URL is only the current network source. Changing its token does not create a different cache entry. Requests missing any stable identity header are rejected when they enter the cache path.
+The signed URL query is only the current network source. Changing its token does not create a different cache entry. `userId` is not yet part of the core cache key; multi-user production integration must add a trusted host-provided tenant/user boundary before enabling shared caches.
 
 ## Network Security
 
@@ -189,8 +202,8 @@ File length alone is never treated as proof that a range is cached. Sidecar upda
 
 - No Android JNI, iOS XCFramework, or HarmonyOS N-API adapter
 - `start`/`stop` and a config struct exist, but `start` binds a fixed port; binding port 0 and reporting the assigned port is still missing, and the lifecycle has no explicit state machine
-- No concurrent request coalescing for the same missing range. Concurrent identical ranges are correct but redundant: each fetches upstream separately, and a cache writer blocked on the per-key write lock is abandoned after a one-second grace period rather than merged
-- Range and process-restart behavior now have an end-to-end suite; HLS and corruption-recovery still do not
+- Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
+- Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed
 - A request without a `Range` header answers `206` rather than `200`. Most players tolerate it, but it is not what RFC 7233 specifies
 - DNS policy validation and the connector's DNS lookup are two separate lookups, so they are not pinned to the same address. Both filter to public addresses, so rebinding cannot reach `connect`. For IP-literal upstreams the connector skips the resolver entirely, which makes `NetworkPolicy::validate` the only line of defense; every new upstream path must therefore call it
 - The dependency graph still contains overlapping HTTP clients and broad Tokio features

@@ -49,6 +49,10 @@ async fn main() -> Result<(), ProxyError> {
         max_cache_bytes: env_or("PROXY_MAX_CACHE_BYTES", defaults.max_cache_bytes),
         max_file_count: env_or("PROXY_MAX_FILES", defaults.max_file_count),
         max_concurrent_requests: env_or("PROXY_MAX_CONCURRENT", defaults.max_concurrent_requests),
+        shutdown_timeout: Duration::from_millis(env_or(
+            "PROXY_SHUTDOWN_TIMEOUT_MS",
+            defaults.shutdown_timeout.as_millis() as u64,
+        )),
         cleanup_interval: Duration::from_secs(env_or(
             "PROXY_CLEANUP_SECS",
             defaults.cleanup_interval.as_secs(),

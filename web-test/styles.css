@@ -1,0 +1,136 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #111315;
+  color: #f4f5f5;
+  letter-spacing: 0;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; background: #111315; }
+
+button, input { font: inherit; letter-spacing: 0; }
+
+button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid #d9ff43;
+  border-radius: 6px;
+  background: #d9ff43;
+  color: #111315;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover { background: #eeff9a; }
+button:disabled { cursor: wait; opacity: .55; }
+button.secondary { border-color: #444a4e; background: #202427; color: #f4f5f5; }
+button.secondary:hover { background: #2b3034; }
+
+.topbar {
+  min-height: 72px;
+  padding: 14px clamp(18px, 4vw, 56px);
+  border-bottom: 1px solid #303538;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+h1, h2, p { margin: 0; }
+h1 { font-size: 20px; line-height: 1.25; }
+h2 { margin-top: 3px; font-size: 24px; line-height: 1.2; }
+
+.status { margin-top: 4px; color: #9ba3a7; font-size: 13px; }
+.status.ready { color: #d9ff43; }
+.status.error { color: #ff726f; }
+
+main { width: min(1180px, 100%); margin: 0 auto; padding: 32px clamp(18px, 4vw, 40px) 56px; }
+section { padding: 0 0 34px; }
+.hls-section, .test-section { padding-top: 30px; border-top: 1px solid #303538; }
+
+.section-heading {
+  margin-bottom: 18px;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.eyebrow { color: #d9ff43; font-size: 11px; font-weight: 800; }
+
+video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 68vh;
+  background: #050606;
+  border: 1px solid #303538;
+  border-radius: 6px;
+}
+
+.media-stats { margin: 0; display: flex; gap: 28px; }
+.media-stats div { min-width: 72px; }
+.media-stats dt { color: #858e92; font-size: 11px; text-transform: uppercase; }
+.media-stats dd { margin: 3px 0 0; font-variant-numeric: tabular-nums; font-weight: 650; }
+
+.hls-actions { display: flex; align-items: center; gap: 10px; }
+.hls-actions .status { margin: 0 6px 0 0; }
+.hls-stats {
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid #303538;
+  border-bottom: 1px solid #303538;
+}
+.hls-stats div { padding: 12px 8px; border-right: 1px solid #303538; }
+.hls-stats div:last-child { border-right: 0; }
+.hls-stats dt { color: #858e92; font-size: 11px; text-transform: uppercase; }
+.hls-stats dd { margin: 4px 0 0; font-variant-numeric: tabular-nums; font-weight: 650; }
+
+.controls {
+  display: grid;
+  grid-template-columns: auto minmax(110px, 1fr) auto minmax(110px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+label { color: #aeb5b8; font-size: 13px; }
+input {
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid #444a4e;
+  border-radius: 5px;
+  outline: none;
+  background: #191c1e;
+  color: #f4f5f5;
+}
+input:focus { border-color: #d9ff43; }
+
+.table-wrap { overflow-x: auto; border-top: 1px solid #303538; }
+table { width: 100%; min-width: 650px; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 13px 10px; border-bottom: 1px solid #292d30; text-align: left; }
+th { color: #858e92; font-size: 11px; text-transform: uppercase; }
+td { font-variant-numeric: tabular-nums; }
+.pass { color: #d9ff43; }
+.fail { color: #ff726f; }
+.empty td { color: #737b7f; text-align: center; }
+
+@media (max-width: 720px) {
+  .topbar, .section-heading { align-items: flex-start; }
+  .topbar { min-height: 64px; }
+  .section-heading { flex-direction: column; }
+  .hls-actions { width: 100%; flex-wrap: wrap; }
+  .hls-actions .status { width: 100%; }
+  .hls-actions button { flex: 1 1 150px; }
+  .hls-stats { grid-template-columns: 1fr 1fr; }
+  .hls-stats div:nth-child(2) { border-right: 0; }
+  .hls-stats div:nth-child(-n+2) { border-bottom: 1px solid #303538; }
+  .media-stats { width: 100%; justify-content: space-between; gap: 10px; }
+  .controls { grid-template-columns: 1fr 1fr; }
+  .controls label { grid-column: span 1; }
+  .controls button { grid-column: 1 / -1; }
+}

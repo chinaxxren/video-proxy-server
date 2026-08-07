@@ -64,6 +64,10 @@ pub struct VariantStream {
 /// 轮转的签名参数，每次轮转都是一个新键，内存会无界增长——远端只要不断换
 /// query 就能把进程撑爆。超过上限时按 `last_updated` 淘汰最旧的条目。
 const MAX_CACHED_PLAYLISTS: usize = 512;
+/// 单张播放列表允许持有的分片或变体数量。
+const MAX_PLAYLIST_ITEMS: usize = 20_000;
+/// 播放列表元数据的全局估算内存预算。
+const MAX_PLAYLIST_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 /// 代理路径前缀。播放列表被重写后，播放器回请的 URL 会带上这一段。
 pub(crate) const PROXY_PREFIX: &str = "/proxy/";
@@ -104,6 +108,12 @@ impl HlsManager {
 
         match playlist {
             m3u8_rs::Playlist::MasterPlaylist(master) => {
+                if master.variants.len() > MAX_PLAYLIST_ITEMS {
+                    return Err(crate::utils::error::ProxyError::Parse(format!(
+                        "HLS variant count exceeds limit {}",
+                        MAX_PLAYLIST_ITEMS
+                    )));
+                }
                 log_info!(
                     "HLS",
                     "处理主播放列表，包含 {} 个变体流",
@@ -139,6 +149,12 @@ impl HlsManager {
                 Ok(info)
             }
             m3u8_rs::Playlist::MediaPlaylist(media) => {
+                if media.segments.len() > MAX_PLAYLIST_ITEMS {
+                    return Err(crate::utils::error::ProxyError::Parse(format!(
+                        "HLS segment count exceeds limit {}",
+                        MAX_PLAYLIST_ITEMS
+                    )));
+                }
                 log_info!(
                     "HLS",
                     "处理媒体播放列表，包含 {} 个分片",
@@ -186,7 +202,18 @@ impl HlsManager {
     async fn cache_playlist(&self, url: &str, info: Arc<PlaylistInfo>) {
         let mut playlists = self.playlists.write().await;
 
-        if !playlists.contains_key(url) && playlists.len() >= MAX_CACHED_PLAYLISTS {
+        let new_bytes = playlist_size(url, &info);
+        if new_bytes > MAX_PLAYLIST_CACHE_BYTES {
+            log_info!("HLS", "播放列表超过缓存内存预算，不写入内存缓存");
+            return;
+        }
+
+        playlists.remove(url);
+
+        while playlists.len() >= MAX_CACHED_PLAYLISTS
+            || cached_playlist_bytes(&playlists).saturating_add(new_bytes)
+                > MAX_PLAYLIST_CACHE_BYTES
+        {
             let evict = playlists
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_updated)
@@ -274,6 +301,33 @@ impl HlsManager {
         self.cache_dir
             .join(format!("{:x}_seg_{}.ts", md5::compute(url), sequence))
     }
+}
+
+fn cached_playlist_bytes(playlists: &HashMap<String, Arc<PlaylistInfo>>) -> usize {
+    playlists
+        .iter()
+        .map(|(key, info)| playlist_size(key, info))
+        .fold(0usize, usize::saturating_add)
+}
+
+fn playlist_size(key: &str, info: &PlaylistInfo) -> usize {
+    let segment_bytes = info.segments.iter().fold(0usize, |total, segment| {
+        total
+            .saturating_add(std::mem::size_of::<Segment>())
+            .saturating_add(segment.url.len())
+    });
+    let variant_bytes = info.variants.iter().fold(0usize, |total, variant| {
+        total
+            .saturating_add(std::mem::size_of::<VariantStream>())
+            .saturating_add(variant.url.len())
+            .saturating_add(variant.resolution.as_ref().map_or(0, String::len))
+    });
+
+    key.len()
+        .saturating_add(std::mem::size_of::<PlaylistInfo>())
+        .saturating_add(info.url.len())
+        .saturating_add(segment_bytes)
+        .saturating_add(variant_bytes)
 }
 
 /// 预解析好的播放列表 base，供整轮重写复用。
@@ -520,6 +574,51 @@ mod tests {
         // 最后写入的一定还在；被淘汰的是最旧的。
         let newest = format!("https://media.example/live.m3u8?token={}", overflow - 1);
         assert!(manager.get_playlist(&newest).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_playlist_with_too_many_segments() {
+        let (_dir, manager) = manager();
+        let mut content = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+        for i in 0..=MAX_PLAYLIST_ITEMS {
+            content.push_str(&format!("#EXTINF:1,\n{i}.ts\n"));
+        }
+
+        let error = manager
+            .process_m3u8("https://media.example/oversized.m3u8", &content)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("segment count exceeds limit"));
+        assert!(manager.playlists.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn playlist_cache_respects_global_memory_budget() {
+        let (_dir, manager) = manager();
+        for i in 0..64 {
+            let url = format!("https://media.example/{i}.m3u8");
+            let info = Arc::new(PlaylistInfo {
+                url: url.clone(),
+                target_duration: 1.0,
+                media_sequence: 0,
+                is_endlist: false,
+                segments: vec![Segment {
+                    url: "x".repeat(1024 * 1024),
+                    duration: 1.0,
+                    sequence: 0,
+                    size: None,
+                    cached: false,
+                }],
+                variants: Vec::new(),
+                last_updated: chrono::Utc::now(),
+            });
+            manager.cache_playlist(&url, info).await;
+        }
+
+        let playlists = manager.playlists.read().await;
+        assert!(cached_playlist_bytes(&playlists) <= MAX_PLAYLIST_CACHE_BYTES);
+        assert!(playlists.contains_key("https://media.example/63.m3u8"));
+        assert!(playlists.len() < 64, "字节预算应先于条目数上限触发淘汰");
     }
 
     /// `update_segment_cache` 改用二分查找，前提是分片按 sequence 递增。

@@ -17,20 +17,27 @@
 
 #[cfg(feature = "allow-private-upstream")]
 mod playground {
+    use std::collections::HashMap;
     use std::convert::Infallible;
     use std::net::{SocketAddr, TcpListener};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::Arc;
 
     use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
     use hyper::service::{make_service_fn, service_fn};
-    use hyper::{Body, Request, Response, Server, StatusCode};
+    use hyper::{Body, Client, Request, Response, Server, StatusCode};
     use proxy_server::server::{ProxyConfig, ProxyServer};
 
     /// 没给真实文件时合成多大。5MB 足够让播放器发出好几轮 range 请求。
     const SYNTHETIC_SIZE: usize = 5 * 1024 * 1024;
 
-    pub async fn run() {
+    struct HlsAsset {
+        path: PathBuf,
+        content_type: &'static str,
+    }
+
+    pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         proxy_server::utils::logger::init_from_env();
 
         let path = std::env::args().nth(1).map(PathBuf::from);
@@ -38,8 +45,7 @@ mod playground {
             Some(path) => {
                 // 整个读进内存。联调工具，几百 MB 也无所谓，换来的是
                 // range 切片这段代码足够短、不会自己成为怀疑对象。
-                let bytes = std::fs::read(path)
-                    .unwrap_or_else(|e| panic!("读不了 {}: {}", path.display(), e));
+                let bytes = std::fs::read(path)?;
                 let content_type = guess_content_type(path);
                 let label = format!("{}（{} 字节）", path.display(), bytes.len());
                 (bytes, content_type, label)
@@ -54,11 +60,18 @@ mod playground {
             }
         };
 
-        let origin = spawn_origin(Arc::new(body), content_type);
+        let (hls_temp_dir, hls_assets) = match path.as_deref() {
+            Some(path) => {
+                let (dir, assets) = generate_hls(path)?;
+                (Some(dir), assets)
+            }
+            None => (None, Arc::new(HashMap::new())),
+        };
+        let port = 8099;
+        let origin = spawn_origin(Arc::new(body), content_type, hls_assets, port);
         let origin_url = format!("{origin}/media.mp4");
 
         let cache_dir = std::env::temp_dir().join("video-proxy-playground");
-        let port = 8099;
         let server = Arc::new(ProxyServer::with_config(ProxyConfig {
             port,
             cache_dir: cache_dir.clone(),
@@ -71,6 +84,8 @@ mod playground {
         if let Err(e) = server.start().await {
             eprintln!("代理退出: {e}");
         }
+        drop(hls_temp_dir);
+        Ok(())
     }
 
     fn guess_content_type(path: &Path) -> &'static str {
@@ -91,16 +106,103 @@ mod playground {
         }
     }
 
-    fn spawn_origin(body: Arc<Vec<u8>>, content_type: &'static str) -> String {
+    fn generate_hls(
+        path: &Path,
+    ) -> Result<(tempfile::TempDir, Arc<HashMap<String, HlsAsset>>), Box<dyn std::error::Error>>
+    {
+        let output_dir = tempfile::Builder::new()
+            .prefix("video-proxy-hls-playground-")
+            .tempdir()?;
+
+        let status = Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-v")
+            .arg("error")
+            .arg("-i")
+            .arg(path)
+            .args(["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"])
+            .args([
+                "-hls_time",
+                "4",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_flags",
+                "independent_segments",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+            ])
+            .arg("-hls_segment_filename")
+            .arg(output_dir.path().join("segment-%03d.m4s"))
+            .arg(output_dir.path().join("master.m3u8"))
+            .status()
+            .map_err(|e| format!("无法启动 ffmpeg 生成 HLS: {e}"))?;
+        if !status.success() {
+            return Err("ffmpeg 生成 HLS 失败".into());
+        }
+
+        let mut assets = HashMap::new();
+        for entry in std::fs::read_dir(output_dir.path())? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let content_type = match path.extension().and_then(|ext| ext.to_str()) {
+                Some("m3u8") => "application/vnd.apple.mpegurl",
+                Some("mp4") | Some("m4s") => "video/mp4",
+                _ => continue,
+            };
+            assets.insert(name.to_string(), HlsAsset { path, content_type });
+        }
+        println!("[HLS] 已生成 {} 个播放列表/分片文件", assets.len());
+        Ok((output_dir, Arc::new(assets)))
+    }
+
+    fn spawn_origin(
+        body: Arc<Vec<u8>>,
+        content_type: &'static str,
+        hls_assets: Arc<HashMap<String, HlsAsset>>,
+        proxy_port: u16,
+    ) -> String {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("假源站无法绑定端口");
         let addr: SocketAddr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let origin_url = format!("{base_url}/media.mp4");
+        let hls_url = format!("{base_url}/hls/master.m3u8");
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}/playback");
+        let client = Client::new();
 
         let make_svc = make_service_fn(move |_conn| {
             let body = body.clone();
+            let client = client.clone();
+            let origin_url = origin_url.clone();
+            let hls_url = hls_url.clone();
+            let hls_assets = hls_assets.clone();
+            let proxy_url = proxy_url.clone();
             async move {
                 Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
                     let body = body.clone();
-                    async move { Ok::<_, Infallible>(serve(&req, &body, content_type)) }
+                    let client = client.clone();
+                    let origin_url = origin_url.clone();
+                    let hls_url = hls_url.clone();
+                    let hls_assets = hls_assets.clone();
+                    let proxy_url = proxy_url.clone();
+                    async move {
+                        Ok::<_, Infallible>(
+                            serve_web_or_media(
+                                req,
+                                &body,
+                                content_type,
+                                &hls_assets,
+                                &client,
+                                &origin_url,
+                                &hls_url,
+                                &proxy_url,
+                            )
+                            .await,
+                        )
+                    }
                 }))
             }
         });
@@ -112,10 +214,122 @@ mod playground {
                 .await;
         });
 
-        format!("http://{addr}")
+        base_url
+    }
+
+    async fn serve_web_or_media(
+        req: Request<Body>,
+        body: &[u8],
+        content_type: &'static str,
+        hls_assets: &HashMap<String, HlsAsset>,
+        client: &Client<hyper::client::HttpConnector>,
+        origin_url: &str,
+        hls_url: &str,
+        proxy_url: &str,
+    ) -> Response<Body> {
+        match req.uri().path() {
+            "/" | "/index.html" => static_response(
+                "text/html; charset=utf-8",
+                include_str!("../web-test/index.html"),
+            ),
+            "/styles.css" => static_response(
+                "text/css; charset=utf-8",
+                include_str!("../web-test/styles.css"),
+            ),
+            "/app.js" => static_response(
+                "text/javascript; charset=utf-8",
+                include_str!("../web-test/app.js"),
+            ),
+            "/media.mp4" => serve(&req, body, content_type),
+            "/playback" => {
+                forward_to_proxy(req, client, proxy_url, Some(origin_url), "aa-video").await
+            }
+            "/hls-playback" => {
+                forward_to_proxy(req, client, proxy_url, Some(hls_url), "aa-hls-playlist").await
+            }
+            path if path.starts_with("/proxy/") => {
+                let target = format!("{}{path}", proxy_url.trim_end_matches("/playback"));
+                forward_to_proxy(req, client, &target, None, "aa-hls-resource").await
+            }
+            path if path.starts_with("/hls/") => {
+                let name = path.trim_start_matches("/hls/");
+                match hls_assets.get(name) {
+                    Some(asset) => match tokio::fs::read(&asset.path).await {
+                        Ok(bytes) => serve_named(&req, &bytes, asset.content_type, name),
+                        Err(_) => Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Unable to read HLS asset"))
+                            .unwrap(),
+                    },
+                    None => Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Body::from("HLS asset not found"))
+                        .unwrap(),
+                }
+            }
+            _ => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("Not found"))
+                .unwrap(),
+        }
+    }
+
+    fn static_response(content_type: &'static str, content: &'static str) -> Response<Body> {
+        Response::builder()
+            .header(CONTENT_TYPE, content_type)
+            .header("Cache-Control", "no-store")
+            .body(Body::from(content))
+            .unwrap()
+    }
+
+    async fn forward_to_proxy(
+        browser_request: Request<Body>,
+        client: &Client<hyper::client::HttpConnector>,
+        proxy_url: &str,
+        original_url: Option<&str>,
+        asset_id: &str,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method(browser_request.method())
+            .uri(proxy_url)
+            .header("X-Cache-Asset-Id", asset_id)
+            .header("X-Cache-Asset-Revision", "1");
+        if let Some(original_url) = original_url {
+            builder = builder.header("X-Original-Url", original_url);
+        }
+        if let Some(range) = browser_request.headers().get(RANGE) {
+            builder = builder.header(RANGE, range);
+        }
+
+        let request = match builder.body(Body::empty()) {
+            Ok(request) => request,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from("Invalid test request"))
+                    .unwrap()
+            }
+        };
+
+        match client.request(request).await {
+            Ok(response) => response,
+            Err(error) => Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from(format!("Proxy unavailable: {error}")))
+                .unwrap(),
+        }
     }
 
     fn serve(req: &Request<Body>, body: &[u8], content_type: &'static str) -> Response<Body> {
+        serve_named(req, body, content_type, "media.mp4")
+    }
+
+    fn serve_named(
+        req: &Request<Body>,
+        body: &[u8],
+        content_type: &'static str,
+        name: &str,
+    ) -> Response<Body> {
         let total = body.len() as u64;
         let range = req
             .headers()
@@ -125,8 +339,8 @@ mod playground {
 
         // 打印每一次回源，这样能直接看出哪些区间命中了缓存、哪些穿透了。
         match range {
-            Some((start, end)) => println!("[源站] range {start}-{end}"),
-            None => println!("[源站] 整个文件"),
+            Some((start, end)) => println!("[源站] {name} range {start}-{end}"),
+            None => println!("[源站] {name} 整个文件"),
         }
 
         match range {
@@ -175,8 +389,8 @@ mod playground {
 
 注意：三个头都是必需的。X-Original-Url 指定真实上游，
 另两个构成缓存身份；缺任何一个都会得到 400。
-浏览器的 <video> 标签发不出自定义头，所以用不了页面来测，
-要用下面这些能带头的客户端。
+Web 测试页 : {}/
+页面通过同源测试网关补齐缓存身份头，视频播放和拖动都会进入真实代理。
 
 # 1. 取前 100KB。看 Content-Range 和 Content-Length 对不对
 curl -si {proxy_url} \\
@@ -209,7 +423,8 @@ mpv --http-header-fields='X-Original-Url: {origin_url},X-Cache-Asset-Id: demo,X-
 Ctrl-C 结束。
 ===========================================
 ",
-            cache_dir.display()
+            cache_dir.display(),
+            origin_url.trim_end_matches("/media.mp4")
         );
     }
 }
@@ -217,7 +432,10 @@ Ctrl-C 结束。
 #[cfg(feature = "allow-private-upstream")]
 #[tokio::main]
 async fn main() {
-    playground::run().await;
+    if let Err(error) = playground::run().await {
+        eprintln!("本地联调场启动失败: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(not(feature = "allow-private-upstream"))]

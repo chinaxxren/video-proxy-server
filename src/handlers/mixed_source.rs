@@ -1,6 +1,6 @@
 use crate::handlers::network::FetchedUpstream;
 use crate::handlers::tee::tee_to_cache;
-use crate::handlers::{CacheHandler, NetworkHandler, ResponseBuilder};
+use crate::handlers::{BackgroundTasks, CacheHandler, NetworkHandler, ResponseBuilder};
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
@@ -20,14 +20,20 @@ pub struct MixedSourceHandler {
     cache_handler: Arc<CacheHandler>,
     network_handler: NetworkHandler,
     response_builder: ResponseBuilder,
+    tasks: Arc<BackgroundTasks>,
 }
 
 impl MixedSourceHandler {
     pub fn new(cache_handler: Arc<CacheHandler>, policy: Arc<NetworkPolicy>) -> Self {
+        Self::with_tasks(cache_handler, policy, BackgroundTasks::new())
+    }
+
+    pub fn with_tasks(cache_handler: Arc<CacheHandler>, policy: Arc<NetworkPolicy>, tasks: Arc<BackgroundTasks>) -> Self {
         Self {
             cache_handler,
             network_handler: NetworkHandler::new(policy),
             response_builder: ResponseBuilder::new(),
+            tasks,
         }
     }
 
@@ -102,6 +108,7 @@ impl MixedSourceHandler {
                 // 每个请求要补的尾段各不相同，没有「同一个区间被重复拉取」
                 // 可言。去重只装在完全走网络那条路径上。
                 None,
+                self.tasks.clone(),
             );
 
             log_info!(
@@ -174,6 +181,7 @@ impl MixedSourceHandler {
             (cached_end, end),
             // 同上：混合源不参与去重。
             None,
+            self.tasks.clone(),
         );
 
         // 创建合并的流

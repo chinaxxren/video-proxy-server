@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Media Proxy Cache Lab</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Media Proxy Cache Lab</h1>
+      <p id="connection-status" class="status" aria-live="polite">Connecting</p>
+    </div>
+    <button id="clear-log" class="secondary" type="button">Clear results</button>
+  </header>
+
+  <main>
+    <section class="player-section" aria-labelledby="player-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">REAL MEDIA</p>
+          <h2 id="player-title">aa.mp4</h2>
+        </div>
+        <dl class="media-stats">
+          <div><dt>Position</dt><dd id="position">0:00</dd></div>
+          <div><dt>Duration</dt><dd id="duration">--:--</dd></div>
+          <div><dt>Buffered</dt><dd id="buffered">0%</dd></div>
+        </dl>
+      </div>
+      <video id="player" controls preload="metadata" src="/playback"></video>
+    </section>
+
+    <section class="hls-section" aria-labelledby="hls-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">HLS FMP4</p>
+          <h2 id="hls-title">aa.mp4 stream</h2>
+        </div>
+        <div class="hls-actions">
+          <span id="hls-status" class="status" aria-live="polite">Not loaded</span>
+          <button id="load-hls" type="button">Load HLS stream</button>
+          <button id="repeat-segment" class="secondary" type="button" disabled>Repeat first segment</button>
+        </div>
+      </div>
+      <video id="hls-player" controls preload="none"></video>
+      <dl class="hls-stats">
+        <div><dt>Playlist</dt><dd id="hls-playlist-check">Pending</dd></div>
+        <div><dt>Rewritten URIs</dt><dd id="hls-rewrite-count">0</dd></div>
+        <div><dt>Segments</dt><dd id="hls-segment-count">0 / 0</dd></div>
+        <div><dt>Loaded bytes</dt><dd id="hls-loaded-bytes">0 B</dd></div>
+      </dl>
+    </section>
+
+    <section class="test-section" aria-labelledby="tests-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">HTTP RANGE</p>
+          <h2 id="tests-title">Request checks</h2>
+        </div>
+        <button id="run-all" type="button">Run all checks</button>
+      </div>
+
+      <div class="controls">
+        <label for="range-start">Start byte</label>
+        <input id="range-start" type="number" min="0" step="1" value="0">
+        <label for="range-end">End byte</label>
+        <input id="range-end" type="number" min="0" step="1" value="65535">
+        <button id="run-range" class="secondary" type="button">Request range</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Check</th><th>Status</th><th>Range</th><th>Bytes</th><th>Time</th></tr>
+          </thead>
+          <tbody id="results">
+            <tr class="empty"><td colspan="5">No checks run</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

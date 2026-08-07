@@ -2,6 +2,7 @@ use crate::data_source_manager::DataSourceManager;
 use crate::hls::DefaultHlsHandler;
 use crate::log_info;
 use crate::request_handler::RequestHandler;
+use crate::handlers::BackgroundTasks;
 use crate::storage::StorageManagerConfig;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
@@ -32,6 +33,8 @@ pub struct ProxyConfig {
     pub cleanup_interval: Duration,
     /// 并发处理的请求数上限，超出的请求排队等待而不是被拒绝。
     pub max_concurrent_requests: usize,
+    /// 收到停止信号后等待连接自然排空的最长时间。
+    pub shutdown_timeout: Duration,
     /// 允许回源的主机白名单。**留空表示拒绝一切上游请求**——
     /// 默认拒绝而不是默认放行，是这一层 SSRF 防护的基本前提。
     pub allowed_hosts: Vec<String>,
@@ -46,6 +49,7 @@ impl Default for ProxyConfig {
             max_file_count: 1000,
             cleanup_interval: Duration::from_secs(60),
             max_concurrent_requests: 64,
+            shutdown_timeout: Duration::from_secs(5),
             allowed_hosts: Vec::new(),
         }
     }
@@ -55,6 +59,8 @@ pub struct ProxyServer {
     port: u16,
     handler: Arc<RequestHandler>,
     shutdown: Arc<Notify>,
+    shutdown_timeout: Duration,
+    background_tasks: Arc<BackgroundTasks>,
 }
 
 impl ProxyServer {
@@ -87,7 +93,8 @@ impl ProxyServer {
         let cache_dir = config.cache_dir.clone();
 
         // 创建数据源管理器
-        let source_manager = Arc::new(DataSourceManager::with_config(
+        let background_tasks = BackgroundTasks::new();
+        let source_manager = Arc::new(DataSourceManager::with_tasks(
             cache_dir.clone(),
             policy.clone(),
             StorageManagerConfig {
@@ -95,6 +102,7 @@ impl ProxyServer {
                 max_file_count: config.max_file_count,
                 cleanup_interval: config.cleanup_interval,
             },
+            background_tasks.clone(),
         ));
 
         // 创建 HLS 处理器
@@ -111,6 +119,8 @@ impl ProxyServer {
             port: config.port,
             handler,
             shutdown: Arc::new(Notify::new()),
+            shutdown_timeout: config.shutdown_timeout,
+            background_tasks,
         }
     }
 
@@ -160,17 +170,35 @@ impl ProxyServer {
         // try_bind 而非 bind：后者在端口被占用时直接 panic，调用方
         // 无论怎么处理返回值都拦不住，进程会带着 panic 栈退出。
         let shutdown = self.shutdown.clone();
+        let drain_started = Arc::new(Notify::new());
+        let drain_signal = drain_started.clone();
         let server = Server::try_bind(&addr)
             .map_err(|e| ProxyError::IO(format!("无法绑定 {}: {}", addr, e)))?
             .serve(make_svc)
-            .with_graceful_shutdown(async move { shutdown.notified().await });
+            .with_graceful_shutdown(async move {
+                shutdown.notified().await;
+                drain_signal.notify_one();
+            });
         log_info!("Server", "代理服务器正在运行在 http://{}", addr);
 
-        // 错误必须往上传：原先只打一行 stderr 就 return Ok(())，
-        // 调用方看到成功、进程静默退出，排查时毫无线索。
-        server
-            .await
-            .map_err(|e| ProxyError::IO(format!("服务器异常终止: {}", e)))
+        tokio::pin!(server);
+        let result = tokio::select! {
+            result = &mut server => result
+                .map_err(|e| ProxyError::IO(format!("服务器异常终止: {}", e))),
+            _ = drain_started.notified() => {
+                match tokio::time::timeout(self.shutdown_timeout, &mut server).await {
+                    Ok(result) => result
+                        .map_err(|e| ProxyError::IO(format!("服务器异常终止: {}", e))),
+                    Err(_) => {
+                        log_info!("Server", "等待连接排空超过 {:?}，强制停止", self.shutdown_timeout);
+                        self.background_tasks.abort_all();
+                        Ok(())
+                    }
+                }
+            }
+        };
+        self.background_tasks.abort_all();
+        result
     }
 }
 
@@ -328,6 +356,34 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), server.start())
             .await
             .expect("start() 应当立刻因已有停止信号而返回");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stop_forces_a_hanging_connection_closed_after_timeout() {
+        let port = free_port();
+        let cache = tempfile::tempdir().unwrap();
+        let server = Arc::new(ProxyServer::with_config(ProxyConfig {
+            port,
+            cache_dir: cache.path().to_path_buf(),
+            shutdown_timeout: Duration::from_millis(50),
+            ..Default::default()
+        }));
+        let running = tokio::spawn({
+            let server = server.clone();
+            async move { server.start().await }
+        });
+        wait_until_listening(port).await;
+
+        let _connection = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        server.stop();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("停止操作超过外层测试时限")
+            .expect("服务器任务 panic");
         assert!(result.is_ok());
     }
 }
