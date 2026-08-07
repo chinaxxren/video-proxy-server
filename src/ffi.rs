@@ -16,6 +16,10 @@ pub struct ProxyServerHandle {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// # Safety
+///
+/// `value` 必须为空指针，或指向一个以 NUL 结尾、在本次调用期间保持有效且
+/// 不被其他线程改写的 C 字符串。
 unsafe fn read_string(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
@@ -24,6 +28,14 @@ unsafe fn read_string(value: *const c_char) -> Option<String> {
 }
 
 /// Creates a server handle. `cache_dir` must be a valid UTF-8, NUL-terminated path.
+///
+/// 返回的句柄归调用方所有，必须交给 `proxy_server_destroy` 释放。路径为空指针
+/// 或非 UTF-8 时返回空指针。
+///
+/// # Safety
+///
+/// `cache_dir` 必须为空指针，或指向一个以 NUL 结尾、在本次调用期间保持有效的
+/// C 字符串。
 #[no_mangle]
 pub unsafe extern "C" fn proxy_server_create(
     port: u16,
@@ -40,6 +52,11 @@ pub unsafe extern "C" fn proxy_server_create(
 
 /// Starts the server and waits until its socket is bound. Returns the bound port,
 /// or 0 on failure/already-started. A port of 0 requests OS allocation.
+///
+/// # Safety
+///
+/// `handle` 必须为空指针，或为 `proxy_server_create` 返回且尚未被
+/// `proxy_server_destroy` 释放的指针。
 #[no_mangle]
 pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u16 {
     let Some(handle) = handle.as_ref() else { return 0 };
@@ -57,7 +74,7 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             let server = Arc::new(ProxyServer::with_config(config));
             if let Ok(mut value) = published.lock() { *value = Some(server.clone()); }
             let start = tokio::spawn({ let server = server.clone(); async move { server.start().await } });
-            let port = server.wait_until_ready().await.map(|port| port).unwrap_or(0);
+            let port = server.wait_until_ready().await.unwrap_or(0);
             let _ = tx.send(port);
             let _ = start.await;
             port
@@ -67,6 +84,34 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     *slot = Some(thread);
     drop(slot);
     rx.recv().unwrap_or(0)
+}
+
+/// Stops the running server. Idempotent, and a no-op on a null handle.
+///
+/// # Safety
+///
+/// `handle` 必须为空指针，或为 `proxy_server_create` 返回且尚未被
+/// `proxy_server_destroy` 释放的指针。
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_stop(handle: *mut ProxyServerHandle) {
+    let Some(handle) = handle.as_ref() else { return };
+    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+}
+
+/// Stops the server, joins its thread, and frees the handle.
+///
+/// # Safety
+///
+/// `handle` 必须为空指针，或为 `proxy_server_create` 返回的指针。本函数取得
+/// 其所有权，因此每个句柄只能调用一次，调用后该指针不得再被使用。
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
+    if handle.is_null() { return; }
+    let handle = Box::from_raw(handle);
+    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+    if let Ok(mut slot) = handle.thread.lock() {
+        if let Some(thread) = slot.take() { let _ = thread.join(); }
+    };
 }
 
 #[cfg(test)]
@@ -99,20 +144,4 @@ mod tests {
             proxy_server_destroy(ptr::null_mut());
         }
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn proxy_server_stop(handle: *mut ProxyServerHandle) {
-    let Some(handle) = handle.as_ref() else { return };
-    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
-    if handle.is_null() { return; }
-    let handle = Box::from_raw(handle);
-    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
-    if let Ok(mut slot) = handle.thread.lock() {
-        if let Some(thread) = slot.take() { let _ = thread.join(); }
-    };
 }

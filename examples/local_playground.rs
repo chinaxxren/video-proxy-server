@@ -106,10 +106,13 @@ mod playground {
         }
     }
 
-    fn generate_hls(
-        path: &Path,
-    ) -> Result<(tempfile::TempDir, Arc<HashMap<String, HlsAsset>>), Box<dyn std::error::Error>>
-    {
+    /// ffmpeg 切片产物：临时目录（drop 即清理）+ 名字到资源的映射。
+    ///
+    /// 目录必须和映射一起返回并由调用方持有：它一旦 drop，映射里的路径就全
+    /// 失效了。
+    type GeneratedHls = (tempfile::TempDir, Arc<HashMap<String, HlsAsset>>);
+
+    fn generate_hls(path: &Path) -> Result<GeneratedHls, Box<dyn std::error::Error>> {
         let output_dir = tempfile::Builder::new()
             .prefix("video-proxy-hls-playground-")
             .tempdir()?;
@@ -159,6 +162,21 @@ mod playground {
         Ok((output_dir, Arc::new(assets)))
     }
 
+    /// 假源站每个请求都要用到的那一组常量。
+    ///
+    /// 打成一个结构体是因为它们的生命周期完全一致：都在 `spawn_origin` 里
+    /// 一次算出、之后只读。原先七个值分别 `clone()` 进两层闭包，每加一个
+    /// 字段就要改四处；现在只 clone 一个 `Arc`。
+    struct OriginState {
+        body: Arc<Vec<u8>>,
+        content_type: &'static str,
+        hls_assets: Arc<HashMap<String, HlsAsset>>,
+        client: Client<hyper::client::HttpConnector>,
+        origin_url: String,
+        hls_url: String,
+        proxy_url: String,
+    }
+
     fn spawn_origin(
         body: Arc<Vec<u8>>,
         content_type: &'static str,
@@ -168,41 +186,22 @@ mod playground {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("假源站无法绑定端口");
         let addr: SocketAddr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");
-        let origin_url = format!("{base_url}/media.mp4");
-        let hls_url = format!("{base_url}/hls/master.m3u8");
-        let proxy_url = format!("http://127.0.0.1:{proxy_port}/playback");
-        let client = Client::new();
+        let state = Arc::new(OriginState {
+            body,
+            content_type,
+            hls_assets,
+            client: Client::new(),
+            origin_url: format!("{base_url}/media.mp4"),
+            hls_url: format!("{base_url}/hls/master.m3u8"),
+            proxy_url: format!("http://127.0.0.1:{proxy_port}/playback"),
+        });
 
         let make_svc = make_service_fn(move |_conn| {
-            let body = body.clone();
-            let client = client.clone();
-            let origin_url = origin_url.clone();
-            let hls_url = hls_url.clone();
-            let hls_assets = hls_assets.clone();
-            let proxy_url = proxy_url.clone();
+            let state = state.clone();
             async move {
                 Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-                    let body = body.clone();
-                    let client = client.clone();
-                    let origin_url = origin_url.clone();
-                    let hls_url = hls_url.clone();
-                    let hls_assets = hls_assets.clone();
-                    let proxy_url = proxy_url.clone();
-                    async move {
-                        Ok::<_, Infallible>(
-                            serve_web_or_media(
-                                req,
-                                &body,
-                                content_type,
-                                &hls_assets,
-                                &client,
-                                &origin_url,
-                                &hls_url,
-                                &proxy_url,
-                            )
-                            .await,
-                        )
-                    }
+                    let state = state.clone();
+                    async move { Ok::<_, Infallible>(serve_web_or_media(req, &state).await) }
                 }))
             }
         });
@@ -217,16 +216,16 @@ mod playground {
         base_url
     }
 
-    async fn serve_web_or_media(
-        req: Request<Body>,
-        body: &[u8],
-        content_type: &'static str,
-        hls_assets: &HashMap<String, HlsAsset>,
-        client: &Client<hyper::client::HttpConnector>,
-        origin_url: &str,
-        hls_url: &str,
-        proxy_url: &str,
-    ) -> Response<Body> {
+    async fn serve_web_or_media(req: Request<Body>, state: &OriginState) -> Response<Body> {
+        let OriginState {
+            body,
+            content_type,
+            hls_assets,
+            client,
+            origin_url,
+            hls_url,
+            proxy_url,
+        } = state;
         match req.uri().path() {
             "/" | "/index.html" => static_response(
                 "text/html; charset=utf-8",

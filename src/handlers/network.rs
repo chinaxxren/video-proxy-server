@@ -8,7 +8,7 @@ use crate::utils::network_policy::NetworkPolicy;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use hyper::header::CONTENT_TYPE;
-use hyper::{Body, HeaderMap, Response};
+use hyper::{Body, HeaderMap, Response, StatusCode};
 use std::sync::Arc;
 
 /// 一次上游取数的结果。
@@ -66,7 +66,20 @@ impl NetworkHandler {
         let (resp, content_length) = net_source.download_stream().await?;
         log_info!("Cache", "网络响应成功，内容长度: {}", content_length);
 
-        let total_size = total_size_from_content_range(&resp);
+        // 200 响应的总长度只能来自 `Content-Length`。
+        //
+        // `Content-Range` 是 206 专有的头，200 里根本不会出现，于是
+        // `total_size_from_content_range` 必然返回 0（未知）。而「未知总长度」
+        // 会让 `resolve_range` 拒绝开区间请求 —— 结果是上游明明把整个文件都给
+        // 了我们，代理却以 416 收场。
+        //
+        // 能这么推断是因为 `try_download` 只在 `start == 0 && end == OPEN_ENDED`
+        // 时才接受 200（其余情况一律判为「上游忽略了 Range」并拒绝），所以走到
+        // 这里的 200 响应体必然是从 0 开始的完整资源，它的长度就是总长度。
+        let total_size = match total_size_from_content_range(&resp) {
+            0 if resp.status() == StatusCode::OK => content_length,
+            from_content_range => from_content_range,
+        };
         let headers = self.extract_headers(&resp);
         let meta = UpstreamMeta {
             total_size: (total_size > 0).then_some(total_size),

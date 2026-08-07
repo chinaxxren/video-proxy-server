@@ -11,17 +11,25 @@ use urlencoding;
 /// 代理路径前缀。播放器回请的 URL 会带上这一段。
 const PROXY_PREFIX: &str = "/proxy/";
 
+/// 请求类型。
+///
+/// 只区分「播放列表」和「其它一切」，因为这是唯一有行为差异的分界：m3u8 要
+/// 取回文本、重写分片地址、按 `no-cache` 返回，别的都走字节范围缓存管线。
+///
+/// 这里原先还有一个 `Segment`（按 `.ts` 后缀判定）。它从来没有独立行为——
+/// `request_handler` 把它和 `Normal` 并进同一个匹配臂，改成什么值都不影响
+/// 输出。而按后缀猜分片本身也不可靠：fMP4 的分片是 `.m4s`，签名 URL 还可能
+/// 完全不带后缀。留着只会让人以为存在一条不存在的分片专用路径。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestType {
     Normal,
     M3u8,
-    Segment,
 }
 
 #[derive(Debug, Clone)]
 pub struct DataRequest {
     pub url: String,
-    cache_key: Option<String>,
+    cache_key: String,
     pub range: String,
     /// 客户端是否真的发了 `Range` 头。
     ///
@@ -90,13 +98,9 @@ impl DataRequest {
         log_info!("Request", "key: range, value: {}", range);
 
         // 确定请求类型
-        let path = parsed.path();
-        let request_type = if path.ends_with(".m3u8") {
+        let request_type = if parsed.path().ends_with(".m3u8") {
             log_info!("Request", "type: M3u8");
             RequestType::M3u8
-        } else if path.ends_with(".ts") {
-            log_info!("Request", "type: Segment");
-            RequestType::Segment
         } else {
             log_info!("Request", "type: Normal");
             RequestType::Normal
@@ -114,37 +118,58 @@ impl DataRequest {
 
     /// 构造缓存键。
     ///
-    /// 键由两部分组成，顺序固定：**上游规范身份** + 客户端声明的身份头。
+    /// 键的第一段永远是**上游规范身份**，后面可选地跟上客户端声明的身份头。
     ///
-    /// 前者是安全上的关键。只用客户端头做键时，任何人都能伪造
+    /// 第一段是安全上的关键。只用客户端头做键时，任何人都能伪造
     /// `X-Cache-Asset-Id` 把自己的请求映射到别人的缓存条目上：先让
     /// `asset-1` 缓存 A 资源，再带同一个 `asset-1` 去请求 B 资源，就会
     /// 拿到 A 的内容——既是投毒也是越权读取。把上游 host+path 拼进键以后，
     /// 客户端头只能在同一个上游资源内部再做切分，无法让两个不同资源互相别名。
     ///
-    /// 后者仍然保留：签名 URL 的 query 每次都变，不能进键，而同一个 path
-    /// 在不同用户/版本下可能需要分开存（见 `X-Cache-Asset-Revision`）。
-    fn build_cache_key(url: &Url, headers: &HeaderMap) -> Result<Option<String>> {
-        let names = ["X-Cache-Asset-Id", "X-Cache-Asset-Revision"];
+    /// 身份头是**可选**的，这一点是 HLS 能工作的前提。播放器拿到重写后的
+    /// `/proxy/<encoded-url>` 分片地址后是自己去请求的，不会捎上任何自定义头
+    /// —— 一旦把这两个头设成硬性要求，每个分片都会以 400 收场，整条 HLS 链路
+    /// 断在第一个 `.ts` 上。而缺了它们并不影响防别名：上游 host+path 已经
+    /// 唯一确定了「这是哪个资源」，头只是在此之上再切分。
+    ///
+    /// 代价是缺头时同一个 URL 的内容若在上游被替换，可能读到旧缓存。需要按
+    /// 版本隔离的调用方继续发 `X-Cache-Asset-Revision` 即可，行为不变。
+    ///
+    /// 只发其中一个头视为配置错误，直接拒绝：静默忽略已发的那个会把不同
+    /// revision 折叠进同一条目，正好是上面那句「代价」想避免的情况。
+    fn build_cache_key(url: &Url, headers: &HeaderMap) -> Result<String> {
+        const ASSET_ID: &str = "X-Cache-Asset-Id";
+        const ASSET_REVISION: &str = "X-Cache-Asset-Revision";
 
         // 直接往一个 String 里追加，不再 `Vec<String>` + `format!` 每段 + `join`。
         let mut key = String::new();
         push_component(&mut key, &canonical_upstream_identity(url)?);
-        for name in names {
-            match headers.get(name) {
-                Some(value) => {
-                    let value = value.to_str()?.trim();
-                    if value.is_empty() {
-                        return Err(ProxyError::Request(format!("{} 不能为空", name)));
-                    }
-                    key.push('|');
-                    push_component(&mut key, value);
-                }
-                None => return Ok(None),
-            }
+
+        let present = [ASSET_ID, ASSET_REVISION].map(|name| headers.contains_key(name));
+        if present == [false, false] {
+            return Ok(key);
+        }
+        if present != [true, true] {
+            return Err(ProxyError::Request(format!(
+                "缓存身份头必须同时提供或同时省略: {}, {}",
+                ASSET_ID, ASSET_REVISION
+            )));
         }
 
-        Ok(Some(key))
+        for name in [ASSET_ID, ASSET_REVISION] {
+            let value = headers
+                .get(name)
+                .ok_or_else(|| ProxyError::Request(format!("{} 缺失", name)))?
+                .to_str()?
+                .trim();
+            if value.is_empty() {
+                return Err(ProxyError::Request(format!("{} 不能为空", name)));
+            }
+            key.push('|');
+            push_component(&mut key, value);
+        }
+
+        Ok(key)
     }
 
     pub fn new_request_with_range(url: &str, range: &str) -> Request<hyper::Body> {
@@ -183,12 +208,9 @@ impl DataRequest {
         self.client_sent_range
     }
 
-    pub fn get_cache_key(&self) -> Result<&str> {
-        self.cache_key.as_deref().ok_or_else(|| {
-            ProxyError::Request(
-                "缺少稳定缓存身份头: X-Cache-Asset-Id, X-Cache-Asset-Revision".to_string(),
-            )
-        })
+    /// 缓存键。构造期就已确定，取用不会失败。
+    pub fn get_cache_key(&self) -> &str {
+        &self.cache_key
     }
 
     pub fn get_headers(&self) -> &HeaderMap {
@@ -266,20 +288,82 @@ mod tests {
         let first = DataRequest::new(&build("https://media.example/song?token=one")).unwrap();
         let second = DataRequest::new(&build("https://media.example/song?token=two")).unwrap();
         assert_eq!(
-            first.get_cache_key().unwrap(),
-            second.get_cache_key().unwrap()
+            first.get_cache_key(),
+            second.get_cache_key()
         );
     }
 
+    /// 没有身份头时缓存键退化成「只有上游身份」，而不是报错。
+    ///
+    /// 这一条压着 HLS 链路：播放器请求重写后的分片地址时不会带任何自定义头，
+    /// 一旦这里要求身份头，每个 `.ts` 都会以 400 收场。
     #[test]
-    fn cache_key_requires_all_identity_headers() {
-        let request = Request::builder()
-            .uri("/proxy/placeholder")
-            .header("X-Original-Url", "https://media.example/song")
-            .body(Body::empty())
-            .unwrap();
-        let parsed = DataRequest::new(&request).unwrap();
-        assert!(parsed.get_cache_key().is_err());
+    fn cache_key_falls_back_to_upstream_identity_without_headers() {
+        let build = |url: &str| {
+            Request::builder()
+                .uri("/proxy/placeholder")
+                .header("X-Original-Url", url)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let parsed = DataRequest::new(&build("https://media.example/live/seg1.ts")).unwrap();
+        assert!(!parsed.get_cache_key().is_empty());
+
+        // 防别名不依赖身份头：不同上游资源仍然是不同的键。
+        let other = DataRequest::new(&build("https://media.example/live/seg2.ts")).unwrap();
+        assert_ne!(parsed.get_cache_key(), other.get_cache_key());
+
+        // 签名 query 依旧不进键。
+        let signed =
+            DataRequest::new(&build("https://media.example/live/seg1.ts?token=two")).unwrap();
+        assert_eq!(parsed.get_cache_key(), signed.get_cache_key());
+    }
+
+    /// 只发一个身份头是配置错误。静默忽略它会把不同 revision 折叠进同一条目。
+    #[test]
+    fn partial_identity_headers_are_rejected() {
+        for (name, value) in [
+            ("X-Cache-Asset-Id", "asset-1"),
+            ("X-Cache-Asset-Revision", "7"),
+        ] {
+            let request = Request::builder()
+                .uri("/proxy/placeholder")
+                .header("X-Original-Url", "https://media.example/song")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            assert!(
+                DataRequest::new(&request).is_err(),
+                "只发了 {name}，必须拒绝"
+            );
+        }
+    }
+
+    /// 带身份头和不带身份头必须落在不同的缓存条目上。
+    #[test]
+    fn identity_headers_partition_within_the_same_upstream() {
+        let url = "https://media.example/song";
+        let without = DataRequest::new(
+            &Request::builder()
+                .uri("/proxy/placeholder")
+                .header("X-Original-Url", url)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .unwrap();
+        let with = DataRequest::new(
+            &Request::builder()
+                .uri("/proxy/placeholder")
+                .header("X-Original-Url", url)
+                .header("X-Cache-Asset-Id", "asset-1")
+                .header("X-Cache-Asset-Revision", "7")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(without.get_cache_key(), with.get_cache_key());
     }
 
     #[test]
@@ -339,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn original_url_takes_precedence_and_segment_query_is_recognized() {
+    fn original_url_takes_precedence_over_proxy_path() {
         let request = Request::builder()
             .uri("/proxy/https%3A%2F%2Fwrong.example%2Ffile.mp4")
             .header(
@@ -355,7 +439,8 @@ mod tests {
             "https://media.example/segment.ts?token=one"
         );
         assert_eq!(parsed.get_range(), "bytes=0-");
-        assert_eq!(parsed.get_type(), &RequestType::Segment);
+        // `.ts` 分片走的就是普通字节缓存路径，没有独立的请求类型。
+        assert_eq!(parsed.get_type(), &RequestType::Normal);
     }
 
     #[test]
@@ -373,8 +458,8 @@ mod tests {
         let first = DataRequest::new(&build("ab", "c")).unwrap();
         let second = DataRequest::new(&build("a", "bc")).unwrap();
         assert_ne!(
-            first.get_cache_key().unwrap(),
-            second.get_cache_key().unwrap()
+            first.get_cache_key(),
+            second.get_cache_key()
         );
     }
 
@@ -394,15 +479,15 @@ mod tests {
         let victim = DataRequest::new(&build("https://media.example/private/a.mp4")).unwrap();
         let attacker = DataRequest::new(&build("https://media.example/public/b.mp4")).unwrap();
         assert_ne!(
-            victim.get_cache_key().unwrap(),
-            attacker.get_cache_key().unwrap(),
+            victim.get_cache_key(),
+            attacker.get_cache_key(),
             "不同上游 path 在同一组身份头下仍然必须落到不同缓存键"
         );
 
         let other_host = DataRequest::new(&build("https://evil.example/private/a.mp4")).unwrap();
         assert_ne!(
-            victim.get_cache_key().unwrap(),
-            other_host.get_cache_key().unwrap()
+            victim.get_cache_key(),
+            other_host.get_cache_key()
         );
     }
 

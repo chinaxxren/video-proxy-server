@@ -4,7 +4,7 @@ use crate::handlers::{BackgroundTasks, CacheHandler, NetworkHandler, ResponseBui
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
-use crate::utils::range::{range_length, OPEN_ENDED};
+use crate::utils::range::{clamp_end_to_upstream_length, range_length, OPEN_ENDED};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use hyper::{Body, Response};
@@ -94,6 +94,10 @@ impl MixedSourceHandler {
 
             let range = format!("bytes={}-{}", start, end);
             let fetched = self.fetch_with_timeout(url, &range).await?;
+            // 上游可以合法地只返回请求区间的前缀，按实际长度收窄 `end`，
+            // 否则 `Content-Length` 会超出真实响应体长度。见
+            // [`clamp_end_to_upstream_length`]。
+            let end = clamp_end_to_upstream_length(start, end, fetched.content_length);
             let (headers, meta, network_stream) = fetched.into_parts();
             let total_file_size = meta.total_size.unwrap_or(0);
 
@@ -127,6 +131,24 @@ impl MixedSourceHandler {
             );
         }
 
+        // 预先发起网络请求
+        let range = format!("bytes={}-{}", cached_end, end);
+        log_info!("Cache", "发起网络范围请求: {}", range);
+
+        let fetched = self.fetch_with_timeout(url, &range).await?;
+
+        // 网络段的长度由**上游实际给的**决定，不是由我们请求的决定。
+        //
+        // 这里原先只在两者不一致时打一行警告，然后照旧按期望长度建响应和
+        // 合并流。后果分两层：`Content-Length` 超出真实字节数让客户端读到
+        // EOF，而 `create_mixed_stream` 还会因为 `network_received <
+        // network_size` 在流中途注入一个「网络数据不足」错误 —— 此时响应头
+        // 早已发出，客户端只能看到一个断掉的响应体。
+        //
+        // 按实际长度收窄 `end`，再据此重算网络段长度，响应就变成一个诚实的
+        // 短 206，播放器会自己接着请求剩下的部分。
+        let end = clamp_end_to_upstream_length(cached_end, end, fetched.content_length);
+
         // checked 运算：end 已收敛，但缓存段与网络段之和仍可能超出 usize。
         let network_size = usize::try_from(range_length(cached_end, end)?)
             .map_err(|_| ProxyError::InvalidRange("网络段长度超出可表示范围".to_string()))?;
@@ -141,22 +163,6 @@ impl MixedSourceHandler {
             network_size,
             total_size
         );
-
-        // 预先发起网络请求
-        let range = format!("bytes={}-{}", cached_end, end);
-        log_info!("Cache", "发起网络范围请求: {}", range);
-
-        let fetched = self.fetch_with_timeout(url, &range).await?;
-
-        // 验证网络响应大小
-        if fetched.content_length != network_size as u64 {
-            log_info!(
-                "Cache",
-                "警告：网络响应大小不匹配 - 期望: {} 字节, 实际: {} 字节",
-                network_size,
-                fetched.content_length
-            );
-        }
 
         let (headers, meta, network_stream) = fetched.into_parts();
         let total_file_size = meta.total_size.unwrap_or(0);

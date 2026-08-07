@@ -771,12 +771,20 @@ async fn origin_ignoring_range_is_rejected_without_leaking_details() {
     assert!(!text.contains("media.mp4"), "响应体泄露了上游路径: {text}");
 }
 
+/// 完全不带身份头的请求必须能正常服务。
+///
+/// 这一条压着 HLS 链路的命门。播放器拿到重写后的 `/proxy/<encoded>` 分片地址
+/// 后是**自己**去请求的，不会捎上任何自定义头。一旦把身份头设成硬性要求，
+/// 每个 `.ts` 都以 400 收场，整条 HLS 链断在第一个分片上。
+///
+/// 缺头不影响防别名：缓存键的第一段仍是上游 host+path，见
+/// `forged_identity_headers_cannot_alias_across_upstream_resources`。
 #[tokio::test]
-async fn missing_identity_headers_is_a_bad_request() {
+async fn requests_without_identity_headers_are_served() {
     let origin = spawn_origin(OriginMode::Honest);
     let proxy = spawn_proxy(None);
 
-    let (status, _, _) = fetch(
+    let (status, headers, body) = fetch(
         &proxy,
         &origin,
         Ask {
@@ -786,8 +794,43 @@ async fn missing_identity_headers_is_a_bad_request() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(origin.hits(), 0, "缺少身份头的请求不该回源");
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers[CONTENT_RANGE], format!("bytes 0-1023/{ORIGIN_SIZE}"));
+    assert_eq!(body, expected_bytes(0, 1_023));
+}
+
+/// 只发其中一个身份头是配置错误，必须拒绝。
+///
+/// 静默忽略已发的那一个会把不同 revision 折叠进同一个缓存条目，正好是身份头
+/// 想避免的情况。所以「两个都有」和「两个都没有」都合法，「只有一个」不合法。
+#[tokio::test]
+async fn exactly_one_identity_header_is_rejected() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+    wait_until_listening(proxy.port).await;
+
+    for (name, value) in [
+        ("X-Cache-Asset-Id", "asset-1"),
+        ("X-Cache-Asset-Revision", "1"),
+    ] {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(proxy.url())
+            .header("X-Original-Url", origin.url())
+            .header(RANGE, "bytes=0-1023")
+            .header(name, value)
+            .body(Body::empty())
+            .unwrap();
+
+        let response = Client::new().request(request).await.expect("代理请求失败");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "只发 {name} 应被拒绝"
+        );
+    }
+
+    assert_eq!(origin.hits(), 0, "身份头不完整的请求不该回源");
 }
 
 /// 白名单只放了 127.0.0.1，`localhost` 是另一个字符串，必须拒绝。
@@ -1166,4 +1209,185 @@ async fn media3_style_open_ended_seek_sequence_returns_correct_bytes() {
             "seek 到 {offset} 时 Content-Range 不对"
         );
     }
+}
+
+/// 百分号编码一个上游 URL，够用就好：只处理会出现在测试地址里的字符。
+///
+/// 不引 `urlencoding` 是为了让这个测试只依赖被测 crate 的公开行为。
+fn percent_encode(url: &str) -> String {
+    url.chars()
+        .map(|c| match c {
+            ':' => "%3A".to_string(),
+            '/' => "%2F".to_string(),
+            '?' => "%3F".to_string(),
+            '=' => "%3D".to_string(),
+            '&' => "%26".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// HLS 链路的回归测试：播放器请求重写后的分片地址时**不会带任何自定义头**。
+///
+/// `rewrite_m3u8` 把分片改写成 `/proxy/<encoded-url>`，播放器随后自己去请求
+/// 这个地址。它不知道 `X-Cache-Asset-Id` / `X-Cache-Asset-Revision` 的存在，
+/// 也没有任何机制让它捎上——所以只要缓存键把这两个头当成硬性要求，每一个
+/// 分片都会以 400 收场，整条 HLS 链路断在第一个 `.ts` 上。m3u8 本身还是好的
+/// （那条路径不取缓存键），于是故障表现为「播放列表能拿到，一个分片都放不出来」。
+///
+/// 这条测试直接打 `/proxy/<encoded>`，一个自定义头都不发，压住缓存键必须能
+/// 只靠上游 URL 构造出来。
+#[tokio::test]
+async fn proxy_path_without_identity_headers_serves_bytes() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+    wait_until_listening(proxy.port).await;
+
+    let uri = format!(
+        "http://127.0.0.1:{}/proxy/{}",
+        proxy.port,
+        percent_encode(&origin.url())
+    );
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(&uri)
+        .header(RANGE, "bytes=0-4095")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = Client::new().request(request).await.expect("代理请求失败");
+    let status = response.status();
+    let body = hyper::body::to_bytes(response.into_body())
+        .await
+        .expect("读取响应体失败")
+        .to_vec();
+
+    assert_eq!(
+        status,
+        StatusCode::PARTIAL_CONTENT,
+        "播放器风格的分片请求（无自定义头）被拒绝了"
+    );
+    assert_eq!(body, expected_bytes(0, 4_095));
+}
+
+/// 同一个上游 URL，带身份头与不带身份头必须落在**不同**的缓存条目上。
+///
+/// 不带头时缓存键只有上游身份，带头时在其后追加了两段。两者不相等是设计
+/// 意图：调用方发身份头就是为了按 revision 隔离，绝不能因为「省略即等价」
+/// 而让新旧 revision 共用一条缓存。
+#[tokio::test]
+async fn identity_headers_still_partition_the_cache() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+    wait_until_listening(proxy.port).await;
+
+    // 先用带身份头的请求把区间缓存起来。
+    fetch(&proxy, &origin, Ask::default().range("bytes=0-4095")).await;
+    wait_until_cached(&proxy, &origin, "bytes=0-4095").await;
+
+    // 同一区间、同一上游，但走不带头的 /proxy/ 路径：必须重新回源。
+    let before = origin.hits();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "http://127.0.0.1:{}/proxy/{}",
+            proxy.port,
+            percent_encode(&origin.url())
+        ))
+        .header(RANGE, "bytes=0-4095")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = Client::new().request(request).await.expect("代理请求失败");
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let body = hyper::body::to_bytes(response.into_body())
+        .await
+        .expect("读取响应体失败")
+        .to_vec();
+
+    assert_eq!(body, expected_bytes(0, 4_095));
+    assert!(
+        origin.hits() > before,
+        "无身份头的请求命中了带身份头写下的缓存，键没有真正隔离"
+    );
+}
+
+/// `bytes=-N`：RFC 7233 的后缀范围，取资源末尾 N 字节。
+///
+/// 这是播放器探测 MP4 尾部 moov box 的标准手段——索引在文件尾时，播放器
+/// 开场第一个请求就是 `bytes=-N`。原先的解析器把它判为非法（起点为空串
+/// → "Invalid start position"），这类资源直接起播失败。
+#[tokio::test]
+async fn suffix_range_serves_the_last_bytes() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+
+    let (status, headers, body) =
+        fetch(&proxy, &origin, Ask::default().range("bytes=-1024")).await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "后缀范围被拒绝了");
+    assert_eq!(
+        body,
+        expected_bytes(ORIGIN_SIZE - 1024, ORIGIN_SIZE - 1),
+        "后缀范围返回的不是末尾 1024 字节"
+    );
+    assert_eq!(
+        headers[CONTENT_RANGE].to_str().unwrap(),
+        format!(
+            "bytes {}-{}/{}",
+            ORIGIN_SIZE - 1024,
+            ORIGIN_SIZE - 1,
+            ORIGIN_SIZE
+        )
+    );
+    assert_eq!(headers[CONTENT_LENGTH].to_str().unwrap(), "1024");
+}
+
+/// 后缀长度超过资源大小时，RFC 7233 要求返回整个资源，而不是 416。
+#[tokio::test]
+async fn oversized_suffix_range_serves_the_whole_resource() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+
+    let (status, headers, body) = fetch(
+        &proxy,
+        &origin,
+        Ask::default().range(&format!("bytes=-{}", ORIGIN_SIZE * 2)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, expected_bytes(0, ORIGIN_SIZE - 1));
+    assert_eq!(
+        headers[CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes 0-{}/{}", ORIGIN_SIZE - 1, ORIGIN_SIZE)
+    );
+}
+
+/// HEAD 也要懂后缀范围：走的是 `process_head`，与 GET 是两条独立的代码路径。
+#[tokio::test]
+async fn head_with_suffix_range_reports_the_tail() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+
+    let (status, headers, body) = fetch(
+        &proxy,
+        &origin,
+        Ask::default().range("bytes=-2048").head(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(body.is_empty(), "HEAD 不该带响应体");
+    assert_eq!(headers[CONTENT_LENGTH].to_str().unwrap(), "2048");
+    assert_eq!(
+        headers[CONTENT_RANGE].to_str().unwrap(),
+        format!(
+            "bytes {}-{}/{}",
+            ORIGIN_SIZE - 2048,
+            ORIGIN_SIZE - 1,
+            ORIGIN_SIZE
+        )
+    );
 }

@@ -9,7 +9,9 @@ use crate::storage::{
 };
 use crate::utils::error::Result;
 use crate::utils::network_policy::NetworkPolicy;
-use crate::utils::range::{parse_range, resolve_range};
+use crate::utils::range::{
+    clamp_end_to_upstream_length, format_range, parse_range_spec, resolve_range, RangeSpec,
+};
 use hyper::header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
 use hyper::{Body, Response, StatusCode};
 use std::path::PathBuf;
@@ -82,13 +84,27 @@ impl DataSourceManager {
 
     pub async fn process_request(&self, req: &DataRequest) -> Result<Response<Body>> {
         let url = req.get_url();
-        let key = req.get_cache_key()?.to_string();
-        let (start, requested_end) = parse_range(req.get_range())?;
+        let key = req.get_cache_key().to_string();
+        let spec = parse_range_spec(req.get_range())?;
 
         log_info!("Cache", "开始处理请求范围: {}", req.get_range());
 
         // 元数据只读一次，供以下两条缓存路径共用。
-        let meta = self.cache_handler.upstream_meta(&key).await?;
+        let mut meta = self.cache_handler.upstream_meta(&key).await?;
+
+        // 后缀范围（`bytes=-N`）的起点由总长度算出来，缺了总长度无从定位。这是
+        // 唯一在解析阶段就需要总长度的形态，因此只在这一种情况下多探一次上游，
+        // 其余请求的路径开销不变。
+        if matches!(spec, RangeSpec::Suffix { .. }) && meta.total_size.is_none() {
+            meta = self.probe_upstream_meta(url, &key).await?;
+        }
+
+        let (start, requested_end) = spec.endpoints(meta.total_size)?;
+
+        // 归一化后的范围串。后缀形态到此已被消解，下游（含 `NetSource`）只会
+        // 看到 `bytes=start-end` 或 `bytes=start-`，不必再懂后缀语义。
+        let normalized = format_range(start, requested_end);
+        let range = normalized.as_str();
 
         // 1) 完整缓存命中。总长度来自持久化元数据，因此上游不可达时依然可服务。
         if let Some(response) = self
@@ -110,18 +126,11 @@ impl DataSourceManager {
         //    其余等它写完缓存后走上面那两条缓存路径。
         match self.single_flight.join(&key, start, requested_end) {
             Join::Leader(guard) => {
-                self.fetch_from_network(
-                    url,
-                    &key,
-                    req.get_range(),
-                    start,
-                    requested_end,
-                    Some(guard),
-                )
-                .await
+                self.fetch_from_network(url, &key, range, start, requested_end, Some(guard))
+                    .await
             }
             Join::Follower(follower) => {
-                self.serve_as_follower(follower, url, &key, req.get_range(), start, requested_end)
+                self.serve_as_follower(follower, url, &key, range, start, requested_end)
                     .await
             }
         }
@@ -129,14 +138,11 @@ impl DataSourceManager {
 
     /// Build a HEAD response without starting the normal tee/cache body pipeline.
     pub async fn process_head(&self, req: &DataRequest) -> Result<Response<Body>> {
-        let key = req.get_cache_key()?.to_string();
+        let key = req.get_cache_key().to_string();
         let mut meta = self.cache_handler.upstream_meta(&key).await?;
 
         if meta.total_size.is_none() {
-            let fetched = self.network_handler.fetch(req.get_url(), "bytes=0-0").await?;
-            meta = fetched.meta.clone();
-            drop(fetched);
-            self.cache_handler.record_upstream_meta(&key, &meta).await?;
+            meta = self.probe_upstream_meta(req.get_url(), &key).await?;
         }
 
         let total = meta
@@ -145,7 +151,9 @@ impl DataSourceManager {
                 "上游未提供资源总长度".to_string(),
             ))?;
         let (status, content_length, content_range) = if req.client_sent_range() {
-            let (start, end) = parse_range(req.get_range())?;
+            // 后缀范围在这里也要先借总长度定位；HEAD 已经拿到了 total，
+            // 直接复用，不必再探一次上游。
+            let (start, end) = parse_range_spec(req.get_range())?.endpoints(Some(total))?;
             let (start, end) = resolve_range(start, end, Some(total))?;
             (
                 StatusCode::PARTIAL_CONTENT,
@@ -169,6 +177,22 @@ impl DataSourceManager {
         builder
             .body(Body::empty())
             .map_err(|error| crate::utils::error::ProxyError::Request(error.to_string()))
+    }
+
+    /// 用一个最小范围请求探出上游的总长度与内容类型，并落盘。
+    ///
+    /// `bytes=0-0` 只取一个字节，代价接近一次 HEAD，但比 HEAD 可靠：不少上游
+    /// （尤其是签名 URL 的 CDN）对 HEAD 回 403 或 405，却能正常响应范围 GET。
+    /// 总长度从 206 的 `Content-Range` 尾段取得。
+    ///
+    /// 探测结果写回缓存元数据，因此同一资源后续请求不会重复探测。
+    async fn probe_upstream_meta(&self, url: &str, key: &str) -> Result<UpstreamMeta> {
+        let fetched = self.network_handler.fetch(url, "bytes=0-0").await?;
+        let meta = fetched.meta.clone();
+        // 显式丢弃：那一个字节的响应体没有用处，但必须先释放连接。
+        drop(fetched);
+        self.cache_handler.record_upstream_meta(key, &meta).await?;
+        Ok(meta)
     }
 
     /// follower 路径：等 leader 写完缓存，然后自己去读。
@@ -307,6 +331,8 @@ impl DataSourceManager {
     ) -> Result<Response<Body>> {
         log_info!("Cache", "开始从网络获取: {}", range);
         let fetched = self.network_handler.fetch(url, range).await?;
+        // 上游实际声明的本次响应体长度，必须在拆解之前取出。
+        let upstream_length = fetched.content_length;
         // 一次拆解全部按移动取出，不再克隆 HeaderMap 和 UpstreamMeta。
         // 流是惰性的（只是给 Body 套了一层错误映射），提前取出不会开始拉取
         // 上游数据，下面那次 await 期间它只是躺着。
@@ -314,6 +340,11 @@ impl DataSourceManager {
 
         // 收敛开区间：u64::MAX 哨兵绝不能流入后续算术或响应头。
         let (start, end) = resolve_range(start, requested_end, meta.total_size)?;
+
+        // 上游只给了请求区间的一个前缀时按实际长度收窄，否则 `Content-Length`
+        // 会按请求长度发出而响应体更短，客户端读到一半撞 EOF。详见该函数注释。
+        // 缓存侧也用收窄后的区间记账，不会把没拿到的字节标记成已缓存。
+        let end = clamp_end_to_upstream_length(start, end, upstream_length);
         let total_size = meta.total_size.unwrap_or(0);
 
         // 持久化总长度与 Content-Type，让后续命中无需再探测上游。
@@ -405,7 +436,7 @@ mod tests {
             "bytes=2-5",
             "song",
         );
-        let key = closed.get_cache_key().unwrap();
+        let key = closed.get_cache_key();
         let storage = disk(dir.path());
         storage
             .write(
@@ -442,7 +473,7 @@ mod tests {
             "bytes=6-",
             "song",
         );
-        assert_eq!(open.get_cache_key().unwrap(), key);
+        assert_eq!(open.get_cache_key(), key);
         let response = manager.process_request(&open).await.unwrap();
         assert_eq!(response.headers()[CONTENT_RANGE], "bytes 6-9/10");
         assert_eq!(
@@ -459,7 +490,7 @@ mod tests {
             "bytes=0-9",
             "sparse",
         );
-        let key = request.get_cache_key().unwrap();
+        let key = request.get_cache_key();
         let storage = disk(dir.path());
         storage
             .write(key, stream::iter([Ok(Bytes::from_static(b"ij"))]), (8, 9))

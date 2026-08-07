@@ -7,8 +7,6 @@ use hyper::{Body, Method, Request, Response, StatusCode};
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const MAX_CONCURRENT_REQUESTS: usize = 64;
-
 pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
@@ -16,15 +14,12 @@ pub struct RequestHandler {
 }
 
 impl RequestHandler {
-    pub fn new(
-        source_manager: Arc<DataSourceManager>,
-        hls_handler: Arc<DefaultHlsHandler>,
-    ) -> Self {
-        Self::with_limit(source_manager, hls_handler, MAX_CONCURRENT_REQUESTS)
-    }
-
     /// 指定并发上限。0 会被抬到 1：`Semaphore::new(0)` 会让所有请求永久
     /// 挂起，看起来是服务器卡死而不是配置写错。
+    ///
+    /// 这里不再提供一个「默认上限」的构造函数：默认值只应有一处来源，就是
+    /// `ProxyConfig::default()`，它已经带了 64。再放一个同义常量在这一层，
+    /// 只会让以后改默认值时漏掉一处。
     pub fn with_limit(
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
@@ -65,7 +60,7 @@ impl RequestHandler {
                     .body(Body::from(content))
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
-            // Segment 和 Normal 走同一缓存路径；DataRequest::new 已完成缓存身份键构造。
+            // 非播放列表一律走字节范围缓存管线（HLS 分片也在内）。
             (false, _) => self.source_manager.process_request(&data_request).await,
         }?;
 
