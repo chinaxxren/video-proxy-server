@@ -62,9 +62,15 @@ impl NetworkPolicy {
     ///
     /// 这里的 DNS 解析只是**准入检查**，不能防住 DNS rebinding：解析结果和
     /// 连接时刻之间存在 TOCTOU 窗口，攻击者控制的权威 DNS 可以在这两次解析
-    /// 之间把记录翻成 127.0.0.1。真正的兜底在 [`PublicOnlyResolver`]，它在
-    /// 连接建立那一刻再过滤一次地址。两层都要保留：这一层给出可读的拒绝原因，
-    /// 那一层负责实际不可绕过。
+    /// 之间把记录翻成 127.0.0.1。域名类 URL 的兜底在 [`PublicOnlyResolver`]，
+    /// 它在连接建立那一刻再过滤一次地址。
+    ///
+    /// **但对 IP 字面量的 URL，这一层是唯一的防线。** hyper 的
+    /// `HttpConnector` 发现 host 已经是 IP 就跳过解析器直接 connect
+    /// （`hyper-0.14` 的 `SocketAddrs::try_parse` 分支），`PublicOnlyResolver`
+    /// 根本不会被调用。所以 `http://127.0.0.1/` 之所以连不出去，靠的是这里
+    /// 的非公网判定，不是那个类型约束。任何新增的回源路径都必须先过
+    /// `validate`，绕过它就等于没有 SSRF 防护——不能依赖「解析器兜底」。
     ///
     /// 正因为不可绕过的那层在连接时，这里的 DNS 结果可以按
     /// [`ADMISSION_TTL`] 复用：缓存命中最坏情况只是把一个已经翻成内网地址的
@@ -111,7 +117,7 @@ impl NetworkPolicy {
         let mut total = 0usize;
         for address in addresses {
             total += 1;
-            if is_public_ip(address.ip()) {
+            if is_allowed_target(address.ip()) {
                 public += 1;
             }
         }
@@ -159,9 +165,12 @@ impl NetworkPolicy {
 
 /// 只放行公网地址的 DNS 解析器。
 ///
-/// 装在 hyper 的 `HttpConnector` 上，作用于**实际建立连接前的最后一步**：
+/// 装在 hyper 的 `HttpConnector` 上，作用于**域名解析后、建立连接前**：
 /// 无论 [`NetworkPolicy::validate`] 当时解析到什么，这里都会重新过滤一遍，
 /// 因此 DNS rebinding 翻出来的内网地址永远到不了 `connect`。
+///
+/// 注意作用范围：host 本身就是 IP 字面量时 hyper 不走解析器，这一层看不到
+/// 那类请求。IP 字面量由 [`NetworkPolicy::validate`] 负责，见那里的说明。
 ///
 /// 过滤而非整体拒绝：一个域名同时有公网和内网 A 记录时（split-horizon DNS
 /// 里很常见），仍然允许连公网那几个。全部地址都不合格才报错。
@@ -200,7 +209,7 @@ impl Service<Name> for PublicOnlyResolver {
         Box::pin(async move {
             let addresses = inner.call(name).await?;
             let allowed: Vec<SocketAddr> = addresses
-                .filter(|address| is_public_ip(address.ip()))
+                .filter(|address| is_allowed_target(address.ip()))
                 .collect();
             if allowed.is_empty() {
                 return Err(io::Error::new(
@@ -213,10 +222,54 @@ impl Service<Name> for PublicOnlyResolver {
     }
 }
 
-/// 判定一个地址是否可以安全地作为上游目标。
+/// 上游目标准入判定，是 [`NetworkPolicy::validate`] 和 [`PublicOnlyResolver`]
+/// 共用的唯一决策点。
 ///
-/// 只要无法确定它是公网单播地址就返回 `false`：这里的默认值必须偏保守，
+/// 默认等价于 [`is_public_ip`]。只有编译期打开 `allow-private-upstream`
+/// 时才额外放行内网/回环地址——这是给端到端测试用的：测试需要把上游指向
+/// 本机起的假源站，而生产逻辑必须拒绝这种地址。
+///
+/// 用编译期 feature 而不是运行期开关，是为了让生产构建**没有**这条代码路径，
+/// 而不是「有但没打开」：没有配置项能在运行时误开它。
+#[cfg(not(feature = "allow-private-upstream"))]
+pub fn is_allowed_target(ip: IpAddr) -> bool {
+    is_public_ip(ip)
+}
+
+/// 测试专用变体，见上面那条注释。
+#[cfg(feature = "allow-private-upstream")]
+pub fn is_allowed_target(ip: IpAddr) -> bool {
+    // 每个进程只喊一次，别把测试输出刷满。
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        // 直接写 stderr 而不用 log_info!：后者可能被关掉，而这行警告
+        // 恰恰是不能被静音的那一行。
+        eprintln!(
+            "[WARN] 本二进制启用了 allow-private-upstream：\
+             回源允许指向内网与回环地址，SSRF 防护已被削弱。\
+             仅限本地测试，绝不能用于生产构建。"
+        );
+    });
+
+    if is_public_ip(ip) {
+        return true;
+    }
+    // 只放开回环和私网这两类——测试假源站只会绑在这上面。
+    // link-local（含 169.254.169.254 这类云元数据地址）依旧拒绝：
+    // 就算是测试构建，也没有理由需要它。
+    match ip {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        IpAddr::V6(ip) => ip.is_loopback(),
+    }
+}
+
+/// 判定一个地址是否是公网单播地址。
+///
+/// 只要无法确定就返回 `false`：这里的默认值必须偏保守，
 /// 漏判一个内网地址就等于开放一次 SSRF。
+///
+/// 准入判定请调用 [`is_allowed_target`]，不要直接用这个函数——
+/// 它不受 `allow-private-upstream` 影响，是纯粹的地址分类谓词。
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_public_ipv4(ip),
@@ -361,19 +414,32 @@ mod tests {
     }
 
     /// 连接前的最后一道过滤：即使名字解析成功，内网地址也不能交给 connect。
+    ///
+    /// 注意这只覆盖**域名**形式的上游。IP 字面量走不到解析器，见
+    /// [`NetworkPolicy::validate`] 的注释。
+    ///
+    /// 打开 `allow-private-upstream` 时 localhost 是故意放行的，所以这条
+    /// 只在默认构建下成立；公网放行那一半与 feature 无关，单独一条常驻。
+    #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
     async fn resolver_drops_non_public_addresses() {
         use std::str::FromStr;
 
         let mut resolver = PublicOnlyResolver::new();
-
         let error = resolver
             .call(Name::from_str("localhost").unwrap())
             .await
             .expect_err("localhost 应当被拒绝");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
 
-        // 公网字面量仍然放行，且解析结果原样带出。
+    /// 公网地址必须原样带出。这一半不受 `allow-private-upstream` 影响，
+    /// 否则打开 feature 后解析器就完全没有测试覆盖了。
+    #[tokio::test]
+    async fn resolver_passes_public_addresses_through() {
+        use std::str::FromStr;
+
+        let mut resolver = PublicOnlyResolver::new();
         let addresses: Vec<SocketAddr> = resolver
             .call(Name::from_str("8.8.8.8").unwrap())
             .await
@@ -394,19 +460,42 @@ mod tests {
         assert!(policy.validate("https://other.example/song").await.is_err());
     }
 
+    /// IP 字面量的唯一防线就在这里——解析器根本不会被调用。
+    #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
     async fn rejects_allowlisted_private_ip_literal() {
         let policy = NetworkPolicy::allow_hosts(["127.0.0.1"]);
         assert!(policy.validate("http://127.0.0.1/secret").await.is_err());
     }
 
+    /// 打开 `allow-private-upstream` 后回环地址放行——端到端测试要靠它把
+    /// 上游指向本机假源站。白名单仍然生效，没列进去的主机照样拒绝。
+    #[cfg(feature = "allow-private-upstream")]
+    #[tokio::test]
+    async fn feature_allows_loopback_but_still_enforces_allowlist() {
+        let policy = NetworkPolicy::allow_hosts(["127.0.0.1"]);
+        assert!(policy.validate("http://127.0.0.1/media").await.is_ok());
+        assert!(policy.validate("http://10.0.0.1/media").await.is_err());
+
+        // 云元数据地址属于 link-local，即使测试构建也不放行。
+        let metadata = NetworkPolicy::allow_hosts(["169.254.169.254"]);
+        assert!(metadata
+            .validate("http://169.254.169.254/latest/meta-data/")
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn accepts_allowlisted_public_ip_and_normalizes_host_case() {
         let policy = NetworkPolicy::allow_hosts([" 8.8.8.8 "]);
         assert!(policy.validate("https://8.8.8.8/media").await.is_ok());
+    }
 
+    #[cfg(not(feature = "allow-private-upstream"))]
+    #[tokio::test]
+    async fn allowlisted_name_resolving_to_loopback_is_rejected() {
         let named = NetworkPolicy::allow_hosts(["LOCALHOST"]);
-        // The normalized name passes the allowlist and is then rejected as non-public.
+        // 规范化后的名字过了白名单，随后因非公网被拒。
         let error = named.validate("http://localhost/media").await.unwrap_err();
         assert!(matches!(error, ProxyError::Request(message) if message.contains("非公网")));
     }

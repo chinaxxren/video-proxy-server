@@ -1,3 +1,4 @@
+use crate::handlers::single_flight::LeaderGuard;
 use crate::handlers::CacheHandler;
 use crate::log_info;
 use crate::utils::error::Result;
@@ -21,11 +22,18 @@ pub const FORWARD_CHANNEL_CAPACITY: usize = 32;
 ///
 /// `range` 是这段数据在整个资源里的闭区间位置，必须与上游实际返回的字节
 /// 范围一致，否则缓存索引会把错位的数据标记成已下载。
+///
+/// `guard` 是 single-flight 的 leader 凭证，会被移动进**缓存写入任务**，
+/// 因此它的析构时刻就是 `write_stream` 返回的时刻。这个位置是刻意选的：
+/// 等在同一区间上的 follower 被唤醒后第一件事是查缓存，如果守卫在
+/// 「响应构造完」就析构，那时缓存里还什么都没有，follower 只能各自再回源
+/// 一次——合并就白做了。传 `None` 表示这一路不参与合并。
 pub fn tee_to_cache(
     upstream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
     cache_handler: Arc<CacheHandler>,
     key: String,
     range: (u64, u64),
+    guard: Option<LeaderGuard>,
 ) -> ReceiverStream<Result<Bytes>> {
     let (client_tx, client_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
     let (cache_tx, cache_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
@@ -35,6 +43,8 @@ pub fn tee_to_cache(
     // 缓存写入独立后台运行。绝不能在返回响应前 await 它：
     // 那样 hyper 还没开始 poll 响应体，转发任务就会被通道容量卡死。
     tokio::spawn(async move {
+        // 显式绑定：守卫要活到这个任务结束，不能被优化掉，也不能提前 drop。
+        let _leader = guard;
         let stream = Box::pin(ReceiverStream::new(cache_rx));
         if let Err(error) = cache_handler.write_stream(&key, range, stream).await {
             log_info!("Cache", "缓存写入失败: {}", error);
@@ -283,7 +293,7 @@ mod tests {
             Ok(Bytes::from_static(b"abcde")),
             Ok(Bytes::from_static(b"fghij")),
         ]);
-        let mut client = tee_to_cache(upstream, cache.clone(), "k".to_string(), (0, 9));
+        let mut client = tee_to_cache(upstream, cache.clone(), "k".to_string(), (0, 9), None);
 
         let mut received = Vec::new();
         while let Some(chunk) = client.next().await {

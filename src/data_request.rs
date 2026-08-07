@@ -23,6 +23,12 @@ pub struct DataRequest {
     pub url: String,
     cache_key: Option<String>,
     pub range: String,
+    /// 客户端是否真的发了 `Range` 头。
+    ///
+    /// 不能靠 `range == "bytes=0-"` 反推：没带 `Range` 时这里会被合成成
+    /// `bytes=0-`，和客户端显式请求 `bytes=0-` 长得一模一样，而两者的正确
+    /// 响应状态码不同（200 对 206）。所以必须单独记一笔。
+    client_sent_range: bool,
     pub headers: HeaderMap,
     pub request_type: RequestType,
 }
@@ -73,7 +79,8 @@ impl DataRequest {
 
         let cache_key = Self::build_cache_key(&parsed, req.headers())?;
 
-        // 获取 Range 头
+        // 获取 Range 头。没带就当成「要整个资源」，内部统一按区间处理。
+        let client_sent_range = req.headers().contains_key(RANGE);
         let range = if let Some(range_header) = req.headers().get(RANGE) {
             range_header.to_str()?.to_string()
         } else {
@@ -99,6 +106,7 @@ impl DataRequest {
             url,
             cache_key,
             range,
+            client_sent_range,
             headers: req.headers().clone(),
             request_type,
         })
@@ -164,6 +172,15 @@ impl DataRequest {
 
     pub fn get_range(&self) -> &str {
         &self.range
+    }
+
+    /// 客户端是否真的发了 `Range` 头。
+    ///
+    /// 不能靠比较 `get_range() == "bytes=0-"` 来判断：客户端显式发一个
+    /// `Range: bytes=0-` 是完全合法的，那种情况必须回 206，而缺头合成出来的
+    /// 同一个字符串必须回 200。两者字符串一样，只有这个标记能区分。
+    pub fn client_sent_range(&self) -> bool {
+        self.client_sent_range
     }
 
     pub fn get_cache_key(&self) -> Result<&str> {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use hyper::client::HttpConnector;
 use hyper::{Body, Response, StatusCode};
 use hyper_tls::HttpsConnector;
@@ -76,7 +77,27 @@ impl NetSource {
         let mut last_error = None;
         for attempt in 1..=MAX_ATTEMPTS {
             match self.try_download(start, end).await {
-                Ok(result) => return Ok(result),
+                Ok((resp, content_length)) => {
+                    // 先保存需要的部分，再消费 resp。
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+                    let body = resp.into_body();
+
+                    // 包装响应体，让它能在流式读取失败时自动重试。
+                    let wrapped_body = Self::wrap_with_retry(
+                        body,
+                        self.clone(),
+                        start,
+                        end,
+                        MAX_ATTEMPTS,
+                    );
+
+                    // 构造新的 Response。
+                    let mut wrapped_resp = Response::new(wrapped_body);
+                    *wrapped_resp.status_mut() = status;
+                    *wrapped_resp.headers_mut() = headers;
+                    return Ok((wrapped_resp, content_length));
+                }
                 // 416 是客户端语义错误，重试不会改变结果。
                 Err(error @ ProxyError::InvalidRange(_)) => return Err(error),
                 Err(error) => {
@@ -99,6 +120,120 @@ impl NetSource {
         }
 
         Err(last_error.unwrap_or_else(|| ProxyError::Request("Max retries reached".into())))
+    }
+
+    /// 包装响应体，让它能在流式读取失败时从断点自动重试。
+    ///
+    /// 用 `futures::stream::unfold` 创建一个有状态的流：记录已读字节数，
+    /// 遇到流错误时发起新请求继续拉取剩余部分，最多重试 `max_attempts` 次。
+    fn wrap_with_retry(
+        initial_body: Body,
+        source: NetSource,
+        range_start: u64,
+        range_end: u64,
+        max_attempts: u32,
+    ) -> Body {
+        // 状态：(当前body, 已读字节数, 已尝试次数)
+        type State = (Body, u64, u32);
+        let initial_state: State = (initial_body, 0, 1);
+
+        let stream = futures::stream::unfold(
+            (initial_state, source, range_start, range_end, max_attempts),
+            |(state, source, range_start, range_end, max_attempts)| async move {
+                let (mut body, mut bytes_read, mut attempt) = state;
+
+                loop {
+                    // 尝试从当前 body 读一块数据。
+                    match body.next().await {
+                        Some(Ok(chunk)) => {
+                            bytes_read += chunk.len() as u64;
+                            let new_state = (body, bytes_read, attempt);
+                            return Some((
+                                Ok(chunk),
+                                (new_state, source, range_start, range_end, max_attempts),
+                            ));
+                        }
+                        Some(Err(error)) => {
+                            // 流报错，尝试重试。
+                            if attempt >= max_attempts {
+                                log_info!(
+                                    "Request",
+                                    "流式读取失败且已达最大重试次数 {}",
+                                    max_attempts
+                                );
+                                return Some((
+                                    Err(ProxyError::Network(format!(
+                                        "流式读取失败: {}",
+                                        error
+                                    ))),
+                                    (
+                                        (body, bytes_read, attempt),
+                                        source,
+                                        range_start,
+                                        range_end,
+                                        max_attempts,
+                                    ),
+                                ));
+                            }
+
+                            // 发起重试。
+                            attempt += 1;
+                            let resume_start = range_start + bytes_read;
+                            let resume_range = if range_end == OPEN_ENDED {
+                                format!("bytes={}-", resume_start)
+                            } else {
+                                format!("bytes={}-{}", resume_start, range_end)
+                            };
+
+                            log_info!(
+                                "Request",
+                                "流式读取中断于 {} 字节，第 {} 次重试: {}",
+                                bytes_read,
+                                attempt,
+                                resume_range
+                            );
+
+                            // 指数退避。
+                            let factor = 1u32.checked_shl(attempt - 1).unwrap_or(u32::MAX);
+                            tokio::time::sleep(RETRY_BACKOFF.saturating_mul(factor)).await;
+
+                            let retry_source = NetSource::new(
+                                &source.url,
+                                &resume_range,
+                                source.policy.clone(),
+                                source.client.clone(),
+                            );
+
+                            match retry_source.try_download(resume_start, range_end).await {
+                                Ok((resp, _)) => {
+                                    body = resp.into_body();
+                                    // 继续循环，从新 body 读取。
+                                }
+                                Err(retry_error) => {
+                                    log_info!("Request", "重试失败: {}", retry_error);
+                                    return Some((
+                                        Err(retry_error),
+                                        (
+                                            (body, bytes_read, attempt),
+                                            source,
+                                            range_start,
+                                            range_end,
+                                            max_attempts,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            // 流正常结束。
+                            return None;
+                        }
+                    }
+                }
+            },
+        );
+
+        Body::wrap_stream(stream)
     }
 
     async fn try_download(&self, start: u64, end: u64) -> Result<(Response<Body>, u64)> {
