@@ -10,6 +10,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 
 - HTTP and HTTPS upstream sources
 - HTTP `Range` requests and partial-content responses
+- `GET` and metadata-only `HEAD` requests
 - Disk-backed chunk caching
 - Persistent completed-range metadata, independent of sparse file length
 - Mixed cache/network responses for a verified contiguous cache prefix
@@ -18,6 +19,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - Stable cache identity independent of signed URLs
 - Upstream host allowlist and private-address rejection
 - Localhost-only listener
+- C ABI lifecycle entry points for mobile adapters (`include/media_proxy_cache.h`)
 
 ## Requirements
 
@@ -107,6 +109,55 @@ The command also prints ready-to-paste `curl`, `ffplay`, and `mpv` commands.
 `allow-private-upstream` and the development gateway are only for local tests
 and are not included in the production server path.
 
+### Mobile FFI preview
+
+The crate also builds `staticlib` and `cdylib` artifacts. Mobile adapters can
+include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
+server with a host-owned cache directory, start it on a fixed port or port `0`,
+and release it with `stop`/`destroy`. This is a preview ABI; platform-specific
+JNI, Swift, and N-API wrappers and release packaging are still pending.
+
+The native build helper is available at `scripts/build-mobile.sh`:
+
+```bash
+PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
+PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
+PLATFORM=macos ./scripts/build-mobile.sh dist/desktop
+PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
+```
+
+It requires the corresponding Rust targets and copies the C header beside each
+platform's native artifacts. Android Kotlin packaging should consume the
+generated `.so` files through an Android library module.
+
+Adapter ownership templates are under `platform/android`, `platform/ios`, and
+`platform/harmony`. They are API contracts only until each host project links
+the generated native library and supplies its JNI, Swift module map, or N-API
+bridge.
+
+The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
+targets; Windows uses the GNU x86_64 target by default and requires a MinGW
+linker on the build host. Desktop consumers can use the generated `cdylib` or
+`staticlib` directly.
+
+Tagged pushes matching `v*` run `.github/workflows/release.yml` and publish
+macOS ARM64/Intel, Windows x86_64, and Linux x86_64 archives. The workflow can
+also be run manually to produce downloadable Actions artifacts without creating
+a GitHub Release.
+
+On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
+release dylib and exercises the complete create/start/stop/destroy lifecycle.
+
+### HLS playlist refresh policy
+
+Rewritten playlist bodies are kept in a bounded in-memory cache. VOD playlists
+(`EXT-X-ENDLIST`) are refreshed every 5 minutes, master playlists every 30
+seconds, and live media playlists every half target duration (clamped to
+1-10 seconds). At most 128 playlist bodies and 8 MiB of playlist body/key data
+are retained; the oldest entries are evicted first. Segment bytes continue to
+use the persistent disk cache and are independent of this playlist-body TTL.
+
 ## Run
 
 The executable accepts:
@@ -141,17 +192,24 @@ cargo run --example proxy_client -- \
 Configure approved hosts explicitly:
 
 ```rust
-use proxy_server::server::ProxyServer;
+use proxy_server::server::{ProxyConfig, ProxyServer};
 
 #[tokio::main]
 async fn main() {
-    let server = ProxyServer::with_allowed_hosts(
-        8080,
-        "./cache",
-        ["media.example.com", "cdn.example.com"],
-    );
-
-    server.start().await.unwrap();
+    let server = std::sync::Arc::new(ProxyServer::with_config(ProxyConfig {
+        port: 0,
+        cache_dir: "./cache".into(),
+        allowed_hosts: vec!["media.example.com".into(), "cdn.example.com".into()],
+        ..Default::default()
+    }));
+    let running = tokio::spawn({
+        let server = server.clone();
+        async move { server.start().await }
+    });
+    let port = server.wait_until_ready().await.unwrap();
+    println!("proxy ready at http://127.0.0.1:{port}");
+    server.stop();
+    running.await.unwrap().unwrap();
 }
 ```
 
@@ -177,6 +235,12 @@ assetId + assetRevision
 
 The signed URL query is only the current network source. Changing its token does not create a different cache entry. `userId` is not yet part of the core cache key; multi-user production integration must add a trusted host-provided tenant/user boundary before enabling shared caches.
 
+`HEAD` follows the same request contract. A cold HEAD performs only a
+`bytes=0-0` upstream probe to discover total length and content type; it does
+not mark media bytes as cached. Once metadata is persisted, later HEAD requests
+do not contact the upstream. Single and open-ended byte ranges are supported;
+multiple ranges are explicitly rejected with `416`.
+
 ## Network Security
 
 Before an upstream request is sent, the proxy:
@@ -194,14 +258,16 @@ Do not log or persist `X-Original-Url` outside this core. It may contain short-l
 Cache keys are hashed before being used as paths. Each cached object has:
 
 - a data file containing bytes at their source offsets;
-- a JSON sidecar containing the inclusive ranges that completed successfully.
+- a versioned JSON sidecar containing the cache key, upstream metadata, and the inclusive ranges that completed successfully.
 
 File length alone is never treated as proof that a range is cached. Sidecar updates happen only after data has been flushed and are committed through a temporary-file rename.
+
+During startup recovery, the cache removes interrupted sidecar temporary files and validates each committed entry against its hashed path and data-file length. Malformed metadata, unknown future schema versions, overlapping or unsorted ranges, and ranges extending beyond the data file are treated as untrusted; their data and sidecar files are removed instead of being exposed as cache hits. Legacy v0 metadata remains readable and is upgraded to the current schema on its next write.
 
 ## Known Limitations
 
 - No Android JNI, iOS XCFramework, or HarmonyOS N-API adapter
-- `start`/`stop` and a config struct exist, but `start` binds a fixed port; binding port 0 and reporting the assigned port is still missing, and the lifecycle has no explicit state machine
+- The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed
 - A request without a `Range` header answers `206` rather than `200`. Most players tolerate it, but it is not what RFC 7233 specifies

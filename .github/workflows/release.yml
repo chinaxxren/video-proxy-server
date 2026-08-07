@@ -1,0 +1,57 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          - os: ubuntu-latest
+            name: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked --release
+      - name: Collect Unix artifacts
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p release/include
+          cp include/media_proxy_cache.h release/include/
+          cp target/release/proxy-server release/
+          cp target/release/libproxy_server.a release/ 2>/dev/null || true
+          cp target/release/libproxy_server.dylib release/ 2>/dev/null || true
+          cp target/release/libproxy_server.so release/ 2>/dev/null || true
+          tar -czf media-proxy-cache-${{ matrix.name }}.tar.gz -C release .
+      - name: Collect Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/include
+          Copy-Item include/media_proxy_cache.h release/include/
+          Copy-Item target/release/proxy-server.exe release/
+          Copy-Item target/release/proxy_server.dll release/ -ErrorAction SilentlyContinue
+          Copy-Item target/release/proxy_server.dll.lib release/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path release/* -DestinationPath media-proxy-cache-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-proxy-cache-${{ matrix.name }}
+          path: media-proxy-cache-${{ matrix.name }}.*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: media-proxy-cache-${{ matrix.name }}.*

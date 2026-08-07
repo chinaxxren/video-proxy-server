@@ -8,6 +8,11 @@ pub fn parse_range(range: &str) -> Result<(u64, u64)> {
 
     // 移除前缀
     let range = &range[6..];
+    if range.contains(',') {
+        return Err(ProxyError::InvalidRange(
+            "multiple byte ranges are not supported".to_string(),
+        ));
+    }
 
     // 分割范围
     let parts: Vec<&str> = range.split('-').collect();

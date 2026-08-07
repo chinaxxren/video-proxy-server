@@ -11,9 +11,27 @@ use hyper::Server;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
+
+const STATE_CREATED: u8 = 0;
+const STATE_STARTING: u8 = 1;
+const STATE_RUNNING: u8 = 2;
+const STATE_STOPPING: u8 = 3;
+const STATE_STOPPED: u8 = 4;
+const STATE_FAILED: u8 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProxyServerStatus {
+    Created,
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+}
 
 /// 代理服务器的全部可调参数。
 ///
@@ -57,8 +75,11 @@ impl Default for ProxyConfig {
 
 pub struct ProxyServer {
     port: u16,
+    bound_port: AtomicU16,
+    state: AtomicU8,
     handler: Arc<RequestHandler>,
     shutdown: Arc<Notify>,
+    ready: watch::Sender<u8>,
     shutdown_timeout: Duration,
     background_tasks: Arc<BackgroundTasks>,
 }
@@ -115,10 +136,14 @@ impl ProxyServer {
             config.max_concurrent_requests,
         ));
 
+        let (ready, _) = watch::channel(0);
         Self {
             port: config.port,
+            bound_port: AtomicU16::new(0),
+            state: AtomicU8::new(STATE_CREATED),
             handler,
             shutdown: Arc::new(Notify::new()),
+            ready,
             shutdown_timeout: config.shutdown_timeout,
             background_tasks,
         }
@@ -127,10 +152,62 @@ impl ProxyServer {
     /// 发送优雅停止信号。`start()` 会完成所有进行中的请求后关闭监听器。
     /// 可从任意线程安全调用；多次调用幂等。
     pub fn stop(&self) {
+        let _ = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            match state {
+                STATE_CREATED | STATE_STARTING | STATE_RUNNING => Some(STATE_STOPPING),
+                _ => None,
+            }
+        });
         self.shutdown.notify_one();
     }
 
+    pub fn status(&self) -> ProxyServerStatus {
+        match self.state.load(Ordering::Acquire) {
+            STATE_STARTING => ProxyServerStatus::Starting,
+            STATE_RUNNING => ProxyServerStatus::Running,
+            STATE_STOPPING => ProxyServerStatus::Stopping,
+            STATE_STOPPED => ProxyServerStatus::Stopped,
+            STATE_FAILED => ProxyServerStatus::Failed,
+            _ => ProxyServerStatus::Created,
+        }
+    }
+
+    /// Returns the actual listening port after startup. This is especially
+    /// useful when `ProxyConfig::port` is zero and the OS chooses a free port.
+    pub fn bound_port(&self) -> Option<u16> {
+        match self.bound_port.load(Ordering::Acquire) {
+            0 => None,
+            port => Some(port),
+        }
+    }
+
+    /// Wait until the socket has been bound and return its actual port.
+    pub async fn wait_until_ready(&self) -> Result<u16> {
+        let mut ready = self.ready.subscribe();
+        loop {
+            if let Some(port) = self.bound_port() {
+                return Ok(port);
+            }
+            if self.status() == ProxyServerStatus::Failed {
+                return Err(ProxyError::IO("代理服务器启动失败".to_string()));
+            }
+            ready
+                .changed()
+                .await
+                .map_err(|_| ProxyError::IO("代理服务器启动状态不可用".to_string()))?;
+        }
+    }
+
     pub async fn start(&self) -> Result<()> {
+        match self.state.compare_exchange(
+            STATE_CREATED,
+            STATE_STARTING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(STATE_STOPPING) => {}
+            Err(_) => return Err(ProxyError::Request("代理服务器不能重复启动".to_string())),
+        }
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
 
         let handler = self.handler.clone();
@@ -172,14 +249,28 @@ impl ProxyServer {
         let shutdown = self.shutdown.clone();
         let drain_started = Arc::new(Notify::new());
         let drain_signal = drain_started.clone();
-        let server = Server::try_bind(&addr)
-            .map_err(|e| ProxyError::IO(format!("无法绑定 {}: {}", addr, e)))?
+        let builder = match Server::try_bind(&addr) {
+            Ok(builder) => builder,
+            Err(error) => {
+                self.state.store(STATE_FAILED, Ordering::Release);
+                self.ready.send_replace(1);
+                return Err(ProxyError::IO(format!("无法绑定 {}: {}", addr, error)));
+            }
+        };
+        let actual_addr = builder.local_addr();
+        self.bound_port.store(actual_addr.port(), Ordering::Release);
+        if self.state.load(Ordering::Acquire) != STATE_STOPPING {
+            self.state.store(STATE_RUNNING, Ordering::Release);
+        }
+        self.ready.send_replace(1);
+
+        let server = builder
             .serve(make_svc)
             .with_graceful_shutdown(async move {
                 shutdown.notified().await;
                 drain_signal.notify_one();
             });
-        log_info!("Server", "代理服务器正在运行在 http://{}", addr);
+        log_info!("Server", "代理服务器正在运行在 http://{}", actual_addr);
 
         tokio::pin!(server);
         let result = tokio::select! {
@@ -198,6 +289,10 @@ impl ProxyServer {
             }
         };
         self.background_tasks.abort_all();
+        self.state.store(
+            if result.is_ok() { STATE_STOPPED } else { STATE_FAILED },
+            Ordering::Release,
+        );
         result
     }
 }
@@ -227,6 +322,8 @@ mod tests {
 
         let error = server.start().await.unwrap_err();
         assert!(matches!(error, ProxyError::IO(_)));
+        assert_eq!(server.status(), ProxyServerStatus::Failed);
+        assert!(server.wait_until_ready().await.is_err());
         drop(listener);
     }
 
@@ -385,5 +482,59 @@ mod tests {
             .expect("停止操作超过外层测试时限")
             .expect("服务器任务 panic");
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn port_zero_reports_the_assigned_port_and_lifecycle_state() {
+        let cache = tempfile::tempdir().unwrap();
+        let server = Arc::new(ProxyServer::with_config(ProxyConfig {
+            port: 0,
+            cache_dir: cache.path().to_path_buf(),
+            ..Default::default()
+        }));
+        assert_eq!(server.status(), ProxyServerStatus::Created);
+        assert_eq!(server.bound_port(), None);
+
+        let running = tokio::spawn({
+            let server = server.clone();
+            async move { server.start().await }
+        });
+        let port = tokio::time::timeout(Duration::from_secs(1), server.wait_until_ready())
+            .await
+            .expect("等待动态端口超时")
+            .unwrap();
+
+        assert_ne!(port, 0);
+        assert_eq!(server.bound_port(), Some(port));
+        assert_eq!(server.status(), ProxyServerStatus::Running);
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("动态端口不可连接");
+
+        server.stop();
+        assert_eq!(server.status(), ProxyServerStatus::Stopping);
+        running.await.unwrap().unwrap();
+        assert_eq!(server.status(), ProxyServerStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn running_server_rejects_a_second_start() {
+        let cache = tempfile::tempdir().unwrap();
+        let server = Arc::new(ProxyServer::with_config(ProxyConfig {
+            port: 0,
+            cache_dir: cache.path().to_path_buf(),
+            ..Default::default()
+        }));
+        let running = tokio::spawn({
+            let server = server.clone();
+            async move { server.start().await }
+        });
+        server.wait_until_ready().await.unwrap();
+
+        let error = server.start().await.unwrap_err();
+        assert!(matches!(error, ProxyError::Request(_)));
+
+        server.stop();
+        running.await.unwrap().unwrap();
     }
 }

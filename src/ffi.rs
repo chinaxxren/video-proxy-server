@@ -1,0 +1,118 @@
+//! Minimal C ABI for mobile adapters.
+//!
+//! The ABI owns no caller memory: strings are copied during construction and
+//! the returned handle remains valid until `proxy_server_destroy` is called.
+
+use crate::server::{ProxyConfig, ProxyServer};
+use std::ffi::{c_char, CStr};
+use std::path::PathBuf;
+use std::ptr;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
+
+pub struct ProxyServerHandle {
+    config: Mutex<Option<ProxyConfig>>,
+    server: Arc<Mutex<Option<Arc<ProxyServer>>>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+unsafe fn read_string(value: *const c_char) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    CStr::from_ptr(value).to_str().ok().map(str::to_owned)
+}
+
+/// Creates a server handle. `cache_dir` must be a valid UTF-8, NUL-terminated path.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_create(
+    port: u16,
+    cache_dir: *const c_char,
+) -> *mut ProxyServerHandle {
+    let Some(cache_dir) = read_string(cache_dir) else { return ptr::null_mut() };
+    let config = ProxyConfig {
+        port,
+        cache_dir: PathBuf::from(cache_dir),
+        ..Default::default()
+    };
+    Box::into_raw(Box::new(ProxyServerHandle { config: Mutex::new(Some(config)), server: Arc::new(Mutex::new(None)), thread: Mutex::new(None) }))
+}
+
+/// Starts the server and waits until its socket is bound. Returns the bound port,
+/// or 0 on failure/already-started. A port of 0 requests OS allocation.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u16 {
+    let Some(handle) = handle.as_ref() else { return 0 };
+    let Ok(mut slot) = handle.thread.lock() else { return 0 };
+    if slot.is_some() { return 0; }
+    let Some(config) = handle.config.lock().ok().and_then(|mut value| value.take()) else { return 0; };
+    let (tx, rx) = mpsc::sync_channel(1);
+    let published = handle.server.clone();
+    let thread = std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(_) => { let _ = tx.send(0); return; }
+        };
+        let result = runtime.block_on(async {
+            let server = Arc::new(ProxyServer::with_config(config));
+            if let Ok(mut value) = published.lock() { *value = Some(server.clone()); }
+            let start = tokio::spawn({ let server = server.clone(); async move { server.start().await } });
+            let port = server.wait_until_ready().await.map(|port| port).unwrap_or(0);
+            let _ = tx.send(port);
+            let _ = start.await;
+            port
+        });
+        let _ = result;
+    });
+    *slot = Some(thread);
+    drop(slot);
+    rx.recv().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn ffi_lifecycle_uses_dynamic_port_and_rejects_repeated_start() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert!(!handle.is_null());
+            assert_ne!(proxy_server_start(handle), 0);
+            assert_eq!(proxy_server_start(handle), 0);
+            proxy_server_stop(handle);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ffi_rejects_null_and_non_utf8_paths() {
+        unsafe {
+            assert!(proxy_server_create(0, ptr::null()).is_null());
+            let invalid = [0xff_u8, 0];
+            assert!(proxy_server_create(0, invalid.as_ptr().cast()).is_null());
+            assert_eq!(proxy_server_start(ptr::null_mut()), 0);
+            proxy_server_stop(ptr::null_mut());
+            proxy_server_destroy(ptr::null_mut());
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_stop(handle: *mut ProxyServerHandle) {
+    let Some(handle) = handle.as_ref() else { return };
+    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
+    if handle.is_null() { return; }
+    let handle = Box::from_raw(handle);
+    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+    if let Ok(mut slot) = handle.thread.lock() {
+        if let Some(thread) = slot.take() { let _ = thread.join(); }
+    };
+}

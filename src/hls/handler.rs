@@ -1,4 +1,4 @@
-use super::{HlsHandler, HlsManager, PROXY_PREFIX};
+use super::{playlist_refresh_ttl, HlsHandler, HlsManager, PROXY_PREFIX};
 use crate::data_request::DataRequest;
 use crate::data_source::{shared_client, SharedClient};
 use crate::log_info;
@@ -133,17 +133,24 @@ impl HlsHandler for DefaultHlsHandler {
             url.to_string()
         };
 
+        if let Some(content) = self.manager.cached_playlist_body(&clean_url).await {
+            return Ok(content.to_string());
+        }
+
         // 下载 m3u8 内容
         let content = self.download_m3u8(&clean_url).await?;
 
         // 处理 m3u8 文件
-        let _info = self.manager.process_m3u8(&clean_url, &content).await?;
+        let info = self.manager.process_m3u8(&clean_url, &content).await?;
 
         // 获取基础 URL
         let base_url = self.get_base_url(&clean_url)?;
 
         // 重写 m3u8 内容
         let rewritten = self.manager.rewrite_m3u8(&content, &base_url, "/proxy");
+        self.manager
+            .cache_playlist_body(&clean_url, rewritten.clone(), playlist_refresh_ttl(&info))
+            .await;
 
         Ok(rewritten)
     }

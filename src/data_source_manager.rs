@@ -10,8 +10,8 @@ use crate::storage::{
 use crate::utils::error::Result;
 use crate::utils::network_policy::NetworkPolicy;
 use crate::utils::range::{parse_range, resolve_range};
-use hyper::header::{HeaderMap, CONTENT_TYPE};
-use hyper::{Body, Response};
+use hyper::header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
+use hyper::{Body, Response, StatusCode};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -125,6 +125,50 @@ impl DataSourceManager {
                     .await
             }
         }
+    }
+
+    /// Build a HEAD response without starting the normal tee/cache body pipeline.
+    pub async fn process_head(&self, req: &DataRequest) -> Result<Response<Body>> {
+        let key = req.get_cache_key()?.to_string();
+        let mut meta = self.cache_handler.upstream_meta(&key).await?;
+
+        if meta.total_size.is_none() {
+            let fetched = self.network_handler.fetch(req.get_url(), "bytes=0-0").await?;
+            meta = fetched.meta.clone();
+            drop(fetched);
+            self.cache_handler.record_upstream_meta(&key, &meta).await?;
+        }
+
+        let total = meta
+            .total_size
+            .ok_or_else(|| crate::utils::error::ProxyError::InvalidRange(
+                "上游未提供资源总长度".to_string(),
+            ))?;
+        let (status, content_length, content_range) = if req.client_sent_range() {
+            let (start, end) = parse_range(req.get_range())?;
+            let (start, end) = resolve_range(start, end, Some(total))?;
+            (
+                StatusCode::PARTIAL_CONTENT,
+                end - start + 1,
+                Some(format!("bytes {}-{}/{}", start, end, total)),
+            )
+        } else {
+            (StatusCode::OK, total, None)
+        };
+
+        let mut builder = Response::builder()
+            .status(status)
+            .header(ACCEPT_RANGES, "bytes")
+            .header(CONTENT_LENGTH, content_length);
+        if let Some(content_type) = meta.content_type {
+            builder = builder.header(CONTENT_TYPE, content_type);
+        }
+        if let Some(content_range) = content_range {
+            builder = builder.header(CONTENT_RANGE, content_range);
+        }
+        builder
+            .body(Body::empty())
+            .map_err(|error| crate::utils::error::ProxyError::Request(error.to_string()))
     }
 
     /// follower 路径：等 leader 写完缓存，然后自己去读。

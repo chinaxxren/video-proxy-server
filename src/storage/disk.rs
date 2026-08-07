@@ -28,6 +28,7 @@ const WRITE_BUFFER_BYTES: usize = 256 * 1024;
 /// 这是纯读缓存，淘汰任何条目都不影响正确性——下次访问重新读盘即可。
 /// 加上限只是防止「请求大量互不相同的 URL」把索引撑大。
 const MAX_INDEXED_KEYS: usize = 4096;
+const RANGE_METADATA_VERSION: u32 = 1;
 
 pub struct DiskStorage {
     config: StorageConfig,
@@ -56,6 +57,9 @@ pub struct DiskStorage {
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct RangeMetadata {
+    /// On-disk schema version. Missing means the legacy v0 layout.
+    #[serde(default)]
+    version: u32,
     completed: Vec<(u64, u64)>,
     /// 该元数据所属的缓存键。
     ///
@@ -126,7 +130,9 @@ impl DiskStorage {
     /// 读并解析元数据文件。文件不存在或内容损坏都返回 `None`。
     async fn load_metadata(&self, key: &str) -> Option<RangeMetadata> {
         let data = tokio_fs::read(self.get_metadata_path(key)).await.ok()?;
-        serde_json::from_slice(&data).ok()
+        let metadata: RangeMetadata = serde_json::from_slice(&data).ok()?;
+        let file_size = self.data_file_size(key).await;
+        metadata_is_valid(&metadata, key, file_size).then_some(metadata)
     }
 
     /// 读-改-写元数据的唯一入口，持分片锁串行执行。
@@ -155,6 +161,7 @@ impl DiskStorage {
         if metadata.key.as_deref() != Some(key) {
             metadata.key = Some(key.to_string());
         }
+        metadata.version = RANGE_METADATA_VERSION;
 
         self.write_metadata(key, &metadata).await?;
         self.index_insert(key.to_string(), metadata).await;
@@ -667,36 +674,86 @@ impl StorageEngine for DiskStorage {
 
                 while let Some(file) = files.next_entry().await? {
                     let path = file.path();
-                    // 只认已 rename 到位的元数据文件，.tmp 是写入中途的残留。
-                    if !path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(|name| name.ends_with(".ranges.json"))
-                        .unwrap_or(false)
+                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                        continue;
+                    };
+                    if name.ends_with(".ranges.json.tmp") {
+                        let _ = tokio_fs::remove_file(&path).await;
+                        continue;
+                    }
+                    if !name.ends_with(".ranges.json")
                     {
                         continue;
                     }
 
-                    let Some(metadata) = tokio_fs::read(&path)
+                    let metadata = tokio_fs::read(&path)
                         .await
                         .ok()
-                        .and_then(|bytes| serde_json::from_slice::<RangeMetadata>(&bytes).ok())
-                    else {
+                        .and_then(|bytes| serde_json::from_slice::<RangeMetadata>(&bytes).ok());
+                    let Some(metadata) = metadata else {
+                        remove_cache_pair(&path).await;
                         continue;
                     };
-                    let Some(key) = metadata.key else { continue };
+                    let Some(key) = metadata.key.clone() else {
+                        remove_cache_pair(&path).await;
+                        continue;
+                    };
+                    let data_path = self.get_file_path(&key);
+                    let file_size = tokio_fs::metadata(&data_path).await.ok().map(|m| m.len());
+                    let valid_path = path == self.get_metadata_path(&key);
+                    let valid = file_size
+                        .map(|size| valid_path && metadata_is_valid(&metadata, &key, Some(size)))
+                        .unwrap_or(false);
+                    if !valid {
+                        remove_cache_pair(&path).await;
+                        if valid_path {
+                            let _ = tokio_fs::remove_file(&data_path).await;
+                        }
+                        continue;
+                    }
 
-                    // 用数据文件长度而不是 completed 的最大右端点：管理器的
-                    // 簿记记的就是「最高写入偏移」，稀疏文件下两者一致，
-                    // 而元数据可能记着尚未落盘的区间。
-                    let size = self.data_file_size(&key).await.unwrap_or(0);
-                    entries.push((key, size));
+                    entries.push((key, file_size.unwrap_or(0)));
                 }
             }
         }
 
         Ok(entries)
     }
+}
+
+fn metadata_is_valid(metadata: &RangeMetadata, key: &str, file_size: Option<u64>) -> bool {
+    if metadata.version > RANGE_METADATA_VERSION || metadata.key.as_deref() != Some(key) {
+        return false;
+    }
+    if metadata
+        .total_size
+        .zip(file_size)
+        .is_some_and(|(total, size)| size > total)
+    {
+        return false;
+    }
+    if file_size.is_none() {
+        return metadata.completed.is_empty();
+    }
+    let file_size = file_size.unwrap_or(0);
+
+    let mut previous_end: Option<u64> = None;
+    for &(start, end) in &metadata.completed {
+        if start > end || end >= file_size {
+            return false;
+        }
+        if previous_end.is_some_and(|previous| start <= previous.saturating_add(1)) {
+            return false;
+        }
+        previous_end = Some(end);
+    }
+    true
+}
+
+async fn remove_cache_pair(metadata_path: &Path) {
+    let data_path = metadata_path.with_extension("").with_extension("");
+    let _ = tokio_fs::remove_file(metadata_path).await;
+    let _ = tokio_fs::remove_file(data_path).await;
 }
 
 #[cfg(test)]
@@ -1168,5 +1225,76 @@ mod tests {
             .unwrap();
 
         assert!(storage.enumerate().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_removes_metadata_temp_files_left_by_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        storage
+            .write(
+                "asset",
+                stream::iter([Ok(Bytes::from_static(b"ab"))]),
+                (0, 1),
+            )
+            .await
+            .unwrap();
+        let temporary = storage
+            .get_metadata_path("asset")
+            .with_extension("ranges.json.tmp");
+        tokio_fs::write(&temporary, b"partial-json").await.unwrap();
+
+        assert_eq!(storage.enumerate().await.unwrap().len(), 1);
+        assert!(!temporary.exists());
+    }
+
+    #[tokio::test]
+    async fn enumerate_deletes_ranges_past_the_data_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        storage
+            .write(
+                "asset",
+                stream::iter([Ok(Bytes::from_static(b"ab"))]),
+                (0, 1),
+            )
+            .await
+            .unwrap();
+        let metadata_path = storage.get_metadata_path("asset");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&tokio_fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["completed"] = serde_json::json!([[0, 99]]);
+        tokio_fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(storage.enumerate().await.unwrap().is_empty());
+        assert!(!metadata_path.exists());
+        assert!(!storage.get_file_path("asset").exists());
+    }
+
+    #[tokio::test]
+    async fn enumerate_rejects_unknown_future_metadata_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage(dir.path());
+        storage
+            .write(
+                "asset",
+                stream::iter([Ok(Bytes::from_static(b"ab"))]),
+                (0, 1),
+            )
+            .await
+            .unwrap();
+        let metadata_path = storage.get_metadata_path("asset");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&tokio_fs::read(&metadata_path).await.unwrap()).unwrap();
+        metadata["version"] = serde_json::json!(RANGE_METADATA_VERSION + 1);
+        tokio_fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap())
+            .await
+            .unwrap();
+
+        assert!(storage.enumerate().await.unwrap().is_empty());
+        assert!(!metadata_path.exists());
+        assert!(!storage.get_file_path("asset").exists());
     }
 }

@@ -39,11 +39,22 @@ impl RequestHandler {
 
     pub async fn handle_request(&self, req: Request<Body>) -> Result<Response<Body>> {
         validate_method(req.method())?;
+        let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
         let data_request = DataRequest::new(&req)?;
 
-        let response = match data_request.get_type() {
-            crate::data_request::RequestType::M3u8 => {
+        let response = match (is_head, data_request.get_type()) {
+            (true, crate::data_request::RequestType::M3u8) => {
+                let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
+                Response::builder()
+                    .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
+                    .header(CACHE_CONTROL, "no-cache")
+                    .header(hyper::header::CONTENT_LENGTH, content.len())
+                    .body(Body::empty())
+                    .map_err(|e| ProxyError::Request(format!("构建 m3u8 HEAD 响应失败: {}", e)))
+            }
+            (true, _) => self.source_manager.process_head(&data_request).await,
+            (false, crate::data_request::RequestType::M3u8) => {
                 // 处理 m3u8 请求
                 let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
                 // 必须带 Content-Type：缺了它 hyper 不会补，播放器普遍会拒绝
@@ -55,7 +66,7 @@ impl RequestHandler {
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
             // Segment 和 Normal 走同一缓存路径；DataRequest::new 已完成缓存身份键构造。
-            _ => self.source_manager.process_request(&data_request).await,
+            (false, _) => self.source_manager.process_request(&data_request).await,
         }?;
 
         let response = full_content_if_no_range_requested(response, &data_request);
@@ -114,7 +125,7 @@ fn guard_response(response: Response<Body>, permit: OwnedSemaphorePermit) -> Res
 }
 
 fn validate_method(method: &Method) -> Result<()> {
-    if method == Method::GET {
+    if method == Method::GET || method == Method::HEAD {
         Ok(())
     } else {
         Err(ProxyError::MethodNotAllowed)
@@ -126,9 +137,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_get_is_accepted() {
+    fn get_and_head_are_accepted() {
         assert!(validate_method(&Method::GET).is_ok());
-        for method in [Method::POST, Method::PUT, Method::DELETE, Method::HEAD] {
+        assert!(validate_method(&Method::HEAD).is_ok());
+        for method in [Method::POST, Method::PUT, Method::DELETE] {
             let error = validate_method(&method).unwrap_err();
             assert!(matches!(error, ProxyError::MethodNotAllowed));
             assert_eq!(error.status_code(), hyper::StatusCode::METHOD_NOT_ALLOWED);

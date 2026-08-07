@@ -9,6 +9,7 @@ pub mod data_source_manager;
 pub mod server;
 pub mod hls;
 pub mod request_handler;
+pub mod ffi;
 
 /// 写一行 INFO 日志。调用语法与之前完全一致。
 ///
@@ -25,5 +26,4 @@ macro_rules! log_info {
 
 pub use data_request::DataRequest;
 pub use data_source_manager::DataSourceManager;
-
 

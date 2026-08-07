@@ -105,6 +105,12 @@ Created -> Starting -> Running -> Stopping -> Stopped
                    \-> Failed
 ```
 
+The Rust Core now exposes these states through `ProxyServerStatus`, accepts
+`ProxyConfig { port: 0, .. }`, reports the assigned port through
+`wait_until_ready()`/`bound_port()`, rejects a second `start`, and performs a
+bounded stop. Platform adapters must own the running `start` task and await it
+during teardown.
+
 ## Playback Flow
 
 1. The app authenticates and obtains the current media source URL.

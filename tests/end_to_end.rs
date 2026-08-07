@@ -404,6 +404,11 @@ impl Ask {
         self.range = Some(range.to_string());
         self
     }
+
+    fn head(mut self) -> Self {
+        self.method = Method::HEAD;
+        self
+    }
 }
 
 async fn fetch(
@@ -650,6 +655,67 @@ async fn plain_get_without_range_gets_200_and_the_whole_file() {
         "200 响应必须声明 Accept-Ranges，否则播放器不会去 seek"
     );
     assert_eq!(body, expected_bytes(0, ORIGIN_SIZE - 1), "整文件字节不对");
+}
+
+#[tokio::test]
+async fn head_reports_metadata_without_downloading_or_caching_the_media_body() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+
+    let (status, headers, body) = fetch(&proxy, &origin, Ask::default().head()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_empty());
+    assert_eq!(headers[CONTENT_LENGTH], ORIGIN_SIZE.to_string());
+    assert_eq!(origin.hits(), 1, "冷 HEAD 只应发起一次 0-0 探测");
+
+    let (_, _, second_body) = fetch(&proxy, &origin, Ask::default().head()).await;
+    assert!(second_body.is_empty());
+    assert_eq!(origin.hits(), 1, "已有元数据时 HEAD 不应再次回源");
+
+    let (_, _, get_body) = fetch(
+        &proxy,
+        &origin,
+        Ask::default().range("bytes=0-1023"),
+    )
+    .await;
+    assert_eq!(get_body.len(), 1024);
+    assert_eq!(origin.hits(), 2, "HEAD 不应把媒体字节误标记为已缓存");
+}
+
+#[tokio::test]
+async fn ranged_head_returns_206_headers_and_no_body() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+
+    let (status, headers, body) = fetch(
+        &proxy,
+        &origin,
+        Ask::default().head().range("bytes=100-199"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(body.is_empty());
+    assert_eq!(headers[CONTENT_LENGTH], "100");
+    assert_eq!(
+        headers[CONTENT_RANGE],
+        format!("bytes 100-199/{ORIGIN_SIZE}")
+    );
+}
+
+#[tokio::test]
+async fn unsupported_multiple_ranges_return_416() {
+    let origin = spawn_origin(OriginMode::Honest);
+    let proxy = spawn_proxy(None);
+    let (status, _, body) = fetch(
+        &proxy,
+        &origin,
+        Ask::default().range("bytes=0-9,20-29"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(body, b"Requested range not satisfiable");
+    assert_eq!(origin.hits(), 0, "无效多 Range 不能到达上游");
 }
 
 /// 与上一条成对：客户端**明确**发了 `Range` 就必须拿到 206，即使那个区间

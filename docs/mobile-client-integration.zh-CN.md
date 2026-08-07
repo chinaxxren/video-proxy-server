@@ -105,6 +105,11 @@ Created -> Starting -> Running -> Stopping -> Stopped
                    \-> Failed
 ```
 
+Rust Core 现已通过 `ProxyServerStatus` 暴露这些状态，支持
+`ProxyConfig { port: 0, .. }`，通过 `wait_until_ready()`/`bound_port()` 返回实际
+端口，拒绝同一实例重复 `start`，并执行有界停止。平台 Adapter 必须持有运行中的
+`start` 任务，并在销毁阶段等待该任务结束。
+
 ## 播放流程
 
 1. 应用完成鉴权并取得当前媒体来源 URL。

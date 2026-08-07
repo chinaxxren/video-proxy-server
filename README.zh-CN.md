@@ -10,6 +10,7 @@
 
 - HTTP/HTTPS 上游数据源
 - HTTP `Range` 请求和部分内容响应
+- `GET` 和仅返回元数据的 `HEAD` 请求
 - 基于磁盘的分片缓存
 - 独立于稀疏文件长度的持久化完成区间
 - 对已验证连续缓存前缀进行缓存/网络混合响应
@@ -18,6 +19,7 @@
 - 不受 signed URL 变化影响的稳定缓存身份
 - 上游域名白名单和私网地址拦截
 - 仅监听 localhost
+- 面向移动端 Adapter 的 C ABI 生命周期入口（`include/media_proxy_cache.h`）
 
 ## 环境要求
 
@@ -52,6 +54,49 @@ MediaSource 解码，以及重复请求首分片时的缓存命中。
 
 `allow-private-upstream` 会放宽本机回环地址限制，只能用于本地测试，不能用于生产构建。
 
+### 移动端 FFI 预览
+
+该 crate 现在同时构建 `staticlib` 和 `cdylib` 产物。移动端 Adapter 可包含
+[`include/media_proxy_cache.h`](include/media_proxy_cache.h)，传入由 Host 管理的缓存目录，
+在固定端口或端口 `0` 上启动服务，并通过 `stop`/`destroy` 释放资源。这仍是预览 ABI，
+平台专用的 JNI、Swift 和 N-API 封装以及 Releases 打包脚本尚未完成。
+
+统一原生库构建脚本位于 `scripts/build-mobile.sh`：
+
+```bash
+PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
+PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
+PLATFORM=macos ./scripts/build-mobile.sh dist/desktop
+PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
+```
+
+脚本要求先安装对应的 Rust target，并把 C 头文件复制到各平台产物目录。Android
+Kotlin 工程应将生成的 `.so` 放入 Android Library 模块使用。
+
+三端 Adapter 的所有权接口模板位于 `platform/android`、`platform/ios` 和
+`platform/harmony`。这些文件目前是 API 合同，宿主工程仍需链接原生库并提供对应的
+JNI、Swift module map 或 N-API 桥接实现。
+
+同一个 Core 也支持桌面端构建。macOS 会构建 Apple Silicon 和 Intel 目标；Windows
+默认使用 `x86_64-pc-windows-gnu`，构建机需要安装 MinGW linker。桌面程序可以直接
+使用生成的 `cdylib` 或 `staticlib`。
+
+推送匹配 `v*` 的 tag 后，`.github/workflows/release.yml` 会自动发布 macOS ARM64/Intel、
+Windows x86_64 和 Linux x86_64 压缩包。也可以手动运行工作流，只生成可下载的
+Actions Artifacts 而不创建 GitHub Release。
+
+在 macOS 上运行 `./scripts/test-ffi-macos.sh`，会构建一个链接 Release dylib 的小型
+C 程序，并真实执行 create/start/stop/destroy 完整生命周期。
+
+### HLS 播放列表刷新策略
+
+重写后的播放列表正文会保存在有上限的内存缓存中。VOD 播放列表（包含
+`EXT-X-ENDLIST`）每 5 分钟刷新一次，Master 播放列表每 30 秒刷新一次，直播媒体
+播放列表按目标时长的一半刷新，并限制在 1 到 10 秒之间。最多保留 128 个播放列表，
+播放列表正文和键的总大小上限为 8 MiB，超限时优先淘汰最早写入的条目。分片字节仍
+使用持久化磁盘缓存，与播放列表正文的 TTL 相互独立。
+
 ## 运行
 
 可执行程序参数：
@@ -85,17 +130,24 @@ cargo run --example proxy_client -- \
 必须显式配置允许访问的上游域名：
 
 ```rust
-use proxy_server::server::ProxyServer;
+use proxy_server::server::{ProxyConfig, ProxyServer};
 
 #[tokio::main]
 async fn main() {
-    let server = ProxyServer::with_allowed_hosts(
-        8080,
-        "./cache",
-        ["media.example.com", "cdn.example.com"],
-    );
-
-    server.start().await.unwrap();
+    let server = std::sync::Arc::new(ProxyServer::with_config(ProxyConfig {
+        port: 0,
+        cache_dir: "./cache".into(),
+        allowed_hosts: vec!["media.example.com".into(), "cdn.example.com".into()],
+        ..Default::default()
+    }));
+    let running = tokio::spawn({
+        let server = server.clone();
+        async move { server.start().await }
+    });
+    let port = server.wait_until_ready().await.unwrap();
+    println!("proxy ready at http://127.0.0.1:{port}");
+    server.stop();
+    running.await.unwrap().unwrap();
 }
 ```
 
@@ -121,6 +173,10 @@ assetId + assetRevision
 
 signed URL 的 query 只作为当前网络来源。令牌变化不会产生新的缓存条目。当前 Core 尚未将 `userId` 纳入缓存键；多用户生产集成必须先由 Host 提供可信的用户/租户隔离边界。
 
+`HEAD` 使用相同的请求合同。冷缓存 HEAD 只通过上游 `bytes=0-0` 探测总长度和
+Content-Type，不会把媒体字节标记为已缓存；元数据持久化后，后续 HEAD 不再回源。
+当前支持单个闭区间和开区间 Range，多 Range 会明确返回 `416`。
+
 ## 网络安全
 
 发送上游请求前，代理会：
@@ -138,14 +194,16 @@ signed URL 的 query 只作为当前网络来源。令牌变化不会产生新�
 缓存键在作为路径前会先进行哈希。每个缓存对象包含：
 
 - 一个按源文件偏移写入字节的数据文件；
-- 一个记录已成功完成闭区间的 JSON sidecar 文件。
+- 一个带 schema 版本、缓存键、上游元数据和已完成闭区间的 JSON sidecar 文件。
 
 文件长度不会被当作区间已缓存的证明。数据完成刷新后才会更新 sidecar，并通过临时文件重命名进行提交。
+
+启动恢复会删除上次异常中断遗留的 sidecar 临时文件，并校验缓存键对应的哈希路径、数据文件长度以及区间顺序。损坏 JSON、未知的未来 schema、重叠或乱序区间、超过数据文件长度的区间都视为不可相信，对应数据文件和 sidecar 会一并删除，不能成为缓存命中。旧版 v0 元数据仍可读取，并会在下次写入时升级到当前格式。
 
 ## 已知限制
 
 - 尚无 Android JNI、iOS XCFramework 或 HarmonyOS N-API Adapter
-- 尚无适用于移动端 Host 的公开启动、停止和生命周期 API
+- Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖
 - DNS 策略校验与连接器后续解析尚未固定到同一解析地址，仍存在 DNS rebinding 的检查/使用时间窗口

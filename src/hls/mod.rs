@@ -10,7 +10,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 use url::Url;
 
 /// HLS 分片信息
@@ -68,6 +70,14 @@ const MAX_CACHED_PLAYLISTS: usize = 512;
 const MAX_PLAYLIST_ITEMS: usize = 20_000;
 /// 播放列表元数据的全局估算内存预算。
 const MAX_PLAYLIST_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CACHED_PLAYLIST_BODIES: usize = 128;
+const MAX_PLAYLIST_BODY_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+struct CachedPlaylistBody {
+    content: Arc<str>,
+    expires_at: Instant,
+    inserted_at: Instant,
+}
 
 /// 代理路径前缀。播放列表被重写后，播放器回请的 URL 会带上这一段。
 pub(crate) const PROXY_PREFIX: &str = "/proxy/";
@@ -83,6 +93,7 @@ pub struct HlsManager {
     /// 要深拷贝一次，一万个分片的播放列表就是一万次字符串分配——而唯一的
     /// 生产调用方 `handle_m3u8` 拿到返回值后直接丢弃。
     playlists: Arc<RwLock<HashMap<String, Arc<PlaylistInfo>>>>,
+    playlist_bodies: Arc<RwLock<HashMap<String, CachedPlaylistBody>>>,
 }
 
 impl HlsManager {
@@ -91,6 +102,7 @@ impl HlsManager {
         Self {
             cache_dir,
             playlists: Arc::new(RwLock::new(HashMap::new())),
+            playlist_bodies: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -270,6 +282,52 @@ impl HlsManager {
         self.playlists.read().await.get(url).cloned()
     }
 
+    pub async fn cached_playlist_body(&self, url: &str) -> Option<Arc<str>> {
+        let mut bodies = self.playlist_bodies.write().await;
+        let fresh = bodies
+            .get(url)
+            .is_some_and(|entry| entry.expires_at > Instant::now());
+        if fresh {
+            return bodies.get(url).map(|entry| entry.content.clone());
+        }
+        bodies.remove(url);
+        None
+    }
+
+    pub async fn cache_playlist_body(&self, url: &str, content: String, ttl: Duration) {
+        let entry_bytes = url.len().saturating_add(content.len());
+        if entry_bytes > MAX_PLAYLIST_BODY_CACHE_BYTES {
+            return;
+        }
+
+        let now = Instant::now();
+        let mut bodies = self.playlist_bodies.write().await;
+        bodies.remove(url);
+        while bodies.len() >= MAX_CACHED_PLAYLIST_BODIES
+            || cached_playlist_body_bytes(&bodies).saturating_add(entry_bytes)
+                > MAX_PLAYLIST_BODY_CACHE_BYTES
+        {
+            let victim = bodies
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted_at)
+                .map(|(key, _)| key.clone());
+            match victim {
+                Some(key) => {
+                    bodies.remove(&key);
+                }
+                None => break,
+            }
+        }
+        bodies.insert(
+            url.to_string(),
+            CachedPlaylistBody {
+                content: Arc::from(content),
+                expires_at: now + ttl,
+                inserted_at: now,
+            },
+        );
+    }
+
     /// 更新分片缓存状态。
     ///
     /// 缓存里存的是 `Arc<PlaylistInfo>`，就地改需要独占访问。这里用
@@ -308,6 +366,23 @@ fn cached_playlist_bytes(playlists: &HashMap<String, Arc<PlaylistInfo>>) -> usiz
         .iter()
         .map(|(key, info)| playlist_size(key, info))
         .fold(0usize, usize::saturating_add)
+}
+
+fn cached_playlist_body_bytes(playlists: &HashMap<String, CachedPlaylistBody>) -> usize {
+    playlists
+        .iter()
+        .map(|(key, entry)| key.len().saturating_add(entry.content.len()))
+        .fold(0usize, usize::saturating_add)
+}
+
+pub(crate) fn playlist_refresh_ttl(info: &PlaylistInfo) -> Duration {
+    if info.is_endlist {
+        return Duration::from_secs(5 * 60);
+    }
+    if !info.variants.is_empty() {
+        return Duration::from_secs(30);
+    }
+    Duration::from_secs_f32((info.target_duration / 2.0).clamp(1.0, 10.0))
 }
 
 fn playlist_size(key: &str, info: &PlaylistInfo) -> usize {
@@ -619,6 +694,67 @@ mod tests {
         assert!(cached_playlist_bytes(&playlists) <= MAX_PLAYLIST_CACHE_BYTES);
         assert!(playlists.contains_key("https://media.example/63.m3u8"));
         assert!(playlists.len() < 64, "字节预算应先于条目数上限触发淘汰");
+    }
+
+    #[test]
+    fn refresh_ttl_distinguishes_live_master_and_vod_playlists() {
+        let base = PlaylistInfo {
+            url: "https://media.example/live.m3u8".to_string(),
+            target_duration: 12.0,
+            media_sequence: 0,
+            is_endlist: false,
+            segments: vec![],
+            variants: vec![],
+            last_updated: chrono::Utc::now(),
+        };
+        assert_eq!(playlist_refresh_ttl(&base), Duration::from_secs(6));
+
+        let mut short_live = base.clone();
+        short_live.target_duration = 0.2;
+        assert_eq!(playlist_refresh_ttl(&short_live), Duration::from_secs(1));
+
+        let mut master = base.clone();
+        master.variants.push(VariantStream {
+            url: "variant.m3u8".to_string(),
+            bandwidth: 128_000,
+            resolution: None,
+        });
+        assert_eq!(playlist_refresh_ttl(&master), Duration::from_secs(30));
+
+        let mut vod = base;
+        vod.is_endlist = true;
+        assert_eq!(playlist_refresh_ttl(&vod), Duration::from_secs(300));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_playlist_body_expires_at_its_refresh_deadline() {
+        let (_dir, manager) = manager();
+        let url = "https://media.example/live.m3u8";
+        manager
+            .cache_playlist_body(url, "rewritten".to_string(), Duration::from_secs(2))
+            .await;
+        assert_eq!(&*manager.cached_playlist_body(url).await.unwrap(), "rewritten");
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(manager.cached_playlist_body(url).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn playlist_body_cache_respects_its_byte_budget() {
+        let (_dir, manager) = manager();
+        for i in 0..16 {
+            manager
+                .cache_playlist_body(
+                    &format!("https://media.example/{i}.m3u8"),
+                    "x".repeat(1024 * 1024),
+                    Duration::from_secs(60),
+                )
+                .await;
+        }
+        let bodies = manager.playlist_bodies.read().await;
+        assert!(cached_playlist_body_bytes(&bodies) <= MAX_PLAYLIST_BODY_CACHE_BYTES);
+        assert!(bodies.contains_key("https://media.example/15.m3u8"));
+        assert!(bodies.len() < 16);
     }
 
     /// `update_segment_cache` 改用二分查找，前提是分片按 sequence 递增。
