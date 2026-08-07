@@ -290,15 +290,20 @@ impl DataSourceManager {
         let (start, end) = resolve_range(start, requested_end, Some(total_size))?;
 
         let cached_size = self.cache_handler.get_size(key).await?.unwrap_or(0);
-        if cached_size <= start {
-            return Ok(None);
-        }
 
         // cached_end 是缓存段的开区间右边界，与 MixedSourceHandler 的约定一致。
-        let cached_end = cached_size.min(end.saturating_add(1));
-        if cached_end <= start {
-            return Ok(None);
-        }
+        let cached_end = match plan_mixed(start, end, cached_size) {
+            MixedPlan::NoCache => return Ok(None),
+            // 整段都已落盘，这是纯缓存路径的活。它在本次请求里刚跑过一次并
+            // 落空，说明那时区间索引还缺字节——但之后后台的缓存写入可能正好
+            // 落盘了。重试一次即可，它自己会再查一遍区间索引。
+            MixedPlan::WholeRangeCached => {
+                return self
+                    .try_serve_from_cache(key, meta, start, requested_end)
+                    .await
+            }
+            MixedPlan::Stitch { cached_end } => cached_end,
+        };
 
         // 稀疏文件里「文件长度」不代表字节已下载，必须查区间索引。
         if !self
@@ -386,6 +391,45 @@ fn headers_from_meta(meta: &UpstreamMeta) -> HeaderMap {
     headers
 }
 
+/// 缓存前缀与请求区间的三种位置关系。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MixedPlan {
+    /// 缓存没盖到 `start`，混合源无从下手。
+    NoCache,
+    /// 缓存前缀盖满了整个请求区间，属于纯缓存路径。
+    WholeRangeCached,
+    /// 前半段在缓存、后半段要回源。`cached_end` 是缓存段的**开区间**右边界。
+    Stitch { cached_end: u64 },
+}
+
+/// 决定混合源怎么切这一刀。
+///
+/// 抽成纯函数是为了让下面那个不变量能被确定性地测到：它原先只在一个竞态
+/// 窗口里被违反，而竞态没法稳定复现。
+///
+/// **不变量**：`Stitch` 的 `cached_end` 必须满足 `start < cached_end <= end`，
+/// 这是 [`MixedSourceHandler::handle`] 的前置条件，破了它就直接 416。
+///
+/// 原先这里写的是 `cached_size.min(end + 1)`，当磁盘上的文件长度 ≥ 请求终点
+/// 时它正好取到 `end + 1`，越界一个字节。触发路径很窄但真实存在：
+/// `process_request` 先试纯缓存路径，那时区间索引还缺字节所以落空；紧接着
+/// 走到这里时，后台的缓存写入刚好落盘，于是「整段都在缓存里」——本该由纯
+/// 缓存路径处理的情形漏到了混合源，然后撞上守卫。表现是一个本该 206 的
+/// 请求返回 416，且只在调度更容易撞上这个窗口的机器上出现。
+fn plan_mixed(start: u64, end: u64, cached_size: u64) -> MixedPlan {
+    if cached_size <= start {
+        return MixedPlan::NoCache;
+    }
+    // cached_size > end 即 cached_size >= end + 1：字节 0..=end 全在缓存里，
+    // 没有留给网络段的余地，再往下切就会得出 cached_end > end。
+    if cached_size > end {
+        return MixedPlan::WholeRangeCached;
+    }
+    MixedPlan::Stitch {
+        cached_end: cached_size,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +455,52 @@ mod tests {
             root_path: root.to_path_buf(),
             chunk_size: 4,
         })
+    }
+
+    /// 回归：`cached_end` 绝不能越过 `end`。
+    ///
+    /// 旧实现是 `cached_size.min(end + 1)`，整段都已落盘时它正好等于
+    /// `end + 1`，而 `MixedSourceHandler::handle` 的守卫要求
+    /// `cached_end <= end`，于是一个本该完全命中缓存的请求以 416 收场。
+    ///
+    /// 这条 bug 只在竞态下可达（详见 [`plan_mixed`] 的注释），压测复现不了，
+    /// 所以把判定抽成纯函数、在这里确定性地压住不变量。
+    #[test]
+    fn mixed_plan_never_lets_cached_end_exceed_end() {
+        // 整段已落盘：交给纯缓存路径，不能构造出越界的 cached_end。
+        assert_eq!(plan_mixed(0, 199_999, 200_000), MixedPlan::WholeRangeCached);
+        // 磁盘比请求区间还长，同样属于「整段已落盘」。
+        assert_eq!(plan_mixed(0, 199_999, 300_007), MixedPlan::WholeRangeCached);
+        // 恰好差最后一个字节：这才是真正需要拼接的形态。
+        assert_eq!(
+            plan_mixed(0, 199_999, 199_999),
+            MixedPlan::Stitch {
+                cached_end: 199_999
+            }
+        );
+
+        // 穷举一遍：任何 Stitch 的 cached_end 都必须落在 (start, end] 内。
+        for cached_size in 0..40u64 {
+            for start in 0..12u64 {
+                for end in start..20u64 {
+                    if let MixedPlan::Stitch { cached_end } = plan_mixed(start, end, cached_size) {
+                        assert!(
+                            cached_end > start && cached_end <= end,
+                            "start={start} end={end} cached_size={cached_size} \
+                             产出越界的 cached_end={cached_end}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 缓存没覆盖到起点时不该走混合源。
+    #[test]
+    fn mixed_plan_skips_when_cache_does_not_reach_start() {
+        assert_eq!(plan_mixed(100, 199, 0), MixedPlan::NoCache);
+        assert_eq!(plan_mixed(100, 199, 100), MixedPlan::NoCache);
+        assert_eq!(plan_mixed(100, 199, 101), MixedPlan::Stitch { cached_end: 101 });
     }
 
     #[test]
