@@ -338,10 +338,9 @@ impl StorageEngine for DiskStorage {
         // - **`write_all` 失败**：不能记。`write_all` 出错时不会告诉你写进去了
         //   多少字节，`written` 此刻是个高估值。记账就等于把可能并不存在的
         //   字节标记成已缓存，后续读会拿到空洞。
-        // - **上游流报错**：不能记。这一条是 `failed_stream_does_not_mark_partial_write_complete`
-        //   钉住的既有约定。此处 `written` 其实是精确的，因此改成记账在技术上
-        //   站得住（和短响应体保留前缀是同一个道理），但那是在放宽一条刻意
-        //   收紧的语义，不属于「修记账漏洞」的范围，留给显式决定。
+        // - **上游流报错**：保留前缀。此处 `written` 是精确的，已拿到的数据都是
+        //   有效的，配合网络层重试可以让缓存边界逐步前进。分段下载场景下，丢弃
+        //   已下载的部分既浪费带宽也让用户体验变差。
         let mut prefix_is_recordable = true;
 
         while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
@@ -349,7 +348,7 @@ impl StorageEngine for DiskStorage {
                 Ok(chunk) => chunk,
                 Err(error) => {
                     failure = Some(error);
-                    prefix_is_recordable = false;
+                    // 流错误时 written 是准确的，保留前缀以便下次从断点继续。
                     break;
                 }
             };
@@ -799,8 +798,13 @@ mod tests {
         assert!(storage.check_range("asset", (0, u64::MAX)).await.unwrap());
     }
 
+    /// 上游流报错时，已写入的前缀应当被保留并记账。
+    ///
+    /// 配合网络层重试，让缓存边界逐步前进：第一次写了 3MB 然后断了，第二次
+    /// 从 3MB 继续、又写了 2MB 断了，第三次从 5MB 继续写完。每次都丢弃的话，
+    /// 三次重试每次都从 0 开始，既浪费带宽也让响应时间变长。
     #[tokio::test]
-    async fn failed_stream_does_not_mark_partial_write_complete() {
+    async fn failed_stream_still_records_the_prefix_received_before_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let storage = storage(dir.path());
         let stream = stream::iter([
@@ -809,8 +813,14 @@ mod tests {
         ]);
 
         assert!(storage.write("asset", stream, (0, 99)).await.is_err());
-        assert!(!storage.check_range("asset", (0, 6)).await.unwrap());
-        assert!(storage.read("asset", (0, 6)).await.is_err());
+        // 前 7 字节（"partial"）已落盘并记账。
+        assert!(storage.check_range("asset", (0, 6)).await.unwrap());
+        let mut cached = storage.read("asset", (0, 6)).await.unwrap();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = cached.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(bytes, b"partial");
     }
 
     #[tokio::test]
