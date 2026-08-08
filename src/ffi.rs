@@ -119,6 +119,7 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     };
     let (tx, rx) = mpsc::sync_channel(1);
     let published = handle.server.clone();
+    let sources = handle.sources.clone();
     let thread = std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -131,7 +132,7 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             }
         };
         let result = runtime.block_on(async {
-            let server = Arc::new(ProxyServer::with_config(config));
+            let server = Arc::new(ProxyServer::with_config_and_registry(config, sources));
             if let Ok(mut value) = published.lock() {
                 *value = Some(server.clone());
             }

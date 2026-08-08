@@ -129,6 +129,10 @@ impl ProxyServer {
     }
 
     pub fn with_config(config: ProxyConfig) -> Self {
+        Self::with_config_and_registry(config, SourceRegistry::default())
+    }
+
+    pub fn with_config_and_registry(config: ProxyConfig, source_registry: SourceRegistry) -> Self {
         let policy = Arc::new(NetworkPolicy::allow_hosts(&config.allowed_hosts));
         let cache_dir = config.cache_dir.clone();
 
@@ -146,7 +150,6 @@ impl ProxyServer {
         ));
 
         // 创建 HLS 处理器
-        let source_registry = SourceRegistry::default();
         let hls_handler = Arc::new(DefaultHlsHandler::new(
             cache_dir,
             policy,
