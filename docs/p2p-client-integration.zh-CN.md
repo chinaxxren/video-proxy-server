@@ -65,6 +65,10 @@ P2P 磁盘缓存使用 Host 的 `max_cache_bytes` 上限；超过上限时会淘
 已验证分片。
 版本化缓存身份同时包含整文件摘要和分片清单，因此相同内容的不同分片布局不会冲突。
 
+`proxy_p2p_source_remove` 会先阻止新读取，再等待已经开始的回调结束；返回后 Host 才可
+释放 callback context。回调内部不得重入调用 `proxy_p2p_source_remove` 或
+`proxy_server_destroy`，因为这些操作需要等待当前回调结束。
+
 ## 播放
 
 注册成功后返回 opaque ID，播放地址为：

@@ -72,6 +72,11 @@ recently modified verified pieces when that limit is exceeded.
 Its versioned cache identity includes both the whole-content digest and the
 piece manifest, so different piece layouts for identical content cannot collide.
 
+`proxy_p2p_source_remove` first prevents new reads and then waits for callbacks
+that already started. After it returns, the Host may release the callback
+context. A callback must not re-enter `proxy_p2p_source_remove` or
+`proxy_server_destroy`, because those operations wait for that callback.
+
 ## Playback
 
 Registration returns an opaque ID. Use:

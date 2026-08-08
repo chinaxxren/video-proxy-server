@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 const SHA256_HEX_LENGTH: usize = 64;
 const MAX_CONTENT_ID_LENGTH: usize = 512;
@@ -72,6 +72,55 @@ struct RegisteredP2pSource {
     piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
     disk_dir: Option<PathBuf>,
     disk_cache: Option<Arc<P2pDiskCache>>,
+    lifecycle: Arc<SourceLifecycle>,
+}
+
+#[derive(Default)]
+struct SourceLifecycle {
+    active: Mutex<usize>,
+    idle: Condvar,
+}
+
+struct SourceLease(Arc<SourceLifecycle>);
+
+impl SourceLifecycle {
+    fn acquire(self: &Arc<Self>) -> Result<SourceLease> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P source lifecycle unavailable".to_string()))?;
+        *active = active
+            .checked_add(1)
+            .ok_or_else(|| ProxyError::Storage("P2P active request count overflow".to_string()))?;
+        Ok(SourceLease(self.clone()))
+    }
+
+    fn wait_until_idle(&self) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while *active != 0 {
+            active = self
+                .idle
+                .wait(active)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+impl Drop for SourceLease {
+    fn drop(&mut self) {
+        let mut active = self
+            .0
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            self.0.idle.notify_all();
+        }
+    }
 }
 
 struct P2pDiskCache {
@@ -192,6 +241,7 @@ impl P2pSourceRegistry {
                 piece_locks: Arc::new(Mutex::new(HashMap::new())),
                 disk_dir,
                 disk_cache: self.disk_cache.clone(),
+                lifecycle: Arc::new(SourceLifecycle::default()),
             },
         );
         Ok(id)
@@ -211,6 +261,7 @@ impl P2pSourceRegistry {
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
         let disk_cache = entry.disk_cache.clone();
+        let _lease = entry.lifecycle.acquire()?;
         drop(entries);
         let provider = cached_verified_provider(
             manifest.clone(),
@@ -238,6 +289,7 @@ impl P2pSourceRegistry {
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
         let disk_cache = entry.disk_cache.clone();
+        let _lease = entry.lifecycle.acquire()?;
         drop(entries);
         let provider = cached_verified_provider(
             manifest.clone(),
@@ -280,11 +332,17 @@ impl P2pSourceRegistry {
     }
 
     pub fn remove(&self, id: u64) -> bool {
-        self.entries
+        let removed = self
+            .entries
             .write()
             .ok()
-            .and_then(|mut entries| entries.remove(&id))
-            .is_some()
+            .and_then(|mut entries| entries.remove(&id));
+        if let Some(entry) = removed {
+            entry.lifecycle.wait_until_idle();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -923,6 +981,49 @@ mod tests {
             assert_eq!(worker.join().unwrap(), b"data");
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn removing_source_waits_for_active_provider_callback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let source =
+            AuthorizedP2pSource::new("asset", 4, &sha256_hex(b"data"), "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let provider_gate = gate.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let provider: P2pPieceProvider = Arc::new(move |_| {
+            started_tx.send(()).unwrap();
+            let (lock, ready) = &*provider_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        let reader_registry = registry.clone();
+        let reader = std::thread::spawn(move || reader_registry.read_range(id, 0, 3).unwrap());
+        started_rx.recv().unwrap();
+
+        let removed = Arc::new(AtomicBool::new(false));
+        let removed_flag = removed.clone();
+        let remove_registry = registry.clone();
+        let remover = std::thread::spawn(move || {
+            assert!(remove_registry.remove(id));
+            removed_flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(!removed.load(Ordering::SeqCst));
+        let (lock, ready) = &*gate;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+
+        assert_eq!(reader.join().unwrap(), b"data");
+        remover.join().unwrap();
+        assert!(removed.load(Ordering::SeqCst));
+        assert!(registry.read_range(id, 0, 0).is_err());
     }
 
     #[test]
