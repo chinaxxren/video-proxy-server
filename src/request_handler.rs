@@ -101,7 +101,10 @@ fn resolve_media_route<B>(req: Request<B>, registry: &SourceRegistry) -> Result<
         .method(req.method())
         .uri(req.uri().clone());
     for (name, value) in req.headers() {
-        if name != "X-Original-Url" {
+        if name != "X-Original-Url"
+            && name != "X-Cache-Asset-Id"
+            && name != "X-Cache-Asset-Revision"
+        {
             builder = builder.header(name, value);
         }
     }
@@ -244,6 +247,29 @@ mod tests {
             let request = Request::builder().uri(path).body(()).unwrap();
             assert!(resolve_media_route(request, &registry).is_err());
         }
+    }
+
+    #[test]
+    fn media_route_replaces_forged_cache_identity_headers() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("trusted-asset", "https://media.example/a.mp4")
+            .unwrap();
+        let request = Request::builder()
+            .uri(format!("/media/{id}"))
+            .header("X-Cache-Asset-Id", "attacker")
+            .header("X-Cache-Asset-Revision", "999")
+            .body(())
+            .unwrap();
+        let resolved = resolve_media_route(request, &registry).unwrap();
+        assert_eq!(
+            resolved.headers().get("X-Cache-Asset-Id").unwrap(),
+            "trusted-asset"
+        );
+        assert_eq!(
+            resolved.headers().get("X-Cache-Asset-Revision").unwrap(),
+            "1"
+        );
     }
 
     /// 造一个 `DataRequest`，`range` 传 `None` 表示客户端没发 Range 头。
