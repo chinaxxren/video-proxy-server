@@ -233,6 +233,8 @@ mod tests {
             .unwrap();
         let (resolved, source_id) = resolve_media_route(request, &registry).unwrap();
         assert_eq!(source_id, Some(id));
+        let parsed = DataRequest::with_source_id(&resolved, source_id).unwrap();
+        assert_eq!(parsed.source_id(), Some(id));
         assert_eq!(resolved.uri().path(), format!("/media/{id}"));
         assert_eq!(
             resolved.headers().get("X-Original-Url").unwrap(),
@@ -252,6 +254,24 @@ mod tests {
             let request = Request::builder().uri(path).body(()).unwrap();
             assert!(resolve_media_route(request, &registry).is_err());
         }
+    }
+
+    #[test]
+    fn legacy_route_has_no_opaque_source_context() {
+        let registry = SourceRegistry::default();
+        let request = Request::builder()
+            .uri("/proxy/placeholder")
+            .header("X-Original-Url", "https://media.example/a.mp4")
+            .body(())
+            .unwrap();
+        let (request, source_id) = resolve_media_route(request, &registry).unwrap();
+        assert_eq!(source_id, None);
+        assert_eq!(
+            DataRequest::with_source_id(&request, source_id)
+                .unwrap()
+                .source_id(),
+            None
+        );
     }
 
     #[test]
