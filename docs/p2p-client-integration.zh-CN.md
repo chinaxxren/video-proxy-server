@@ -68,6 +68,8 @@ P2P 磁盘缓存使用 Host 的 `max_cache_bytes` 上限；超过上限时会淘
 `proxy_p2p_source_remove` 会先阻止新读取，再等待已经开始的回调结束；返回后 Host 才可
 释放 callback context。回调内部不得重入调用 `proxy_p2p_source_remove` 或
 `proxy_server_destroy`，因为这些操作需要等待当前回调结束。
+移除引用某个 manifest 的最后一个注册时，也会清理该 manifest 的持久化分片目录。
+若未显式 remove，而只是销毁并重新创建 Core，则保留已验证分片用于重启恢复。
 
 ## 播放
 

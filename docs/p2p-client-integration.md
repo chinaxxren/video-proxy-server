@@ -76,6 +76,9 @@ piece manifest, so different piece layouts for identical content cannot collide.
 that already started. After it returns, the Host may release the callback
 context. A callback must not re-enter `proxy_p2p_source_remove` or
 `proxy_server_destroy`, because those operations wait for that callback.
+Removing the last registration that references a manifest also purges that
+manifest's persistent piece directory. Dropping and recreating Core without an
+explicit remove preserves verified pieces for restart recovery.
 
 ## Playback
 

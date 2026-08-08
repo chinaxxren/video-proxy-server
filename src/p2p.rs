@@ -339,6 +339,16 @@ impl P2pSourceRegistry {
             .and_then(|mut entries| entries.remove(&id));
         if let Some(entry) = removed {
             entry.lifecycle.wait_until_idle();
+            if let Some(directory) = entry.disk_dir {
+                if let Ok(entries) = self.entries.read() {
+                    let still_referenced = entries
+                        .values()
+                        .any(|other| other.disk_dir.as_ref() == Some(&directory));
+                    if !still_referenced {
+                        let _ = std::fs::remove_dir_all(directory);
+                    }
+                }
+            }
             true
         } else {
             false
@@ -1059,6 +1069,32 @@ mod tests {
             .unwrap();
         assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
         assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn removing_last_registration_purges_its_disk_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256_hex(b"data");
+        let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![digest]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| Ok(b"data".to_vec()));
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let first = registry
+            .register(source.clone(), manifest.clone(), provider.clone())
+            .unwrap();
+        let second = registry.register(source, manifest, provider).unwrap();
+        assert_eq!(registry.read_range(first, 0, 3).unwrap(), b"data");
+        let cache_dir = std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(cache_dir.exists());
+        assert!(registry.remove(first));
+        assert!(cache_dir.exists());
+        assert!(registry.remove(second));
+        assert!(!cache_dir.exists());
     }
 
     #[test]
