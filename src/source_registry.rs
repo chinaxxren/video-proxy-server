@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use url::Url;
 
 const MAX_REGISTERED_SOURCES: usize = 10_000;
+const MAX_SOURCE_URL_LENGTH: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RegisteredSource {
@@ -126,6 +127,9 @@ fn validate_component(value: &str, label: &str) -> Result<String> {
 }
 
 fn validate_source_url(value: &str) -> Result<String> {
+    if value.len() > MAX_SOURCE_URL_LENGTH || value.bytes().any(|byte| byte == 0) {
+        return Err(ProxyError::Request("来源 URL 无效".to_string()));
+    }
     let parsed = Url::parse(value).map_err(|_| ProxyError::Request("来源 URL 无效".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.username() != ""
@@ -165,6 +169,11 @@ mod tests {
             .register("a", "https://user:pass@media.example/a")
             .is_err());
         assert!(registry.refresh(99, "https://media.example/a").is_err());
+        let oversized = format!(
+            "https://media.example/{}",
+            "x".repeat(MAX_SOURCE_URL_LENGTH)
+        );
+        assert!(registry.register("a", &oversized).is_err());
     }
 
     #[test]
