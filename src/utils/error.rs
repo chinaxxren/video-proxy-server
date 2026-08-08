@@ -11,6 +11,7 @@ pub type Result<T> = std::result::Result<T, ProxyError>;
 pub enum ProxyError {
     Cache(String),
     Network(String),
+    UpstreamAuthorizationExpired,
     InvalidRange(String),
     Request(String),
     Storage(String),
@@ -24,6 +25,7 @@ impl fmt::Display for ProxyError {
         match self {
             ProxyError::Cache(msg) => write!(f, "Cache error: {}", msg),
             ProxyError::Network(msg) => write!(f, "Network error: {}", msg),
+            ProxyError::UpstreamAuthorizationExpired => write!(f, "Upstream authorization expired"),
             ProxyError::InvalidRange(msg) => write!(f, "Invalid range error: {}", msg),
             ProxyError::Request(msg) => write!(f, "Request error: {}", msg),
             ProxyError::Storage(msg) => write!(f, "Storage error: {}", msg),
@@ -50,6 +52,7 @@ impl ProxyError {
             ProxyError::InvalidRange(_) => hyper::StatusCode::RANGE_NOT_SATISFIABLE,
             ProxyError::Request(_) => hyper::StatusCode::BAD_REQUEST,
             ProxyError::Network(_) => hyper::StatusCode::BAD_GATEWAY,
+            ProxyError::UpstreamAuthorizationExpired => hyper::StatusCode::BAD_GATEWAY,
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => {
                 hyper::StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -65,7 +68,9 @@ impl ProxyError {
         match self {
             ProxyError::InvalidRange(_) => "Requested range not satisfiable",
             ProxyError::Request(_) => "Bad request",
-            ProxyError::Network(_) | ProxyError::Parse(_) => "Upstream error",
+            ProxyError::Network(_)
+            | ProxyError::Parse(_)
+            | ProxyError::UpstreamAuthorizationExpired => "Upstream error",
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => "Internal error",
             ProxyError::MethodNotAllowed => "Method not allowed",
         }
@@ -135,6 +140,11 @@ mod tests {
             (ProxyError::Request("signed-url".into()), 400, "Bad request"),
             (
                 ProxyError::Network("signed-url".into()),
+                502,
+                "Upstream error",
+            ),
+            (
+                ProxyError::UpstreamAuthorizationExpired,
                 502,
                 "Upstream error",
             ),

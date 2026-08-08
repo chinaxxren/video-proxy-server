@@ -80,6 +80,12 @@ impl DefaultHlsHandler {
             .map_err(|_| ProxyError::Network("下载 m3u8 超时".to_string()))?
             .map_err(|e| ProxyError::Network(format!("请求失败: {}", e)))?;
 
+        if matches!(
+            response.status(),
+            hyper::StatusCode::UNAUTHORIZED | hyper::StatusCode::FORBIDDEN
+        ) {
+            return Err(ProxyError::UpstreamAuthorizationExpired);
+        }
         if !response.status().is_success() {
             return Err(ProxyError::Network(format!(
                 "请求失败: {}",

@@ -313,6 +313,9 @@ impl NetSource {
                 self.range
             )));
         }
+        if status == hyper::StatusCode::UNAUTHORIZED || status == hyper::StatusCode::FORBIDDEN {
+            return Err(ProxyError::UpstreamAuthorizationExpired);
+        }
         if !status.is_success() {
             return Err(ProxyError::Request(format!(
                 "Invalid response status: {}",
