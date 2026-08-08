@@ -50,6 +50,8 @@ Pass UTF-8 JSON to `proxy_p2p_source_register`:
 Core rejects unknown fields, malformed lengths and digests, missing explicit
 authorization, inconsistent piece counts, and manifests larger than 1 MiB.
 Authorization references stay inside Core and are never returned by HTTP.
+Each piece is limited to 8 MiB and each manifest to 16,000 pieces, including
+manifests constructed through the Rust API.
 
 ## Piece Callback
 

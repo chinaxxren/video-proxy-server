@@ -46,6 +46,8 @@ P2P_ENABLED=1 ./scripts/package-mobile.sh
 
 Core 会拒绝未知字段、错误长度或摘要、未明确授权、分片数量不一致，以及超过 1 MiB
 的清单。授权引用仅保留在 Core 内部，不会通过 HTTP 返回。
+每个分片最大 8 MiB，每个清单最多 16,000 个分片；通过 Rust API 直接构造时也执行
+相同限制。
 
 ## 分片回调
 

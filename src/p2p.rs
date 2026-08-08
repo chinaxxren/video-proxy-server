@@ -17,6 +17,8 @@ const SHA256_HEX_LENGTH: usize = 64;
 const MAX_CONTENT_ID_LENGTH: usize = 512;
 const MAX_AUTHORIZATION_LENGTH: usize = 2048;
 const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_P2P_PIECE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_P2P_PIECES: u64 = 16_000;
 const MAX_P2P_SOURCES: usize = 1024;
 const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
 const MAX_VERIFIED_PIECE_CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -493,10 +495,20 @@ impl P2pPieceManifest {
                 "P2P piece lengths must be positive".to_string(),
             ));
         }
+        if piece_length > MAX_P2P_PIECE_BYTES {
+            return Err(ProxyError::Request(
+                "P2P piece length exceeds limit".to_string(),
+            ));
+        }
         let count = content_length
             .checked_add(piece_length - 1)
             .ok_or_else(|| ProxyError::Request("P2P piece count overflow".to_string()))?
             / piece_length;
+        if count > MAX_P2P_PIECES {
+            return Err(ProxyError::Request(
+                "P2P piece count exceeds limit".to_string(),
+            ));
+        }
         if usize::try_from(count).ok() != Some(piece_sha256.len()) {
             return Err(ProxyError::Request(
                 "P2P piece digest count does not match content length".to_string(),
@@ -518,7 +530,9 @@ impl P2pPieceManifest {
             .piece_sha256
             .get(index)
             .ok_or_else(|| ProxyError::Request("P2P piece index is out of bounds".to_string()))?;
-        let start = (index as u64)
+        let index = u64::try_from(index)
+            .map_err(|_| ProxyError::Request("P2P piece index overflow".to_string()))?;
+        let start = index
             .checked_mul(self.piece_length)
             .ok_or_else(|| ProxyError::Request("P2P piece offset overflow".to_string()))?;
         let expected_length = self
@@ -710,6 +724,18 @@ mod tests {
         assert!(P2pPieceManifest::new(8, 0, vec![]).is_err());
         assert!(P2pPieceManifest::new(8, 4, vec![DIGEST.to_string()]).is_err());
         assert!(P2pPieceManifest::new(4, 4, vec!["bad".to_string()]).is_err());
+        assert!(P2pPieceManifest::new(
+            MAX_P2P_PIECE_BYTES + 1,
+            MAX_P2P_PIECE_BYTES + 1,
+            vec![DIGEST.to_string()],
+        )
+        .is_err());
+        assert!(P2pPieceManifest::new(
+            MAX_P2P_PIECES + 1,
+            1,
+            vec![DIGEST.to_string(); (MAX_P2P_PIECES + 1) as usize],
+        )
+        .is_err());
     }
 
     #[test]
