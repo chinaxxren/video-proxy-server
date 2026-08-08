@@ -302,7 +302,8 @@ Each platform POC should demonstrate:
 Register the signed URL with `proxy_source_register`, then construct
 `http://127.0.0.1:<bound-port>/media/<id>` from the returned ID. HLS child
 resources use the same opaque route. Refresh an expired URL with
-`proxy_source_refresh` using the same ID. Never expose signed URLs in player
+`proxy_source_refresh` using the same ID; refreshing does not change cache
+identity. Re-registering the same identity and URL reuses its ID. Never expose signed URLs in player
 URLs, logs, or analytics.
 
 ## Current Repository Gap
