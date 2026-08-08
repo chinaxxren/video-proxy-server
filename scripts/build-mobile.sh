@@ -19,6 +19,7 @@ fi
 cd "$ROOT_DIR"
 mkdir -p "$OUT_DIR/include"
 cp include/media_proxy_cache.h "$OUT_DIR/include/"
+printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
 build_target() {
   local platform="$1" target="$2" crate_type="${3:-}"
@@ -60,7 +61,5 @@ case "${PLATFORM:-all}" in
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;
   *) echo "Usage: PLATFORM={macos|windows|ios|android|harmony|all} $0 [output-dir]" >&2; exit 2 ;;
 esac
-
-printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
 echo "Mobile artifacts written to $OUT_DIR"
