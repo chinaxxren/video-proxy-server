@@ -173,10 +173,13 @@ impl P2pSourceRegistry {
                 (value != 0).then_some(value.wrapping_add(1).max(1))
             })
             .map_err(|_| ProxyError::Request("P2P source ID exhausted".to_string()))?;
-        let disk_dir = self
-            .disk_cache
-            .as_ref()
-            .map(|cache| cache.root.join(&source.sha256));
+        let disk_dir = self.disk_cache.as_ref().map(|cache| {
+            cache.root.join(format!(
+                "v1-{}-{}",
+                source.sha256,
+                manifest_cache_key(&manifest)
+            ))
+        });
         entries.insert(
             id,
             RegisteredP2pSource {
@@ -340,6 +343,16 @@ fn cached_verified_provider(
             .insert(index, piece);
         Ok(piece.as_ref().clone())
     })
+}
+
+fn manifest_cache_key(manifest: &P2pPieceManifest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(manifest.content_length.to_be_bytes());
+    hasher.update(manifest.piece_length.to_be_bytes());
+    for digest in &manifest.piece_sha256 {
+        hasher.update(digest.as_bytes());
+    }
+    bytes_to_hex(&hasher.finalize())
 }
 
 fn enforce_disk_cache_limit(cache: &P2pDiskCache) -> Result<()> {
@@ -926,11 +939,15 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let directory = tempfile::tempdir().unwrap();
         let digest = sha256_hex(b"data");
-        let content_dir = directory.path().join(&digest);
-        std::fs::create_dir_all(&content_dir).unwrap();
-        std::fs::write(content_dir.join("0.piece"), b"evil").unwrap();
         let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
         let manifest = P2pPieceManifest::new(4, 4, vec![digest]).unwrap();
+        let content_dir = directory.path().join(format!(
+            "v1-{}-{}",
+            source.sha256,
+            manifest_cache_key(&manifest)
+        ));
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("0.piece"), b"evil").unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let provider: P2pPieceProvider = Arc::new(move |_| {
@@ -942,6 +959,40 @@ mod tests {
         assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read(content_dir.join("0.piece")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn disk_cache_separates_different_piece_layouts_for_the_same_content() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let content = b"data";
+        let digest = sha256_hex(content);
+        let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
+        let whole_manifest = P2pPieceManifest::new(4, 4, vec![digest]).unwrap();
+        let split_manifest =
+            P2pPieceManifest::new(4, 2, vec![sha256_hex(b"da"), sha256_hex(b"ta")]).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let whole_calls = calls.clone();
+        let whole_provider: P2pPieceProvider = Arc::new(move |_| {
+            whole_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        });
+        let split_calls = calls.clone();
+        let split_provider: P2pPieceProvider = Arc::new(move |index| {
+            split_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(if index == 0 { b"da" } else { b"ta" }.to_vec())
+        });
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let whole_id = registry
+            .register(source.clone(), whole_manifest, whole_provider)
+            .unwrap();
+        let split_id = registry
+            .register(source, split_manifest, split_provider)
+            .unwrap();
+        assert_eq!(registry.read_range(whole_id, 0, 3).unwrap(), content);
+        assert_eq!(registry.read_range(split_id, 0, 3).unwrap(), content);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]
