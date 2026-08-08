@@ -163,6 +163,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cleanup_evicts_http_entries_when_p2p_exactly_fills_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let p2p_piece = directory.path().join("manifest").join("0.piece");
+        std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
+        std::fs::write(&p2p_piece, b"full").unwrap();
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 4,
+                max_file_count: 100,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: vec![directory.path().to_path_buf()],
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"http"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), deleted.notified())
+            .await
+            .expect("cleanup did not enforce the combined budget");
+    }
+
     struct CoordinatedStorage {
         data: Arc<Mutex<Vec<u8>>>,
         delete_started: Arc<Notify>,
@@ -504,7 +535,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     // P2P owns eviction of its files. If it alone exceeds the
                     // byte budget, do not destroy every HTTP entry trying to
                     // correct a condition this manager cannot fix.
-                    if (external_size >= config.max_cache_size
+                    if (external_size > config.max_cache_size
                         && entries.len() <= config.max_file_count)
                         || (combined_total <= config.max_cache_size
                             && entries.len() <= config.max_file_count)
