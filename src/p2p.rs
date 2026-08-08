@@ -6,10 +6,14 @@
 
 use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
+use std::sync::Arc;
 
 const SHA256_HEX_LENGTH: usize = 64;
 const MAX_CONTENT_ID_LENGTH: usize = 512;
 const MAX_AUTHORIZATION_LENGTH: usize = 2048;
+const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedP2pSource {
@@ -74,6 +78,47 @@ impl P2pPieceManifest {
             ));
         }
         Ok(())
+    }
+
+    pub fn read_verified_range(
+        &self,
+        start: u64,
+        end: u64,
+        provider: &P2pPieceProvider,
+    ) -> Result<Vec<u8>> {
+        if start > end || end >= self.content_length {
+            return Err(ProxyError::InvalidRange(
+                "P2P range is outside authorized content".to_string(),
+            ));
+        }
+        let output_length = end
+            .checked_sub(start)
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| ProxyError::InvalidRange("P2P range length overflow".to_string()))?;
+        if output_length > MAX_P2P_READ_BYTES {
+            return Err(ProxyError::InvalidRange(
+                "P2P range exceeds read limit".to_string(),
+            ));
+        }
+        let first_piece = start / self.piece_length;
+        let last_piece = end / self.piece_length;
+        let mut output = Vec::with_capacity(output_length as usize);
+        for piece_number in first_piece..=last_piece {
+            let index = usize::try_from(piece_number)
+                .map_err(|_| ProxyError::Request("P2P piece index overflow".to_string()))?;
+            let piece = provider(index)?;
+            self.verify_piece(index, &piece)?;
+            let piece_start = piece_number * self.piece_length;
+            let copy_start = start.saturating_sub(piece_start) as usize;
+            let copy_end = (end - piece_start + 1).min(piece.len() as u64) as usize;
+            output.extend_from_slice(&piece[copy_start..copy_end]);
+        }
+        if output.len() as u64 != output_length {
+            return Err(ProxyError::Storage(
+                "P2P verified range length mismatch".to_string(),
+            ));
+        }
+        Ok(output)
     }
 }
 
@@ -192,5 +237,32 @@ mod tests {
         assert!(P2pPieceManifest::new(8, 0, vec![]).is_err());
         assert!(P2pPieceManifest::new(8, 4, vec![DIGEST.to_string()]).is_err());
         assert!(P2pPieceManifest::new(4, 4, vec!["bad".to_string()]).is_err());
+    }
+
+    #[test]
+    fn assembles_verified_ranges_across_piece_boundaries() {
+        let pieces = [b"abcd".to_vec(), b"efgh".to_vec(), b"ij".to_vec()];
+        let digests = pieces.iter().map(|piece| sha256_hex(piece)).collect();
+        let manifest = P2pPieceManifest::new(10, 4, digests).unwrap();
+        let provider_pieces = pieces.clone();
+        let provider: P2pPieceProvider = Arc::new(move |index| {
+            provider_pieces
+                .get(index)
+                .cloned()
+                .ok_or_else(|| ProxyError::Request("missing piece".to_string()))
+        });
+        assert_eq!(
+            manifest.read_verified_range(2, 8, &provider).unwrap(),
+            b"cdefghi"
+        );
+        assert_eq!(manifest.read_verified_range(9, 9, &provider).unwrap(), b"j");
+        assert!(manifest.read_verified_range(9, 10, &provider).is_err());
+    }
+
+    #[test]
+    fn corrupt_provider_bytes_are_never_returned() {
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"good")]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| Ok(b"evil".to_vec()));
+        assert!(manifest.read_verified_range(0, 3, &provider).is_err());
     }
 }
