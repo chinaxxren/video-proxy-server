@@ -36,12 +36,6 @@ impl SourceRegistry {
     pub fn register(&self, identity: &str, url: &str) -> Result<u64> {
         let identity = validate_component(identity, "媒体身份")?;
         let url = validate_source_url(url)?;
-        let id = self
-            .next_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                (value != 0).then_some(value.wrapping_add(1).max(1))
-            })
-            .map_err(|_| ProxyError::Request("来源 ID 已耗尽".to_string()))?;
         let mut entries = self
             .entries
             .write()
@@ -49,6 +43,12 @@ impl SourceRegistry {
         if entries.len() >= MAX_REGISTERED_SOURCES {
             return Err(ProxyError::Request("来源注册表已达到容量上限".to_string()));
         }
+        let id = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value != 0).then_some(value.wrapping_add(1).max(1))
+            })
+            .map_err(|_| ProxyError::Request("来源 ID 已耗尽".to_string()))?;
         entries.insert(id, RegisteredSource { identity, url });
         Ok(id)
     }
