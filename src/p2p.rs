@@ -322,11 +322,27 @@ fn read_verified_disk_piece(
 }
 
 fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Result<()> {
+    static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
     std::fs::create_dir_all(directory).map_err(|error| ProxyError::Storage(error.to_string()))?;
     let final_path = directory.join(format!("{index}.piece"));
-    let temporary = directory.join(format!(".{index}.piece.tmp"));
+    let temporary = directory.join(format!(
+        ".{index}.{}.{}.piece.tmp",
+        std::process::id(),
+        TEMPORARY_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&temporary, bytes).map_err(|error| ProxyError::Storage(error.to_string()))?;
-    std::fs::rename(&temporary, &final_path).map_err(|error| ProxyError::Storage(error.to_string()))
+    match std::fs::rename(&temporary, &final_path) {
+        Ok(()) => Ok(()),
+        Err(_error) if matches!(std::fs::read(&final_path), Ok(existing) if existing == bytes) => {
+            let _ = std::fs::remove_file(temporary);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temporary);
+            Err(ProxyError::Storage(error.to_string()))
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -813,5 +829,24 @@ mod tests {
         assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(std::fs::read(content_dir.join("0.piece")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn concurrent_disk_writes_do_not_share_temporary_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let path = directory.path().to_path_buf();
+                std::thread::spawn(move || write_verified_disk_piece(&path, 0, b"data"))
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            std::fs::read(directory.path().join("0.piece")).unwrap(),
+            b"data"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }
