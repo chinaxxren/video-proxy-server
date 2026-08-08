@@ -213,6 +213,14 @@ impl P2pSourceRegistry {
             .map(|entry| entry.source.content_length)
     }
 
+    pub fn source_info(&self, id: u64) -> Option<AuthorizedP2pSource> {
+        self.entries
+            .read()
+            .ok()?
+            .get(&id)
+            .map(|entry| entry.source.clone())
+    }
+
     pub fn remove(&self, id: u64) -> bool {
         self.entries
             .write()
@@ -267,6 +275,7 @@ pub struct AuthorizedP2pSource {
     content_id: String,
     content_length: u64,
     sha256: String,
+    authorization_reference: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -403,6 +412,7 @@ impl AuthorizedP2pSource {
             content_id,
             content_length,
             sha256,
+            authorization_reference,
         })
     }
 
@@ -416,6 +426,10 @@ impl AuthorizedP2pSource {
 
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    pub fn authorization_reference(&self) -> &str {
+        &self.authorization_reference
     }
 }
 
@@ -464,6 +478,7 @@ mod tests {
         assert_eq!(source.content_id(), "asset-1");
         assert_eq!(source.content_length(), 1024);
         assert_eq!(source.sha256(), DIGEST);
+        assert_eq!(source.authorization_reference(), "license-42");
     }
 
     #[test]
@@ -541,8 +556,13 @@ mod tests {
         let id = registry.register(source, manifest, provider).unwrap();
         assert_ne!(id, 0);
         assert_eq!(registry.content_length(id), Some(6));
+        assert_eq!(
+            registry.source_info(id).unwrap().authorization_reference(),
+            "license"
+        );
         assert_eq!(registry.read_range(id, 1, 5).unwrap(), b"bcdef");
         assert!(registry.remove(id));
+        assert!(registry.source_info(id).is_none());
         assert!(registry.read_range(id, 0, 0).is_err());
     }
 
