@@ -15,7 +15,7 @@ build_target() {
     echo "Missing Rust target $target; install it with: rustup target add $target" >&2
     return 1
   }
-  cargo build --locked --$PROFILE --target "$target"
+  cargo build --locked --$PROFILE --target "$target" --lib
   mkdir -p "$OUT_DIR/$platform/$target"
   local copied=0
   for artifact in \
