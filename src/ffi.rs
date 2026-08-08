@@ -5,7 +5,7 @@
 
 use crate::server::{ProxyConfig, ProxyServer};
 use crate::source_registry::SourceRegistry;
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -17,6 +17,9 @@ pub struct ProxyServerHandle {
     thread: Mutex<Option<JoinHandle<()>>>,
     pub(crate) sources: SourceRegistry,
 }
+
+pub type ProxySourceRefreshCallback =
+    unsafe extern "C" fn(context: *mut c_void, source_id: u64) -> *const c_char;
 
 /// # Safety
 ///
@@ -257,10 +260,47 @@ pub unsafe extern "C" fn proxy_source_remove(handle: *mut ProxyServerHandle, sou
         .unwrap_or(0)
 }
 
+/// Registers or clears the Host callback used after upstream 401/403 responses.
+/// The returned string is copied during the callback and remains Host-owned.
+///
+/// # Safety
+///
+/// `handle` must be live. The callback and context must remain valid until the
+/// callback is cleared or the handle is destroyed. Returned strings must be
+/// immutable, NUL-terminated UTF-8 for the duration of the callback.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_source_set_refresh_callback(
+    handle: *mut ProxyServerHandle,
+    callback: Option<ProxySourceRefreshCallback>,
+    context: *mut c_void,
+) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let provider = callback.map(|callback| {
+        let context = context as usize;
+        Arc::new(move |source_id| {
+            let value = unsafe { callback(context as *mut c_void, source_id) };
+            unsafe { read_string(value) }
+                .ok_or_else(|| crate::utils::error::ProxyError::Request("来源刷新失败".to_string()))
+        }) as crate::source_registry::RefreshProvider
+    });
+    u8::from(handle.sources.set_refresh_provider(provider).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    unsafe extern "C" fn test_refresh_callback(
+        _context: *mut c_void,
+        _source_id: u64,
+    ) -> *const c_char {
+        static URL: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+        URL.get_or_init(|| CString::new("https://media.example/refreshed.mp4?token=new").unwrap())
+            .as_ptr()
+    }
     use std::io::{Read, Write};
 
     #[test]
@@ -338,6 +378,39 @@ mod tests {
                 proxy_source_register(handle, ptr::null(), source.as_ptr()),
                 0
             );
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ffi_refresh_callback_is_copied_and_validated() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let identity = CString::new("asset").unwrap();
+        let source = CString::new("https://media.example/original.mp4").unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
+            assert_eq!(
+                proxy_source_set_refresh_callback(
+                    handle,
+                    Some(test_refresh_callback),
+                    ptr::null_mut(),
+                ),
+                1
+            );
+            (*handle).sources.refresh_from_provider(id).unwrap();
+            assert!((*handle)
+                .sources
+                .resolve(id)
+                .unwrap()
+                .url
+                .contains("token=new"));
+            assert_eq!(
+                proxy_source_set_refresh_callback(handle, None, ptr::null_mut()),
+                1
+            );
+            assert!((*handle).sources.refresh_from_provider(id).is_err());
             proxy_server_destroy(handle);
         }
     }
