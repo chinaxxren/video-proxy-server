@@ -291,6 +291,13 @@ ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前�
 6. 构建鸿蒙 HAR/N-API Adapter，并验证 AVPlayer。
 7. 完成跨平台验收矩阵后，再将 SDK 标记为生产可用。
 
+## 不透明播放流程
+
+使用 `proxy_source_register` 注册 signed URL，然后用返回的 ID 构造
+`http://127.0.0.1:<实际端口>/media/<id>`。HLS 分片、变体、密钥和初始化映射也使用相同的
+不透明路由。URL 过期时，使用相同 ID 调用 `proxy_source_refresh`。不要在播放器 URL、日志
+或分析事件中暴露 signed URL。
+
 ## 当前仓库差距
 
 当前仓库已经提供 create/start/stop/destroy C ABI，以及

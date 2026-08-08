@@ -297,11 +297,19 @@ Each platform POC should demonstrate:
 6. Build the HarmonyOS HAR/N-API adapter and validate AVPlayer.
 7. Run the cross-platform acceptance matrix before declaring the SDK production-ready.
 
+## Opaque playback flow
+
+Register the signed URL with `proxy_source_register`, then construct
+`http://127.0.0.1:<bound-port>/media/<id>` from the returned ID. HLS child
+resources use the same opaque route. Refresh an expired URL with
+`proxy_source_refresh` using the same ID. Never expose signed URLs in player
+URLs, logs, or analytics.
+
 ## Current Repository Gap
 
 The repository now exposes a C ABI with create/start/stop/destroy plus
 `proxy_source_register`, `proxy_source_refresh`, and `proxy_source_remove`. These
 APIs keep signed URLs inside Core and return only opaque IDs. The platform
 packages are iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR.
-The HTTP `/media/<id>` routing and refresh callback dispatch are the next Core
-integration step; no platform has real-player device validation yet.
+The HTTP `/media/<id>` routing and HLS child-resource rewriting are implemented.
+Refresh callback dispatch and real-player device validation remain outstanding.
