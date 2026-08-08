@@ -177,6 +177,19 @@ mod tests {
     }
 
     #[test]
+    fn failed_refresh_keeps_previous_url() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/original.mp4?token=old")
+            .unwrap();
+        assert!(registry.refresh(id, "file:///tmp/invalid").is_err());
+        assert_eq!(
+            registry.resolve(id).unwrap().url,
+            "https://media.example/original.mp4?token=old"
+        );
+    }
+
+    #[test]
     fn removal_invalidates_future_resolution() {
         let registry = SourceRegistry::default();
         let id = registry.register("a", "https://media.example/a").unwrap();
