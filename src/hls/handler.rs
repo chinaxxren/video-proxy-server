@@ -195,7 +195,7 @@ impl DefaultHlsHandler {
             let encoded = &tail[..end];
             let source_url = decode_component(encoded)
                 .map_err(|e| ProxyError::Request(format!("URL 解码失败: {}", e)))?;
-            let id = self.source_registry.register("hls", &source_url)?;
+            let id = self.source_registry.register_or_reuse("hls", &source_url)?;
             out.push_str("/media/");
             out.push_str(&id.to_string());
             rest = &tail[end..];

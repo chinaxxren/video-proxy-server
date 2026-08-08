@@ -51,6 +51,20 @@ impl SourceRegistry {
         self.entries.read().ok()?.get(&id).cloned()
     }
 
+    /// Reuse an existing registration for the same logical source URL.
+    pub fn register_or_reuse(&self, identity: &str, url: &str) -> Result<u64> {
+        let validated_identity = validate_component(identity, "媒体身份")?;
+        let validated_url = validate_source_url(url)?;
+        if let Ok(entries) = self.entries.read() {
+            if let Some((id, _)) = entries.iter().find(|(_, source)| {
+                source.identity == validated_identity && source.url == validated_url
+            }) {
+                return Ok(*id);
+            }
+        }
+        self.register(&validated_identity, &validated_url)
+    }
+
     pub fn refresh(&self, id: u64, url: &str) -> Result<()> {
         let url = validate_source_url(url)?;
         let mut entries = self
@@ -136,5 +150,17 @@ mod tests {
         assert!(registry.remove(id));
         assert!(registry.resolve(id).is_none());
         assert!(!registry.remove(id));
+    }
+
+    #[test]
+    fn identical_source_registration_reuses_id() {
+        let registry = SourceRegistry::default();
+        let first = registry
+            .register_or_reuse("hls", "https://media.example/seg.ts?token=x")
+            .unwrap();
+        let second = registry
+            .register_or_reuse("hls", "https://media.example/seg.ts?token=x")
+            .unwrap();
+        assert_eq!(first, second);
     }
 }
