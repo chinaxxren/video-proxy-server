@@ -35,9 +35,10 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: android-actions/setup-android@v3
       - name: Install Android NDK
-        run: sdkmanager "platform-tools" "platforms;android-34" "ndk;26.3.11579264"
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -62,21 +63,24 @@ jobs:
           files: media-proxy-cache-${{ github.ref_name }}-android.*
 
   harmony:
+    if: vars.ENABLE_HARMONY_BUILD == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-ohos,armv7-unknown-linux-ohos
-      - name: Check OHOS NDK toolchain
+      - name: Install OHOS NDK toolchain
         env:
-          OHOS_NDK_HOME: ${{ vars.OHOS_NDK_HOME }}
+          OHOS_NDK_URL: ${{ secrets.OHOS_NDK_URL }}
         run: |
-          test -n "$OHOS_NDK_HOME" || { echo "Configure repository variable OHOS_NDK_HOME to an OHOS NDK installation" >&2; exit 1; }
-          test -x "$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang" || { echo "Missing OHOS clang linker under $OHOS_NDK_HOME/native/llvm/bin" >&2; exit 1; }
+          test -n "$OHOS_NDK_URL" || { echo "Configure repository secret OHOS_NDK_URL" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ohos-ndk"
+          curl --fail --location "$OHOS_NDK_URL" --output "$RUNNER_TEMP/ohos-ndk.tar.gz"
+          tar -xzf "$RUNNER_TEMP/ohos-ndk.tar.gz" -C "$RUNNER_TEMP/ohos-ndk" --strip-components=1
+          test -x "$RUNNER_TEMP/ohos-ndk/native/llvm/bin/aarch64-linux-ohos-clang"
+          echo "OHOS_NDK_HOME=$RUNNER_TEMP/ohos-ndk" >> "$GITHUB_ENV"
       - name: Build HarmonyOS libraries
-        env:
-          OHOS_NDK_HOME: ${{ vars.OHOS_NDK_HOME }}
         run: |
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang"
           export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/armv7-unknown-linux-ohos-clang"

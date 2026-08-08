@@ -109,8 +109,9 @@ macOS/Linux 可运行 `shasum -a 256 -c <归档>.sha256` 校验，Windows 可运
 `Get-FileHash <归档> -Algorithm SHA256` 校验。
 
 独立的 `.github/workflows/mobile.yml` 会在 GitHub runner 上构建 iOS 和 Android
-原生库，并在 tag 推送时作为 Release 资产发布。鸿蒙任务要求配置仓库变量
-`OHOS_NDK_HOME`，指向已安装的鸿蒙 OHOS NDK；未配置时会明确失败，不会生成伪造产物。
+原生库，并在 tag 推送时作为 Release 资产发布。鸿蒙构建默认不启用；需要设置仓库变量
+`ENABLE_HARMONY_BUILD=true`，并通过 Secret `OHOS_NDK_URL` 提供可下载的 OHOS NDK
+压缩包。未配置时鸿蒙任务会跳过。
 
 在 macOS 上运行 `./scripts/test-ffi-macos.sh`，会构建一个链接 Release dylib 的小型
 C 程序，并真实执行 create/start/stop/destroy 完整生命周期。
