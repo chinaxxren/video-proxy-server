@@ -291,6 +291,8 @@ pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    #[cfg(feature = "p2p")]
+    use std::io::{Read, Write};
 
     #[cfg(feature = "p2p")]
     unsafe extern "C" fn p2p_piece_callback(
@@ -385,9 +387,24 @@ mod tests {
             );
             assert_ne!(id, 0);
             assert_eq!((*handle).p2p_sources.read_range(id, 0, 3).unwrap(), b"data");
-            assert_ne!(proxy_server_start(handle), 0);
+            let port = proxy_server_start(handle);
+            assert_ne!(port, 0);
             let server = (*handle).server.lock().unwrap().clone().unwrap();
             assert_eq!(server.p2p_registry().read_range(id, 0, 3).unwrap(), b"data");
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-2\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            let response = String::from_utf8(response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 206"), "{response}");
+            assert!(response
+                .to_ascii_lowercase()
+                .contains("content-range: bytes 1-2/4"));
+            assert!(response.ends_with("at"));
             assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             assert_eq!(proxy_p2p_source_remove(handle, id), 0);
             proxy_server_destroy(handle);

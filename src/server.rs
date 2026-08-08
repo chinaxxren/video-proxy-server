@@ -174,6 +174,8 @@ impl ProxyServer {
             source_manager,
             hls_handler,
             config.max_concurrent_requests,
+            #[cfg(feature = "p2p")]
+            p2p_registry.clone(),
         ));
 
         let (ready, _) = watch::channel(0);

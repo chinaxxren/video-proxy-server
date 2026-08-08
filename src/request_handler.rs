@@ -1,6 +1,8 @@
 use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
+#[cfg(feature = "p2p")]
+use crate::http_types::stream_body;
 use crate::http_types::{empty_body, full_body, AppBody};
 use crate::utils::error::{ProxyError, Result};
 use http_body_util::BodyExt;
@@ -15,6 +17,8 @@ pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
     request_limit: Arc<Semaphore>,
+    #[cfg(feature = "p2p")]
+    p2p_registry: crate::p2p::P2pSourceRegistry,
 }
 
 impl RequestHandler {
@@ -28,11 +32,14 @@ impl RequestHandler {
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
         max_concurrent_requests: usize,
+        #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
     ) -> Self {
         Self {
             source_manager,
             hls_handler,
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
+            #[cfg(feature = "p2p")]
+            p2p_registry,
         }
     }
 
@@ -40,6 +47,11 @@ impl RequestHandler {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
+        #[cfg(feature = "p2p")]
+        if req.uri().path().starts_with("/p2p/") {
+            let response = self.handle_p2p(&req, is_head)?;
+            return Ok(guard_response(response, permit));
+        }
         let data_request = DataRequest::new(&req)?;
 
         let response = match (is_head, data_request.get_type()) {
@@ -73,6 +85,60 @@ impl RequestHandler {
         // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
         // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
         Ok(guard_response(response, permit))
+    }
+
+    #[cfg(feature = "p2p")]
+    fn handle_p2p<B>(&self, req: &Request<B>, is_head: bool) -> Result<Response<AppBody>> {
+        use crate::utils::range::{parse_range_spec, resolve_range, OPEN_ENDED};
+        let raw_id = req.uri().path().strip_prefix("/p2p/").unwrap_or_default();
+        if raw_id.is_empty() || raw_id.contains('/') || !raw_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(ProxyError::Request("P2P source ID is invalid".to_string()));
+        }
+        let id = raw_id.parse::<u64>()?;
+        let total = self
+            .p2p_registry
+            .content_length(id)
+            .ok_or_else(|| ProxyError::Request("P2P source ID not found".to_string()))?;
+        let range_header = req.headers().get(hyper::header::RANGE);
+        let (start, requested_end) = match range_header {
+            Some(value) => parse_range_spec(value.to_str()?)?.endpoints(Some(total))?,
+            None => (0, OPEN_ENDED),
+        };
+        let (start, end) = resolve_range(start, requested_end, Some(total))?;
+        let length = end - start + 1;
+        let mut builder = Response::builder()
+            .status(if range_header.is_some() {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            })
+            .header(ACCEPT_RANGES, "bytes")
+            .header(hyper::header::CONTENT_LENGTH, length);
+        if range_header.is_some() {
+            builder = builder.header(CONTENT_RANGE, format!("bytes {start}-{end}/{total}"));
+        }
+        if is_head {
+            return builder.body(empty_body()).map_err(ProxyError::from);
+        }
+        let registry = self.p2p_registry.clone();
+        let stream = futures_util::stream::unfold((registry, id, start, end), |state| async move {
+            let (registry, id, current, end) = state;
+            if current > end {
+                return None;
+            }
+            let chunk_end = end.min(current.saturating_add(8 * 1024 * 1024 - 1));
+            let task_registry = registry.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                task_registry.read_range(id, current, chunk_end)
+            })
+            .await
+            .map_err(|_| ProxyError::Storage("P2P provider task failed".to_string()))
+            .and_then(|result| result)
+            .map(bytes::Bytes::from);
+            Some((result, (registry, id, chunk_end.saturating_add(1), end)))
+        });
+        builder.body(stream_body(stream)).map_err(ProxyError::from)
     }
 }
 
