@@ -6,6 +6,7 @@
 
 use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,8 +18,46 @@ const MAX_CONTENT_ID_LENGTH: usize = 512;
 const MAX_AUTHORIZATION_LENGTH: usize = 2048;
 const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_P2P_SOURCES: usize = 1024;
+const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
 
 pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct P2pManifestDocument {
+    content_id: String,
+    content_length: u64,
+    content_sha256: String,
+    piece_length: u64,
+    piece_sha256: Vec<String>,
+    authorization_reference: String,
+    explicitly_authorized: bool,
+}
+
+pub fn parse_authorized_manifest_json(
+    json: &[u8],
+) -> Result<(AuthorizedP2pSource, P2pPieceManifest)> {
+    if json.is_empty() || json.len() > MAX_MANIFEST_JSON_BYTES {
+        return Err(ProxyError::Request(
+            "P2P manifest JSON size is invalid".to_string(),
+        ));
+    }
+    let document: P2pManifestDocument = serde_json::from_slice(json)
+        .map_err(|_| ProxyError::Request("P2P manifest JSON is invalid".to_string()))?;
+    let source = AuthorizedP2pSource::new(
+        &document.content_id,
+        document.content_length,
+        &document.content_sha256,
+        &document.authorization_reference,
+        document.explicitly_authorized,
+    )?;
+    let manifest = P2pPieceManifest::new(
+        document.content_length,
+        document.piece_length,
+        document.piece_sha256,
+    )?;
+    Ok((source, manifest))
+}
 
 struct RegisteredP2pSource {
     source: AuthorizedP2pSource,
@@ -470,5 +509,40 @@ mod tests {
         let registry = P2pSourceRegistry::default();
         let id = registry.register(source, manifest, provider).unwrap();
         assert!(registry.verify_complete(id).is_err());
+    }
+
+    #[test]
+    fn parses_strict_authorized_manifest_json() {
+        let content = b"data";
+        let json = serde_json::json!({
+            "content_id": "asset-json",
+            "content_length": 4,
+            "content_sha256": sha256_hex(content),
+            "piece_length": 4,
+            "piece_sha256": [sha256_hex(content)],
+            "authorization_reference": "license-42",
+            "explicitly_authorized": true
+        });
+        let (source, manifest) =
+            parse_authorized_manifest_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(source.content_id(), "asset-json");
+        assert!(manifest.verify_piece(0, content).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_unauthorized_and_oversized_json() {
+        let base = serde_json::json!({
+            "content_id": "asset-json",
+            "content_length": 4,
+            "content_sha256": sha256_hex(b"data"),
+            "piece_length": 4,
+            "piece_sha256": [sha256_hex(b"data")],
+            "authorization_reference": "license-42",
+            "explicitly_authorized": false,
+            "unexpected": true
+        });
+        assert!(parse_authorized_manifest_json(&serde_json::to_vec(&base).unwrap()).is_err());
+        assert!(parse_authorized_manifest_json(&vec![b'x'; MAX_MANIFEST_JSON_BYTES + 1]).is_err());
+        assert!(parse_authorized_manifest_json(b"").is_err());
     }
 }
