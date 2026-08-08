@@ -21,6 +21,7 @@ const MAX_P2P_SOURCES: usize = 1024;
 const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
 const MAX_VERIFIED_PIECE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_DISK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+const STALE_P2P_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
 
@@ -135,6 +136,7 @@ impl P2pSourceRegistry {
     }
 
     pub fn with_cache_limit(cache_root: PathBuf, max_bytes: u64) -> Self {
+        cleanup_stale_disk_temps(&cache_root);
         Self {
             disk_cache: Some(Arc::new(P2pDiskCache {
                 root: cache_root,
@@ -385,6 +387,33 @@ fn enforce_disk_cache_limit(cache: &P2pDiskCache) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cleanup_stale_disk_temps(root: &Path) {
+    let Ok(source_dirs) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for source_dir in source_dirs.flatten() {
+        if !source_dir.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(source_dir.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("tmp") {
+                continue;
+            }
+            let Ok(modified) = file.metadata().and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            if now.duration_since(modified).unwrap_or_default() >= STALE_P2P_TEMP_AGE {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 }
 
 fn read_verified_disk_piece(
@@ -952,5 +981,16 @@ mod tests {
         enforce_disk_cache_limit(&cache).unwrap();
         assert!(!first.join("0.piece").exists());
         assert_eq!(std::fs::read(second.join("0.piece")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn fresh_disk_temporary_files_are_preserved_on_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("content");
+        std::fs::create_dir_all(&source).unwrap();
+        let temporary = source.join(".0.1.2.piece.tmp");
+        std::fs::write(&temporary, b"in progress").unwrap();
+        cleanup_stale_disk_temps(directory.path());
+        assert!(temporary.exists());
     }
 }
