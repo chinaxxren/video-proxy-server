@@ -126,7 +126,19 @@ impl Drop for SourceLease {
 struct P2pDiskCache {
     root: PathBuf,
     max_bytes: u64,
-    maintenance: Mutex<()>,
+    maintenance: Mutex<DiskCacheState>,
+}
+
+#[derive(Default)]
+struct DiskCacheState {
+    initialized: bool,
+    total_bytes: u64,
+    files: HashMap<PathBuf, DiskCacheFile>,
+}
+
+struct DiskCacheFile {
+    modified: std::time::SystemTime,
+    size: u64,
 }
 
 #[derive(Default)]
@@ -192,7 +204,7 @@ impl P2pSourceRegistry {
             disk_cache: Some(Arc::new(P2pDiskCache {
                 root: cache_root,
                 max_bytes,
-                maintenance: Mutex::new(()),
+                maintenance: Mutex::new(DiskCacheState::default()),
             })),
             ..Self::default()
         }
@@ -344,8 +356,10 @@ impl P2pSourceRegistry {
                     let still_referenced = entries
                         .values()
                         .any(|other| other.disk_dir.as_ref() == Some(&directory));
-                    if !still_referenced {
-                        let _ = std::fs::remove_dir_all(directory);
+                    if !still_referenced && std::fs::remove_dir_all(&directory).is_ok() {
+                        if let Some(cache) = &entry.disk_cache {
+                            forget_disk_cache_directory(cache, &directory);
+                        }
                     }
                 }
             }
@@ -399,13 +413,14 @@ fn cached_verified_provider(
         }
         let piece = provider(index)?;
         manifest.verify_piece(index, &piece)?;
+        let mut written_path = None;
         if let Some(directory) = &disk_dir {
             if disk_cache.as_ref().is_none_or(|cache| cache.max_bytes > 0) {
-                write_verified_disk_piece(directory, index, &piece)?;
+                written_path = Some(write_verified_disk_piece(directory, index, &piece)?);
             }
         }
         if let Some(cache) = &disk_cache {
-            enforce_disk_cache_limit(cache)?;
+            enforce_disk_cache_limit(cache, written_path.as_deref())?;
         }
         let piece = cache
             .lock()
@@ -425,51 +440,103 @@ fn manifest_cache_key(manifest: &P2pPieceManifest) -> String {
     bytes_to_hex(&hasher.finalize())
 }
 
-fn enforce_disk_cache_limit(cache: &P2pDiskCache) -> Result<()> {
-    let _guard = cache
+fn enforce_disk_cache_limit(cache: &P2pDiskCache, written_path: Option<&Path>) -> Result<()> {
+    let mut state = cache
         .maintenance
         .lock()
         .map_err(|_| ProxyError::Storage("P2P disk cache unavailable".to_string()))?;
-    let roots = match std::fs::read_dir(&cache.root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(ProxyError::Storage(error.to_string())),
-    };
-    let mut files = Vec::new();
-    let mut total = 0u64;
-    for root in roots.flatten() {
-        if !root.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(root.path()) else {
-            continue;
+    if !state.initialized {
+        let roots = match std::fs::read_dir(&cache.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.initialized = true;
+                return Ok(());
+            }
+            Err(error) => return Err(ProxyError::Storage(error.to_string())),
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("piece") {
+        for root in roots.flatten() {
+            if !root.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(entries) = std::fs::read_dir(root.path()) else {
                 continue;
             };
-            total = total.saturating_add(metadata.len());
-            files.push((
-                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
-                metadata.len(),
-                path,
-            ));
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("piece") {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                state.total_bytes = state.total_bytes.saturating_add(metadata.len());
+                state.files.insert(
+                    path,
+                    DiskCacheFile {
+                        modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        size: metadata.len(),
+                    },
+                );
+            }
         }
+        state.initialized = true;
+    } else if let Some(path) = written_path {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| ProxyError::Storage(error.to_string()))?;
+        if let Some(previous) = state.files.remove(path) {
+            state.total_bytes = state.total_bytes.saturating_sub(previous.size);
+        }
+        state.total_bytes = state.total_bytes.saturating_add(metadata.len());
+        state.files.insert(
+            path.to_path_buf(),
+            DiskCacheFile {
+                modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                size: metadata.len(),
+            },
+        );
     }
-    files.sort_unstable_by_key(|(modified, _, _)| *modified);
-    for (_, size, path) in files {
-        if total <= cache.max_bytes {
+
+    while state.total_bytes > cache.max_bytes {
+        let Some(path) = state
+            .files
+            .iter()
+            .min_by_key(|(_, file)| file.modified)
+            .map(|(path, _)| path.clone())
+        else {
             break;
-        }
-        if std::fs::remove_file(path).is_ok() {
-            total = total.saturating_sub(size);
+        };
+        let Some(file) = state.files.remove(&path) else {
+            continue;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => state.total_bytes = state.total_bytes.saturating_sub(file.size),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.total_bytes = state.total_bytes.saturating_sub(file.size);
+            }
+            Err(error) => {
+                state.files.insert(path, file);
+                return Err(ProxyError::Storage(error.to_string()));
+            }
         }
     }
     Ok(())
+}
+
+fn forget_disk_cache_directory(cache: &P2pDiskCache, directory: &Path) {
+    let Ok(mut state) = cache.maintenance.lock() else {
+        return;
+    };
+    let removed: Vec<_> = state
+        .files
+        .keys()
+        .filter(|path| path.starts_with(directory))
+        .cloned()
+        .collect();
+    for path in removed {
+        if let Some(file) = state.files.remove(&path) {
+            state.total_bytes = state.total_bytes.saturating_sub(file.size);
+        }
+    }
 }
 
 fn cleanup_stale_disk_temps(root: &Path) {
@@ -517,7 +584,7 @@ fn read_verified_disk_piece(
     Ok(Some(bytes))
 }
 
-fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Result<()> {
+fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Result<PathBuf> {
     static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
     std::fs::create_dir_all(directory).map_err(|error| ProxyError::Storage(error.to_string()))?;
@@ -529,10 +596,10 @@ fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Re
     ));
     std::fs::write(&temporary, bytes).map_err(|error| ProxyError::Storage(error.to_string()))?;
     match std::fs::rename(&temporary, &final_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(final_path),
         Err(_error) if matches!(std::fs::read(&final_path), Ok(existing) if existing == bytes) => {
             let _ = std::fs::remove_file(temporary);
-            Ok(())
+            Ok(final_path)
         }
         Err(error) => {
             let _ = std::fs::remove_file(temporary);
@@ -1183,16 +1250,18 @@ mod tests {
         let first = directory.path().join("first");
         let second = directory.path().join("second");
         std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
         std::fs::write(first.join("0.piece"), b"old").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        std::fs::write(second.join("0.piece"), b"new").unwrap();
         let cache = P2pDiskCache {
             root: directory.path().to_path_buf(),
             max_bytes: 3,
-            maintenance: Mutex::new(()),
+            maintenance: Mutex::new(DiskCacheState::default()),
         };
-        enforce_disk_cache_limit(&cache).unwrap();
+        enforce_disk_cache_limit(&cache, None).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let new_path = second.join("0.piece");
+        std::fs::write(&new_path, b"new").unwrap();
+        enforce_disk_cache_limit(&cache, Some(&new_path)).unwrap();
         assert!(!first.join("0.piece").exists());
         assert_eq!(std::fs::read(second.join("0.piece")).unwrap(), b"new");
     }
