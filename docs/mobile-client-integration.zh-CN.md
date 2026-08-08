@@ -36,6 +36,9 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 | Android | 动态库 | AAR | Kotlin/JNI |
 | 鸿蒙 | 动态库 | HAR | ArkTS/N-API |
 
+原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 仍需要
+JNI 实现，鸿蒙声明仍需要 N-API 实现。
+
 建议支持的架构：
 
 - iOS 真机：`aarch64-apple-ios`
@@ -146,6 +149,7 @@ refreshSource(identity, reason) -> new Source
 
 构建脚本会把 Rust 静态库、C 头文件和 module map 打包为
 `MediaProxyCache.xcframework`；生产级 Swift 封装仍需实现。
+iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装模板。
 
 建议接口形态：
 

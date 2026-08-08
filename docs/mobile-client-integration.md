@@ -36,6 +36,10 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 | Android | Shared libraries | AAR | Kotlin/JNI |
 | HarmonyOS | Shared libraries | HAR | ArkTS/N-API |
 
+Native archives include the current platform templates under `adapter/`.
+Swift directly wraps the C ABI; Kotlin still requires JNI, and the HarmonyOS
+declaration still requires an N-API implementation.
+
 Expected architecture targets:
 
 - iOS device: `aarch64-apple-ios`
@@ -147,6 +151,8 @@ The callback must not expose the signed URL through logs or error messages.
 
 The build script packages the Rust static libraries, C header, and module map as
 `MediaProxyCache.xcframework`. A production Swift wrapper is still required.
+The iOS archive also includes `adapter/MediaProxyCache.swift` as an ownership
+wrapper template.
 
 Recommended shape:
 
