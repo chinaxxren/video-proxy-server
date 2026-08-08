@@ -19,6 +19,26 @@ uint16_t proxy_server_start(ProxyServerHandle *handle);
 void proxy_server_stop(ProxyServerHandle *handle);
 void proxy_server_destroy(ProxyServerHandle *handle);
 
+#ifdef MEDIA_PROXY_CACHE_ENABLE_P2P
+#include <stddef.h>
+typedef size_t (*ProxyP2pPieceCallback)(
+    void *context,
+    size_t piece_index,
+    uint8_t *buffer,
+    size_t capacity
+);
+// The callback is called first with buffer=NULL/capacity=0 to query length,
+// then again to fill the Host-owned bytes into Core's buffer.
+uint64_t proxy_p2p_source_register(
+    ProxyServerHandle *handle,
+    const uint8_t *manifest_json,
+    size_t manifest_length,
+    ProxyP2pPieceCallback callback,
+    void *context
+);
+uint8_t proxy_p2p_source_remove(ProxyServerHandle *handle, uint64_t source_id);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
