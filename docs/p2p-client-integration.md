@@ -88,6 +88,8 @@ explicit remove preserves verified pieces for restart recovery.
 Adapters may call `proxy_p2p_source_verify_complete` before playback to verify
 all pieces and the complete content digest. It returns `1` on success and `0`
 on any provider or integrity failure; the operation may fetch the entire asset.
+If the complete digest mismatches, Core permanently invalidates that source ID;
+subsequent Range requests fail and the Host must register a new authorized source.
 
 ## Playback
 

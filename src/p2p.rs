@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 const SHA256_HEX_LENGTH: usize = 64;
@@ -73,6 +73,7 @@ struct RegisteredP2pSource {
     disk_dir: Option<PathBuf>,
     disk_cache: Option<Arc<P2pDiskCache>>,
     lifecycle: Arc<SourceLifecycle>,
+    invalid: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -258,6 +259,7 @@ impl P2pSourceRegistry {
                 disk_dir,
                 disk_cache: self.disk_cache.clone(),
                 lifecycle: Arc::new(SourceLifecycle::default()),
+                invalid: Arc::new(AtomicBool::new(false)),
             },
         );
         Ok(id)
@@ -277,6 +279,12 @@ impl P2pSourceRegistry {
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
         let disk_cache = entry.disk_cache.clone();
+        let invalid = entry.invalid.clone();
+        if invalid.load(Ordering::Acquire) {
+            return Err(ProxyError::Request(
+                "P2P source failed complete integrity verification".to_string(),
+            ));
+        }
         let _lease = entry.lifecycle.acquire()?;
         drop(entries);
         let provider = cached_verified_provider(
@@ -305,6 +313,7 @@ impl P2pSourceRegistry {
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
         let disk_cache = entry.disk_cache.clone();
+        let invalid = entry.invalid.clone();
         let _lease = entry.lifecycle.acquire()?;
         drop(entries);
         let provider = cached_verified_provider(
@@ -324,6 +333,7 @@ impl P2pSourceRegistry {
         }
         let actual = bytes_to_hex(&hasher.finalize());
         if actual != source_digest {
+            invalid.store(true, Ordering::Release);
             return Err(ProxyError::Request(
                 "P2P complete content integrity check failed".to_string(),
             ));
@@ -1006,6 +1016,7 @@ mod tests {
         let registry = P2pSourceRegistry::default();
         let id = registry.register(source, manifest, provider).unwrap();
         assert!(registry.verify_complete(id).is_err());
+        assert!(registry.read_range(id, 0, 3).is_err());
     }
 
     #[test]
