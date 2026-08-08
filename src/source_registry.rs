@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use url::Url;
 
+const MAX_REGISTERED_SOURCES: usize = 10_000;
+
 #[derive(Clone, Debug)]
 pub struct RegisteredSource {
     pub identity: String,
@@ -40,10 +42,14 @@ impl SourceRegistry {
                 (value != 0).then_some(value.wrapping_add(1).max(1))
             })
             .map_err(|_| ProxyError::Request("来源 ID 已耗尽".to_string()))?;
-        self.entries
+        let mut entries = self
+            .entries
             .write()
-            .map_err(|_| ProxyError::Request("来源注册表不可用".to_string()))?
-            .insert(id, RegisteredSource { identity, url });
+            .map_err(|_| ProxyError::Request("来源注册表不可用".to_string()))?;
+        if entries.len() >= MAX_REGISTERED_SOURCES {
+            return Err(ProxyError::Request("来源注册表已达到容量上限".to_string()));
+        }
+        entries.insert(id, RegisteredSource { identity, url });
         Ok(id)
     }
 
@@ -162,5 +168,18 @@ mod tests {
             .register_or_reuse("hls", "https://media.example/seg.ts?token=x")
             .unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn registry_rejects_excessive_source_count() {
+        let registry = SourceRegistry::default();
+        for index in 0..MAX_REGISTERED_SOURCES {
+            registry
+                .register("hls", &format!("https://media.example/{index}.ts"))
+                .unwrap();
+        }
+        assert!(registry
+            .register("hls", "https://media.example/overflow.ts")
+            .is_err());
     }
 }
