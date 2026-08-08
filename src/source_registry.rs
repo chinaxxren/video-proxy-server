@@ -220,4 +220,17 @@ mod tests {
         assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
         assert_eq!(ids.len(), 32);
     }
+
+    #[test]
+    fn clear_invalidates_refresh_and_resolution() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/video.mp4")
+            .unwrap();
+        registry.clear();
+        assert!(registry.resolve(id).is_none());
+        assert!(registry
+            .refresh(id, "https://media.example/video-new.mp4")
+            .is_err());
+    }
 }
