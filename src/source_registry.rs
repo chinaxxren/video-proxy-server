@@ -61,14 +61,32 @@ impl SourceRegistry {
     pub fn register_or_reuse(&self, identity: &str, url: &str) -> Result<u64> {
         let validated_identity = validate_component(identity, "媒体身份")?;
         let validated_url = validate_source_url(url)?;
-        if let Ok(entries) = self.entries.read() {
-            if let Some((id, _)) = entries.iter().find(|(_, source)| {
-                source.identity == validated_identity && source.url == validated_url
-            }) {
-                return Ok(*id);
-            }
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| ProxyError::Request("来源注册表不可用".to_string()))?;
+        if let Some((id, _)) = entries.iter().find(|(_, source)| {
+            source.identity == validated_identity && source.url == validated_url
+        }) {
+            return Ok(*id);
         }
-        self.register(&validated_identity, &validated_url)
+        if entries.len() >= MAX_REGISTERED_SOURCES {
+            return Err(ProxyError::Request("来源注册表已达到容量上限".to_string()));
+        }
+        let id = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value != 0).then_some(value.wrapping_add(1).max(1))
+            })
+            .map_err(|_| ProxyError::Request("来源 ID 已耗尽".to_string()))?;
+        entries.insert(
+            id,
+            RegisteredSource {
+                identity: validated_identity,
+                url: validated_url,
+            },
+        );
+        Ok(id)
     }
 
     pub fn refresh(&self, id: u64, url: &str) -> Result<()> {
