@@ -22,13 +22,17 @@ pub struct RegisteredSource {
 pub struct SourceRegistry {
     next_id: Arc<AtomicU64>,
     entries: Arc<RwLock<HashMap<u64, RegisteredSource>>>,
+    refresh_provider: Arc<RwLock<Option<RefreshProvider>>>,
 }
+
+pub type RefreshProvider = Arc<dyn Fn(u64) -> Result<String> + Send + Sync>;
 
 impl Default for SourceRegistry {
     fn default() -> Self {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),
             entries: Arc::new(RwLock::new(HashMap::new())),
+            refresh_provider: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -116,6 +120,28 @@ impl SourceRegistry {
             entries.clear();
         }
     }
+
+    pub fn set_refresh_provider(&self, provider: Option<RefreshProvider>) -> Result<()> {
+        *self
+            .refresh_provider
+            .write()
+            .map_err(|_| ProxyError::Request("来源刷新器不可用".to_string()))? = provider;
+        Ok(())
+    }
+
+    pub fn refresh_from_provider(&self, id: u64) -> Result<()> {
+        if self.resolve(id).is_none() {
+            return Err(ProxyError::Request("来源 ID 不存在".to_string()));
+        }
+        let provider = self
+            .refresh_provider
+            .read()
+            .map_err(|_| ProxyError::Request("来源刷新器不可用".to_string()))?
+            .clone()
+            .ok_or_else(|| ProxyError::Request("来源刷新器未配置".to_string()))?;
+        let url = provider(id)?;
+        self.refresh(id, &url)
+    }
 }
 
 fn validate_component(value: &str, label: &str) -> Result<String> {
@@ -187,6 +213,38 @@ mod tests {
             registry.resolve(id).unwrap().url,
             "https://media.example/original.mp4?token=old"
         );
+    }
+
+    #[test]
+    fn refresh_provider_updates_only_registered_source() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/a.mp4?token=old")
+            .unwrap();
+        registry
+            .set_refresh_provider(Some(Arc::new(|source_id| {
+                Ok(format!("https://media.example/a.mp4?token={source_id}"))
+            })))
+            .unwrap();
+        registry.refresh_from_provider(id).unwrap();
+        assert_eq!(
+            registry.resolve(id).unwrap().url,
+            format!("https://media.example/a.mp4?token={id}")
+        );
+        assert!(registry.refresh_from_provider(id + 1).is_err());
+    }
+
+    #[test]
+    fn refresh_provider_output_is_validated_before_update() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/a.mp4?token=old")
+            .unwrap();
+        registry
+            .set_refresh_provider(Some(Arc::new(|_| Ok("file:///tmp/a".to_string()))))
+            .unwrap();
+        assert!(registry.refresh_from_provider(id).is_err());
+        assert!(registry.resolve(id).unwrap().url.ends_with("token=old"));
     }
 
     #[test]
