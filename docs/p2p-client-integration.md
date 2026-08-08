@@ -68,7 +68,7 @@ are also persisted below `<cache-directory>/p2p` and can be reused after a Core
 restart. Core revalidates every disk-cached piece before serving it; corrupt
 entries are deleted and requested from the Host again.
 The P2P disk cache uses the Host's `max_cache_bytes` limit and evicts the least
-recently modified verified pieces when that limit is exceeded.
+recently used verified pieces when that limit is exceeded.
 Core also performs this P2P eviction once during initialization, so pieces left
 by a prior process cannot remain over budget while the new process is idle.
 The ordinary HTTP cache also counts `<cache-directory>/p2p` toward the same

@@ -408,6 +408,12 @@ fn cached_verified_provider(
         }
         if let Some(directory) = &disk_dir {
             if let Some(piece) = read_verified_disk_piece(directory, index, &manifest)? {
+                if let Some(disk_cache) = &disk_cache {
+                    refresh_disk_cache_timestamp(
+                        disk_cache,
+                        &directory.join(format!("{index}.piece")),
+                    );
+                }
                 let piece = cache
                     .lock()
                     .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
@@ -543,6 +549,18 @@ fn forget_disk_cache_directory(cache: &P2pDiskCache, directory: &Path) {
     }
 }
 
+fn refresh_disk_cache_timestamp(cache: &P2pDiskCache, path: &Path) {
+    let Ok(modified) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) else {
+        return;
+    };
+    let Ok(mut state) = cache.maintenance.lock() else {
+        return;
+    };
+    if let Some(file) = state.files.get_mut(path) {
+        file.modified = modified;
+    }
+}
+
 fn cleanup_stale_disk_temps(root: &Path) {
     let Ok(source_dirs) = std::fs::read_dir(root) else {
         return;
@@ -585,7 +603,15 @@ fn read_verified_disk_piece(
         let _ = std::fs::remove_file(path);
         return Ok(None);
     }
+    touch_disk_piece(&path);
     Ok(Some(bytes))
+}
+
+fn touch_disk_piece(path: &Path) {
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) else {
+        return;
+    };
+    let _ = file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()));
 }
 
 fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Result<PathBuf> {
@@ -1295,5 +1321,46 @@ mod tests {
         std::fs::write(&temporary, b"in progress").unwrap();
         cleanup_stale_disk_temps(directory.path());
         assert!(temporary.exists());
+    }
+
+    #[test]
+    fn disk_piece_hit_refreshes_eviction_timestamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = directory.path().join("source");
+        std::fs::create_dir_all(&source_directory).unwrap();
+        let path = source_directory.join("0.piece");
+        std::fs::write(&path, b"data").unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        touch_disk_piece(&path);
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(after >= before);
+
+        let cache = P2pDiskCache {
+            root: directory.path().to_path_buf(),
+            max_bytes: 10,
+            maintenance: Mutex::new(DiskCacheState::default()),
+        };
+        enforce_disk_cache_limit(&cache, None).unwrap();
+        let before_index = cache
+            .maintenance
+            .lock()
+            .unwrap()
+            .files
+            .get(&path)
+            .unwrap()
+            .modified;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        touch_disk_piece(&path);
+        refresh_disk_cache_timestamp(&cache, &path);
+        let after_index = cache
+            .maintenance
+            .lock()
+            .unwrap()
+            .files
+            .get(&path)
+            .unwrap()
+            .modified;
+        assert!(after_index >= before_index);
     }
 }
