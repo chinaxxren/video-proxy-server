@@ -1,4 +1,4 @@
-use crate::data_source::net_source::{shared_client, SharedClient};
+use crate::data_source::net_source::{NetResponse, UpstreamByteStream};
 use crate::data_source::NetSource;
 use crate::handlers::response::ALLOWED_UPSTREAM_HEADERS;
 use crate::log_info;
@@ -6,9 +6,9 @@ use crate::storage::UpstreamMeta;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use hyper::header::CONTENT_TYPE;
-use hyper::{Body, HeaderMap, Response, StatusCode};
+use hyper::HeaderMap;
 use std::sync::Arc;
 
 /// 一次上游取数的结果。
@@ -19,7 +19,7 @@ pub struct FetchedUpstream {
     pub content_length: u64,
     /// 可持久化的上游元数据，供后续缓存命中重建响应头。
     pub meta: UpstreamMeta,
-    body: Body,
+    body: UpstreamByteStream,
 }
 
 impl FetchedUpstream {
@@ -29,9 +29,7 @@ impl FetchedUpstream {
     /// 整个结构消耗掉」。克隆一个 `HeaderMap` 要为每个头名和头值各分配一次，
     /// 而原件紧接着就被丢弃——纯浪费。
     ///
-    /// 流本身不再套 `Body::wrap_stream`：`hyper::Body` 自己就是
-    /// `Stream<Item = Result<Bytes, hyper::Error>>`，那层包装只是把它装箱成
-    /// `dyn Stream` 再包回一个 `Body`，每个数据块都要多走一次动态分发。
+    /// 流保持为字节流，不再反复包装成 HTTP Body。
     pub fn into_parts(
         self,
     ) -> (
@@ -48,21 +46,15 @@ impl FetchedUpstream {
 
 pub struct NetworkHandler {
     policy: Arc<NetworkPolicy>,
-    /// 长期存活的连接池。旧实现每次请求都新建 Client 且把
-    /// pool_max_idle_per_host 设为 0，等于每个分片重做一次 TLS 握手。
-    client: SharedClient,
 }
 
 impl NetworkHandler {
     pub fn new(policy: Arc<NetworkPolicy>) -> Self {
-        Self {
-            policy,
-            client: shared_client(),
-        }
+        Self { policy }
     }
 
     pub async fn fetch(&self, url: &str, range: &str) -> Result<FetchedUpstream> {
-        let net_source = NetSource::new(url, range, self.policy.clone(), self.client.clone());
+        let net_source = NetSource::new(url, range, self.policy.clone());
         let (resp, content_length) = net_source.download_stream().await?;
         log_info!("Cache", "网络响应成功，内容长度: {}", content_length);
 
@@ -77,7 +69,7 @@ impl NetworkHandler {
         // 时才接受 200（其余情况一律判为「上游忽略了 Range」并拒绝），所以走到
         // 这里的 200 响应体必然是从 0 开始的完整资源，它的长度就是总长度。
         let total_size = match total_size_from_content_range(&resp) {
-            0 if resp.status() == StatusCode::OK => content_length,
+            0 if resp.status == hyper::StatusCode::OK => content_length,
             from_content_range => from_content_range,
         };
         let headers = self.extract_headers(&resp);
@@ -93,18 +85,18 @@ impl NetworkHandler {
             headers,
             content_length,
             meta,
-            body: resp.into_body(),
+            body: resp.body,
         })
     }
 
-    pub fn extract_headers(&self, resp: &Response<Body>) -> HeaderMap {
+    pub fn extract_headers(&self, resp: &NetResponse) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        for (key, value) in resp.headers().iter() {
+        for (key, value) in &resp.headers {
             if ALLOWED_UPSTREAM_HEADERS
                 .iter()
-                .any(|allowed| allowed == key)
+                .any(|allowed| allowed.as_str() == key.as_str())
             {
-                headers.insert(key, value.clone());
+                headers.append(key, value.clone());
             }
         }
         headers
@@ -112,8 +104,8 @@ impl NetworkHandler {
 }
 
 /// 从 `Content-Range: bytes a-b/total` 解析 total；`*` 或缺失时返回 0（未知）。
-fn total_size_from_content_range(resp: &Response<Body>) -> u64 {
-    resp.headers()
+fn total_size_from_content_range(resp: &NetResponse) -> u64 {
+    resp.headers
         .get(hyper::header::CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit('/').next())
@@ -126,17 +118,31 @@ mod tests {
     use super::*;
     use hyper::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, LOCATION, SET_COOKIE};
 
+    fn response(headers: &[(&str, &str)]) -> NetResponse {
+        let mut map = hyper::HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(
+                hyper::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        NetResponse {
+            status: hyper::StatusCode::PARTIAL_CONTENT,
+            headers: map,
+            body: Box::pin(futures_util::stream::empty()),
+        }
+    }
+
     #[test]
     fn extracts_upstream_headers_without_range_specific_values() {
-        let response = Response::builder()
-            .header(CONTENT_RANGE, "bytes 0-9/100")
-            .header(CONTENT_LENGTH, "10")
-            .header(CONTENT_TYPE, "audio/mp4")
-            .header(CACHE_CONTROL, "private")
-            .header(SET_COOKIE, "session=secret")
-            .header(LOCATION, "https://example.test/redirect")
-            .body(Body::empty())
-            .unwrap();
+        let response = response(&[
+            ("content-range", "bytes 0-9/100"),
+            ("content-length", "10"),
+            ("content-type", "audio/mp4"),
+            ("cache-control", "private"),
+            ("set-cookie", "session=secret"),
+            ("location", "https://example.test/redirect"),
+        ]);
         let handler = NetworkHandler::new(Arc::new(NetworkPolicy::deny_all()));
 
         let headers = handler.extract_headers(&response);
@@ -150,12 +156,7 @@ mod tests {
 
     #[test]
     fn parses_total_size_and_treats_unknown_as_zero() {
-        let with_range = |value: &str| {
-            Response::builder()
-                .header(CONTENT_RANGE, value)
-                .body(Body::empty())
-                .unwrap()
-        };
+        let with_range = |value: &str| response(&[("content-range", value)]);
 
         assert_eq!(
             total_size_from_content_range(&with_range("bytes 0-9/100")),
@@ -163,9 +164,6 @@ mod tests {
         );
         // `*` 表示上游不知道总长度，必须当作未知而不是 0 长度资源。
         assert_eq!(total_size_from_content_range(&with_range("bytes 0-9/*")), 0);
-        assert_eq!(
-            total_size_from_content_range(&Response::builder().body(Body::empty()).unwrap()),
-            0
-        );
+        assert_eq!(total_size_from_content_range(&response(&[])), 0);
     }
 }

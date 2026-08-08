@@ -90,7 +90,7 @@ expiresAt            可选的来源过期时间
 
 开始移动端打包前，Core 必须提供以下保证：
 
-1. `start` 在 `127.0.0.1` 的端口 `0` 上绑定，并返回系统实际分配的端口。
+1. `start` 在 `127.0.0.1` 的端口 `0` 上绑定 HTTP/1.1 端点，并返回系统实际分配的端口。Adapter 不能要求 localhost 播放支持 HTTP/2 或 h2c。
 2. 重复调用 `start` 必须幂等，或返回有文档说明的状态错误。
 3. `stop` 停止接收请求、取消上游任务、刷新已提交元数据、释放 socket，并在有界超时内完成。
 4. 客户端实例拥有自己的运行时资源；销毁实例不能留下脱离管理的服务任务。
@@ -220,6 +220,7 @@ await avPlayer.setUrl(playbackUrl)
 - 使用不可猜测的进程级令牌或不透明请求 ID，防止其他本地调用方任意使用代理。
 - 强制精确匹配的上游域名白名单。
 - 拒绝非 HTTP(S) 协议、URL 凭据、私网/保留地址和不安全重定向。
+- 生产环境 HTTPS 使用 Rustls 和内置 WebPKI 根证书。除非 Core 明确提供由 Host 注入信任库的接口，否则不会信任企业私有 CA。
 - 将已验证 DNS 结果固定到实际连接，关闭 DNS rebinding 的检查/使用时间窗口。
 - 不能记录来源 URL、授权头、Cookie、不透明请求 ID 或稳定缓存身份。
 - 只允许转发明确白名单中的上游请求头。
@@ -255,8 +256,8 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 建议交付顺序
 
-1. 提取可嵌入 Rust Core，实现启停、动态端口、Host 缓存目录、不透明请求注册和来源刷新回调。
-2. 完成 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略的单元及桌面集成测试。
+1. 完成 Core 剩余的 Host 合同：不透明请求注册和来源刷新回调。启停、动态端口和 Host 缓存目录注入已经通过 C ABI 提供。
+2. 将现有 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略单元及桌面集成测试持续作为发布门禁。
 3. 构建 Android JNI/AAR POC，并在真机上验证 Media3。
 4. 根据 Android POC 固化共享生命周期和错误合同。
 5. 构建 iOS XCFramework/Swift Adapter，并验证 AVPlayer。
@@ -265,4 +266,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前公开 API 会在配置端口上启动一个阻塞式服务，并且没有停止句柄。仓库尚未暴露 C ABI、JNI、N-API、动态端口结果、不透明请求注册或来源刷新回调。本文档是移动 SDK 的实现与验收合同，不是已发布产物的使用说明。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、构建/发布脚本以及所有权封装模板。尚未提供生产可用的 JNI/AAR、XCFramework 或 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台包已经完成真机验证。

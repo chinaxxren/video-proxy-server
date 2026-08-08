@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use hyper::client::connect::dns::{GaiResolver, Name};
-use hyper::service::Service;
+use hyper_util::client::legacy::connect::dns::{GaiResolver as GaiResolverV1, Name as NameV1};
 use tokio::time::Instant;
 use url::Url;
 
@@ -62,12 +61,12 @@ impl NetworkPolicy {
     ///
     /// 这里的 DNS 解析只是**准入检查**，不能防住 DNS rebinding：解析结果和
     /// 连接时刻之间存在 TOCTOU 窗口，攻击者控制的权威 DNS 可以在这两次解析
-    /// 之间把记录翻成 127.0.0.1。域名类 URL 的兜底在 [`PublicOnlyResolver`]，
+    /// 之间把记录翻成 127.0.0.1。域名类 URL 的兜底在 [`PublicOnlyResolverV1`]，
     /// 它在连接建立那一刻再过滤一次地址。
     ///
     /// **但对 IP 字面量的 URL，这一层是唯一的防线。** hyper 的
     /// `HttpConnector` 发现 host 已经是 IP 就跳过解析器直接 connect
-    /// （`hyper-0.14` 的 `SocketAddrs::try_parse` 分支），`PublicOnlyResolver`
+    /// Connector 发现 host 已经是 IP 时会跳过解析器，`PublicOnlyResolverV1`
     /// 根本不会被调用。所以 `http://127.0.0.1/` 之所以连不出去，靠的是这里
     /// 的非公网判定，不是那个类型约束。任何新增的回源路径都必须先过
     /// `validate`，绕过它就等于没有 SSRF 防护——不能依赖「解析器兜底」。
@@ -108,7 +107,7 @@ impl NetworkPolicy {
 
         // 「至少有一个公网地址」而不是「全部都是公网地址」。
         //
-        // 原先只要撞见一个非公网地址就整体拒绝，与 [`PublicOnlyResolver`]
+        // 原先只要撞见一个非公网地址就整体拒绝，与 [`PublicOnlyResolverV1`]
         // 「过滤而非拒绝」的约定直接矛盾：split-horizon DNS 下同时返回公网和
         // 内网 A 记录的主机（CDN 上很常见）会在这一层就被挡掉，解析器那句
         // 「仍然允许连公网那几个」永远不会生效。放宽这一层不放宽安全性——
@@ -175,39 +174,38 @@ impl NetworkPolicy {
 /// 过滤而非整体拒绝：一个域名同时有公网和内网 A 记录时（split-horizon DNS
 /// 里很常见），仍然允许连公网那几个。全部地址都不合格才报错。
 #[derive(Clone, Debug)]
-pub struct PublicOnlyResolver {
-    inner: GaiResolver,
+pub struct PublicOnlyResolverV1 {
+    inner: GaiResolverV1,
 }
 
-impl PublicOnlyResolver {
+impl PublicOnlyResolverV1 {
     pub fn new() -> Self {
         Self {
-            inner: GaiResolver::new(),
+            inner: GaiResolverV1::new(),
         }
     }
 }
 
-impl Default for PublicOnlyResolver {
+impl Default for PublicOnlyResolverV1 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Service<Name> for PublicOnlyResolver {
+impl tower_service::Service<NameV1> for PublicOnlyResolverV1 {
     type Response = std::vec::IntoIter<SocketAddr>;
     type Error = io::Error;
     type Future = Pin<Box<dyn Future<Output = io::Result<Self::Response>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.inner.poll_ready(cx)
+        tower_service::Service::poll_ready(&mut self.inner, cx)
     }
 
-    fn call(&mut self, name: Name) -> Self::Future {
-        // GaiResolver 的 Service 约定要求先 clone 再 call。
+    fn call(&mut self, name: NameV1) -> Self::Future {
         let mut inner = self.inner.clone();
         let host = name.as_str().to_string();
         Box::pin(async move {
-            let addresses = inner.call(name).await?;
+            let addresses = tower_service::Service::call(&mut inner, name).await?;
             let allowed: Vec<SocketAddr> = addresses
                 .filter(|address| is_allowed_target(address.ip()))
                 .collect();
@@ -222,7 +220,7 @@ impl Service<Name> for PublicOnlyResolver {
     }
 }
 
-/// 上游目标准入判定，是 [`NetworkPolicy::validate`] 和 [`PublicOnlyResolver`]
+/// 上游目标准入判定，是 [`NetworkPolicy::validate`] 和 [`PublicOnlyResolverV1`]
 /// 共用的唯一决策点。
 ///
 /// 默认等价于 [`is_public_ip`]。只有编译期打开 `allow-private-upstream`
@@ -422,29 +420,29 @@ mod tests {
     /// 只在默认构建下成立；公网放行那一半与 feature 无关，单独一条常驻。
     #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
-    async fn resolver_drops_non_public_addresses() {
+    async fn hyper_resolver_drops_non_public_addresses() {
         use std::str::FromStr;
 
-        let mut resolver = PublicOnlyResolver::new();
-        let error = resolver
-            .call(Name::from_str("localhost").unwrap())
-            .await
-            .expect_err("localhost 应当被拒绝");
+        let mut resolver = PublicOnlyResolverV1::new();
+        let error =
+            tower_service::Service::call(&mut resolver, NameV1::from_str("localhost").unwrap())
+                .await
+                .expect_err("localhost 应当被拒绝");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     /// 公网地址必须原样带出。这一半不受 `allow-private-upstream` 影响，
     /// 否则打开 feature 后解析器就完全没有测试覆盖了。
     #[tokio::test]
-    async fn resolver_passes_public_addresses_through() {
+    async fn hyper_resolver_passes_public_addresses_through() {
         use std::str::FromStr;
 
-        let mut resolver = PublicOnlyResolver::new();
-        let addresses: Vec<SocketAddr> = resolver
-            .call(Name::from_str("8.8.8.8").unwrap())
-            .await
-            .expect("公网地址应当放行")
-            .collect();
+        let mut resolver = PublicOnlyResolverV1::new();
+        let addresses: Vec<SocketAddr> =
+            tower_service::Service::call(&mut resolver, NameV1::from_str("8.8.8.8").unwrap())
+                .await
+                .expect("公网地址应当放行")
+                .collect();
         assert!(addresses.iter().all(|address| is_public_ip(address.ip())));
         assert!(!addresses.is_empty());
     }

@@ -1,22 +1,49 @@
-use std::sync::Arc;
+use std::error::Error as StdError;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use futures::StreamExt;
-use hyper::client::HttpConnector;
-use hyper::{Body, Response, StatusCode};
-use hyper_tls::HttpsConnector;
+use futures_util::StreamExt;
+use http_body_util::{BodyExt, Full};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::connect::HttpConnector as HttpConnectorV1;
+use hyper_util::client::legacy::Client as ClientV1;
+use hyper_util::rt::TokioExecutor;
 
 use crate::log_info;
+use crate::utils::error::ProxyError;
 use crate::utils::error::Result;
-use crate::utils::network_policy::{NetworkPolicy, PublicOnlyResolver};
+use crate::utils::network_policy::{NetworkPolicy, PublicOnlyResolverV1};
 use crate::utils::range::{parse_range, OPEN_ENDED};
-use crate::{data_request::DataRequest, utils::error::ProxyError};
 
 /// 复用的 HTTPS 客户端类型。
 ///
 /// 解析器固定为 [`PublicOnlyResolver`]，让「只连公网地址」成为连接池的类型
 /// 约束而非调用方的自觉：任何拿到 `SharedClient` 的代码都无法绕开它。
-pub type SharedClient = Arc<hyper::Client<HttpsConnector<HttpConnector<PublicOnlyResolver>>>>;
+pub type SharedClientV1 =
+    Arc<ClientV1<HttpsConnector<HttpConnectorV1<PublicOnlyResolverV1>>, Full<bytes::Bytes>>>;
+pub type UpstreamByteStream =
+    Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes>> + Send>>;
+
+fn empty_upstream_stream() -> UpstreamByteStream {
+    Box::pin(futures_util::stream::empty())
+}
+
+pub struct NetResponse {
+    pub status: hyper::StatusCode,
+    pub headers: hyper::HeaderMap,
+    pub body: UpstreamByteStream,
+}
+
+fn v1_data_stream<B>(body: B) -> UpstreamByteStream
+where
+    B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+    B::Error: StdError + Send + Sync + 'static,
+{
+    Box::pin(body.into_data_stream().map(|chunk| {
+        chunk.map_err(|error| ProxyError::Network(format!("读取上游响应失败: {error}")))
+    }))
+}
 
 /// 响应头到达的超时上限。响应体是流式的，不在此计时。
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,25 +58,26 @@ const MAX_ATTEMPTS: u32 = 3;
 /// 瞬时故障的恢复快了五倍，而两次重试的总退避时间反而更短。
 const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
-lazy_static::lazy_static! {
-    static ref SHARED_CLIENT: SharedClient = {
-        let mut http = HttpConnector::new_with_resolver(PublicOnlyResolver::new());
-        // HttpsConnector 需要它自己处理 https scheme，所以这里不能让
-        // HttpConnector 拦下非 http 的 URI。
-        http.enforce_http(false);
-        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+static SHARED_CLIENT_V1: OnceLock<SharedClientV1> = OnceLock::new();
 
-        Arc::new(
-            hyper::Client::builder()
-                .pool_idle_timeout(Duration::from_secs(90))
-                .build::<_, hyper::Body>(HttpsConnector::new_with_connector(http)),
-        )
-    };
-}
-
-/// 进程级共享的连接池。
-pub fn shared_client() -> SharedClient {
-    SHARED_CLIENT.clone()
+pub fn shared_client_v1() -> SharedClientV1 {
+    SHARED_CLIENT_V1
+        .get_or_init(|| {
+            let mut http = HttpConnectorV1::new_with_resolver(PublicOnlyResolverV1::new());
+            http.enforce_http(false);
+            http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+            let https = HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_http1()
+                .wrap_connector(http);
+            Arc::new(
+                ClientV1::builder(TokioExecutor::new())
+                    .pool_idle_timeout(Duration::from_secs(90))
+                    .build(https),
+            )
+        })
+        .clone()
 }
 
 #[derive(Clone, Debug)]
@@ -57,20 +85,20 @@ pub struct NetSource {
     pub url: String,
     pub range: String,
     policy: Arc<NetworkPolicy>,
-    client: SharedClient,
+    client_v1: SharedClientV1,
 }
 
 impl NetSource {
-    pub fn new(url: &str, range: &str, policy: Arc<NetworkPolicy>, client: SharedClient) -> Self {
+    pub fn new(url: &str, range: &str, policy: Arc<NetworkPolicy>) -> Self {
         Self {
             url: url.to_string(),
             range: range.to_string(),
             policy,
-            client,
+            client_v1: shared_client_v1(),
         }
     }
 
-    pub async fn download_stream(&self) -> Result<(Response<Body>, u64)> {
+    pub async fn download_stream(&self) -> Result<(NetResponse, u64)> {
         self.policy.validate(&self.url).await?;
         let (start, end) = parse_range(&self.range)?;
 
@@ -79,23 +107,20 @@ impl NetSource {
             match self.try_download(start, end).await {
                 Ok((resp, content_length)) => {
                     // 先保存需要的部分，再消费 resp。
-                    let status = resp.status();
-                    let headers = resp.headers().clone();
-                    let body = resp.into_body();
+                    let status = resp.status;
+                    let headers = resp.headers;
+                    let body = resp.body;
 
                     // 包装响应体，让它能在流式读取失败时自动重试。
-                    let wrapped_body = Self::wrap_with_retry(
-                        body,
-                        self.clone(),
-                        start,
-                        end,
-                        MAX_ATTEMPTS,
-                    );
+                    let wrapped_body =
+                        Self::wrap_with_retry(body, self.clone(), start, end, MAX_ATTEMPTS);
 
                     // 构造新的 Response。
-                    let mut wrapped_resp = Response::new(wrapped_body);
-                    *wrapped_resp.status_mut() = status;
-                    *wrapped_resp.headers_mut() = headers;
+                    let wrapped_resp = NetResponse {
+                        status,
+                        headers,
+                        body: wrapped_body,
+                    };
                     return Ok((wrapped_resp, content_length));
                 }
                 // 416 是客户端语义错误，重试不会改变结果。
@@ -127,17 +152,17 @@ impl NetSource {
     /// 用 `futures::stream::unfold` 创建一个有状态的流：记录已读字节数，
     /// 遇到流错误时发起新请求继续拉取剩余部分，最多重试 `max_attempts` 次。
     fn wrap_with_retry(
-        initial_body: Body,
+        initial_body: UpstreamByteStream,
         source: NetSource,
         range_start: u64,
         range_end: u64,
         max_attempts: u32,
-    ) -> Body {
+    ) -> UpstreamByteStream {
         // 状态：(当前body, 已读字节数, 已尝试次数)
-        type State = (Body, u64, u32);
+        type State = (UpstreamByteStream, u64, u32);
         let initial_state: State = (initial_body, 0, 1);
 
-        let stream = futures::stream::unfold(
+        let stream = futures_util::stream::unfold(
             (initial_state, source, range_start, range_end, max_attempts),
             |(state, source, range_start, range_end, max_attempts)| async move {
                 let (mut body, mut bytes_read, mut attempt) = state;
@@ -146,7 +171,27 @@ impl NetSource {
                     // 尝试从当前 body 读一块数据。
                     match body.next().await {
                         Some(Ok(chunk)) => {
-                            bytes_read += chunk.len() as u64;
+                            let next_bytes_read = match advance_bytes_read(
+                                bytes_read,
+                                chunk.len(),
+                                range_start,
+                                range_end,
+                            ) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    return Some((
+                                        Err(error),
+                                        (
+                                            (empty_upstream_stream(), bytes_read, max_attempts),
+                                            source,
+                                            range_start,
+                                            range_end,
+                                            max_attempts,
+                                        ),
+                                    ));
+                                }
+                            };
+                            bytes_read = next_bytes_read;
                             let new_state = (body, bytes_read, attempt);
                             return Some((
                                 Ok(chunk),
@@ -162,10 +207,7 @@ impl NetSource {
                                     max_attempts
                                 );
                                 return Some((
-                                    Err(ProxyError::Network(format!(
-                                        "流式读取失败: {}",
-                                        error
-                                    ))),
+                                    Err(ProxyError::Network(format!("流式读取失败: {}", error))),
                                     (
                                         (body, bytes_read, attempt),
                                         source,
@@ -178,7 +220,18 @@ impl NetSource {
 
                             // 发起重试。
                             attempt += 1;
-                            let resume_start = range_start + bytes_read;
+                            let Some(resume_start) = range_start.checked_add(bytes_read) else {
+                                return Some((
+                                    Err(ProxyError::Network("续传位置超出可表示范围".to_string())),
+                                    (
+                                        (empty_upstream_stream(), bytes_read, max_attempts),
+                                        source,
+                                        range_start,
+                                        range_end,
+                                        max_attempts,
+                                    ),
+                                ));
+                            };
                             let resume_range = if range_end == OPEN_ENDED {
                                 format!("bytes={}-", resume_start)
                             } else {
@@ -197,16 +250,12 @@ impl NetSource {
                             let factor = 1u32.checked_shl(attempt - 1).unwrap_or(u32::MAX);
                             tokio::time::sleep(RETRY_BACKOFF.saturating_mul(factor)).await;
 
-                            let retry_source = NetSource::new(
-                                &source.url,
-                                &resume_range,
-                                source.policy.clone(),
-                                source.client.clone(),
-                            );
+                            let retry_source =
+                                NetSource::new(&source.url, &resume_range, source.policy.clone());
 
                             match retry_source.try_download(resume_start, range_end).await {
                                 Ok((resp, _)) => {
-                                    body = resp.into_body();
+                                    body = resp.body;
                                     // 继续循环，从新 body 读取。
                                 }
                                 Err(retry_error) => {
@@ -233,17 +282,32 @@ impl NetSource {
             },
         );
 
-        Body::wrap_stream(stream)
+        Box::pin(stream)
     }
 
-    async fn try_download(&self, start: u64, end: u64) -> Result<(Response<Body>, u64)> {
-        let req = DataRequest::new_request_with_range(&self.url, &self.range);
-        let resp = tokio::time::timeout(HEADER_TIMEOUT, self.client.request(req))
+    async fn try_download(&self, start: u64, end: u64) -> Result<(NetResponse, u64)> {
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri(&self.url)
+            .header("Range", &self.range)
+            .header("User-Agent", "Mozilla/5.0 MediaProxyCache/1")
+            .header("Accept", "*/*")
+            .body(Full::new(bytes::Bytes::new()))
+            .map_err(|_| ProxyError::Request("无法构造上游请求".to_string()))?;
+        log_info!("Request", "Range header: {}", self.range);
+        let response = tokio::time::timeout(HEADER_TIMEOUT, self.client_v1.request(req))
             .await
-            .map_err(|_| ProxyError::Network("等待上游响应头超时".to_string()))??;
+            .map_err(|_| ProxyError::Network("等待上游响应头超时".to_string()))?
+            .map_err(|error| ProxyError::Network(format!("上游请求失败: {error}")))?;
+        let (parts, body) = response.into_parts();
+        let resp = NetResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: v1_data_stream(body),
+        };
 
-        let status = resp.status();
-        if status == StatusCode::RANGE_NOT_SATISFIABLE {
+        let status = resp.status;
+        if status == hyper::StatusCode::RANGE_NOT_SATISFIABLE {
             return Err(ProxyError::InvalidRange(format!(
                 "上游拒绝范围请求: {}",
                 self.range
@@ -260,14 +324,14 @@ impl NetSource {
         // - start > 0：缓存偏移会对不上，拒绝。
         // - end 有限：请求了明确的截止位置，200 无法保证只返回该范围，拒绝。
         // - bytes=0-（end == OPEN_ENDED）：整段从头开始，200 等同于完整文件，允许。
-        if status != StatusCode::PARTIAL_CONTENT && (start > 0 || end != OPEN_ENDED) {
+        if status != hyper::StatusCode::PARTIAL_CONTENT && (start > 0 || end != OPEN_ENDED) {
             return Err(ProxyError::Network(format!(
                 "上游忽略了 Range 请求（状态 {}），要求 206 但收到其他状态码（range: {}-{}）",
                 status, start, end
             )));
         }
 
-        let content_length = match resp.headers().get(hyper::header::CONTENT_LENGTH) {
+        let content_length = match resp.headers.get(hyper::header::CONTENT_LENGTH) {
             Some(len) => len
                 .to_str()
                 .map_err(|_| ProxyError::Request("Invalid content length header".into()))?
@@ -276,32 +340,52 @@ impl NetSource {
             None => return Err(ProxyError::Request("Missing content length header".into())),
         };
 
-        if status == StatusCode::PARTIAL_CONTENT {
-            verify_content_range(&resp, start, end, content_length)?;
+        if status == hyper::StatusCode::PARTIAL_CONTENT {
+            verify_content_range(&resp.headers, start, end, content_length)?;
         }
 
-        // 直接把响应交出去。
-        //
-        // 原先是 `into_parts` + `Body::wrap_stream(body)` + `from_parts`：拆开再
-        // 原样装回，唯一的实际效果是把已经是 `hyper::Body` 的响应体再套一层
-        // `wrap_stream`。那层包装会把 body 装进一个 boxed stream，于是这条流上
-        // 每一个数据块都要多走一次动态派发——而 `hyper::Body` 本身就是 `Stream`，
-        // 这层包装没有带来任何东西。
+        // 状态、响应头和 Hyper 1 数据帧流直接交给上层。
         Ok((resp, content_length))
     }
+}
+
+fn advance_bytes_read(
+    bytes_read: u64,
+    chunk_length: usize,
+    range_start: u64,
+    range_end: u64,
+) -> Result<u64> {
+    let chunk_length = u64::try_from(chunk_length)
+        .map_err(|_| ProxyError::Network("上游响应块长度超出可表示范围".to_string()))?;
+    let next = bytes_read
+        .checked_add(chunk_length)
+        .ok_or_else(|| ProxyError::Network("上游响应体累计长度溢出".to_string()))?;
+
+    if range_end != OPEN_ENDED {
+        let expected = range_end
+            .checked_sub(range_start)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| ProxyError::InvalidRange("上游请求范围无效".to_string()))?;
+        if next > expected {
+            return Err(ProxyError::Network(
+                "上游响应体超过请求的 Range 范围".to_string(),
+            ));
+        }
+    }
+
+    Ok(next)
 }
 
 /// 校验 `Content-Range` 的起始偏移与我们请求的一致。
 ///
 /// 不校验就落盘等于相信上游返回的是我们要的那一段；偏移错位会静默写坏缓存。
 fn verify_content_range(
-    resp: &Response<Body>,
+    headers: &hyper::HeaderMap,
     expected_start: u64,
     expected_end: u64,
     content_length: u64,
 ) -> Result<()> {
-    let value = resp
-        .headers()
+    let value = headers
         .get(hyper::header::CONTENT_RANGE)
         .ok_or_else(|| ProxyError::Network("206 响应缺少 Content-Range".to_string()))?
         .to_str()
@@ -362,14 +446,28 @@ fn verify_content_range(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::CONTENT_RANGE;
 
-    fn response(content_range: Option<&str>) -> Response<Body> {
-        let mut builder = Response::builder();
+    fn response(content_range: Option<&str>) -> hyper::HeaderMap {
+        let mut headers = hyper::HeaderMap::new();
         if let Some(value) = content_range {
-            builder = builder.header(CONTENT_RANGE, value);
+            headers.insert(hyper::header::CONTENT_RANGE, value.parse().unwrap());
         }
-        builder.body(Body::empty()).unwrap()
+        headers
+    }
+
+    #[tokio::test]
+    async fn hyper_shared_client_reuses_one_connection_pool() {
+        let first = shared_client_v1();
+        let second = shared_client_v1();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn response_byte_counter_rejects_overflow_and_range_overrun() {
+        assert_eq!(advance_bytes_read(10, 5, 100, 199).unwrap(), 15);
+        assert!(advance_bytes_read(u64::MAX, 1, 0, OPEN_ENDED).is_err());
+        assert!(advance_bytes_read(99, 2, 100, 199).is_err());
+        assert!(advance_bytes_read(0, 1, 200, 100).is_err());
     }
 
     #[test]

@@ -23,7 +23,10 @@ async fn main() -> Result<(), ProxyError> {
     let args: Vec<String> = env::args().collect();
 
     let port = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(8080);
-    let cache_dir = args.get(2).map(PathBuf::from).unwrap_or_else(|| "cache".into());
+    let cache_dir = args
+        .get(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "cache".into());
     let allowed_hosts: Vec<String> = args
         .get(3)
         .map(|value| value.split(',').map(str::to_string).collect())
@@ -53,6 +56,11 @@ async fn main() -> Result<(), ProxyError> {
             "PROXY_SHUTDOWN_TIMEOUT_MS",
             defaults.shutdown_timeout.as_millis() as u64,
         )),
+        request_header_timeout: Duration::from_millis(env_or(
+            "PROXY_REQUEST_HEADER_TIMEOUT_MS",
+            defaults.request_header_timeout.as_millis() as u64,
+        )),
+        max_request_headers: env_or("PROXY_MAX_REQUEST_HEADERS", defaults.max_request_headers),
         cleanup_interval: Duration::from_secs(env_or(
             "PROXY_CLEANUP_SECS",
             defaults.cleanup_interval.as_secs(),

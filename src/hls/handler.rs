@@ -1,16 +1,15 @@
 use super::{playlist_refresh_ttl, HlsHandler, HlsManager, PROXY_PREFIX};
-use crate::data_request::DataRequest;
-use crate::data_source::{shared_client, SharedClient};
+use crate::data_source::net_source::{shared_client_v1, SharedClientV1};
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
-use futures::StreamExt;
-use hyper::body::HttpBody;
+use crate::utils::percent_encoding::decode_component;
+use futures_util::StreamExt;
+use http_body_util::{BodyExt, Full};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
-use urlencoding;
 
 /// m3u8 播放列表的大小上限。
 ///
@@ -29,7 +28,7 @@ pub struct DefaultHlsHandler {
     /// 这里**必须**用共享客户端：它的连接器装了 `PublicOnlyResolver`。
     /// 之前这里自建 `HttpsConnector::new()`，走的是默认解析器，
     /// m3u8 这条路径上的 DNS rebinding 防护是完全失效的。
-    client: SharedClient,
+    client: SharedClientV1,
     policy: Arc<NetworkPolicy>,
 }
 
@@ -37,7 +36,7 @@ impl DefaultHlsHandler {
     pub fn new(cache_dir: PathBuf, policy: Arc<NetworkPolicy>) -> Self {
         Self {
             manager: Arc::new(HlsManager::new(cache_dir)),
-            client: shared_client(),
+            client: shared_client_v1(),
             policy,
         }
     }
@@ -61,7 +60,14 @@ impl DefaultHlsHandler {
         self.policy.validate(url).await?;
         log_info!("HLS", "下载 m3u8 文件");
 
-        let request = DataRequest::new_request_with_range(url, "bytes=0-");
+        let request = hyper::Request::builder()
+            .method("GET")
+            .uri(url)
+            .header("Range", "bytes=0-")
+            .header("User-Agent", "Mozilla/5.0 MediaProxyCache/1")
+            .header("Accept", "*/*")
+            .body(Full::new(bytes::Bytes::new()))
+            .map_err(|_| ProxyError::Request("无法构造 m3u8 请求".to_string()))?;
         let response = tokio::time::timeout(PLAYLIST_TIMEOUT, self.client.request(request))
             .await
             .map_err(|_| ProxyError::Network("下载 m3u8 超时".to_string()))?
@@ -80,7 +86,7 @@ impl DefaultHlsHandler {
 
     /// 带上限地读取响应体。
     ///
-    /// 不用 `hyper::body::to_bytes`：它会一直读到上游结束，长度完全由对端
+    /// 不做无上限的 Body 聚合：一直读到上游结束会让长度完全由对端
     /// 决定。这里边读边累计，超过 [`MAX_PLAYLIST_BYTES`] 立刻放弃并丢弃
     /// 响应体（drop 即断连），已读部分不会保留。
     ///
@@ -88,8 +94,12 @@ impl DefaultHlsHandler {
     /// 白读一遍再放弃），以及预留容量（原先从零开始 `extend_from_slice`，
     /// 一个 200 KiB 的播放列表要经历十几次翻倍搬迁）。预留值仍要跟上限取
     /// 小，否则上游只要谎报一个巨大的 Content-Length 就能让这里替它分配。
-    async fn read_body_capped(mut body: hyper::Body) -> Result<Vec<u8>> {
-        let declared = HttpBody::size_hint(&body).lower();
+    async fn read_body_capped<B>(body: B) -> Result<Vec<u8>>
+    where
+        B: hyper::body::Body<Data = bytes::Bytes>,
+        B::Error: std::fmt::Display,
+    {
+        let declared = body.size_hint().lower();
         if declared > MAX_PLAYLIST_BYTES as u64 {
             return Err(ProxyError::Parse(format!(
                 "m3u8 声明长度 {} 超过上限 {} 字节",
@@ -98,21 +108,29 @@ impl DefaultHlsHandler {
         }
 
         let mut buffer = Vec::with_capacity(declared as usize);
+        let mut body = Box::pin(body.into_data_stream());
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(|e| ProxyError::Network(format!("读取响应失败: {}", e)))?;
-            if buffer.len() + chunk.len() > MAX_PLAYLIST_BYTES {
-                return Err(ProxyError::Parse(format!(
-                    "m3u8 超过大小上限 {} 字节",
-                    MAX_PLAYLIST_BYTES
-                )));
-            }
+            checked_playlist_length(buffer.len(), chunk.len())?;
             buffer.extend_from_slice(&chunk);
         }
         Ok(buffer)
     }
 }
 
-#[async_trait::async_trait]
+fn checked_playlist_length(current: usize, chunk: usize) -> Result<usize> {
+    let next = current
+        .checked_add(chunk)
+        .ok_or_else(|| ProxyError::Parse("m3u8 长度累计溢出".to_string()))?;
+    if next > MAX_PLAYLIST_BYTES {
+        return Err(ProxyError::Parse(format!(
+            "m3u8 超过大小上限 {} 字节",
+            MAX_PLAYLIST_BYTES
+        )));
+    }
+    Ok(next)
+}
+
 impl HlsHandler for DefaultHlsHandler {
     async fn handle_m3u8(&self, url: &str) -> Result<String> {
         log_info!("HLS", "处理 m3u8 请求");
@@ -126,7 +144,7 @@ impl HlsHandler for DefaultHlsHandler {
             while let Some(index) = clean.find(PROXY_PREFIX) {
                 clean = &clean[index + PROXY_PREFIX.len()..];
             }
-            urlencoding::decode(clean)
+            decode_component(clean)
                 .map_err(|e| ProxyError::Request(format!("URL 解码失败: {}", e)))?
                 .into_owned()
         } else {
@@ -153,5 +171,31 @@ impl HlsHandler for DefaultHlsHandler {
             .await;
 
         Ok(rewritten)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn hyper_playlist_body_is_read_without_legacy_bridge() {
+        let body = Full::new(bytes::Bytes::from_static(b"#EXTM3U\n"));
+        let bytes = DefaultHlsHandler::read_body_capped(body).await.unwrap();
+        assert_eq!(bytes, b"#EXTM3U\n");
+    }
+
+    #[tokio::test]
+    async fn hyper_playlist_body_rejects_declared_length_over_limit() {
+        let body = Full::new(bytes::Bytes::from(vec![0; MAX_PLAYLIST_BYTES + 1]));
+        let error = DefaultHlsHandler::read_body_capped(body).await.unwrap_err();
+        assert!(matches!(error, ProxyError::Parse(_)));
+    }
+
+    #[test]
+    fn playlist_length_rejects_overflow_and_limit_overrun() {
+        assert_eq!(checked_playlist_length(10, 20).unwrap(), 30);
+        assert!(checked_playlist_length(usize::MAX, 1).is_err());
+        assert!(checked_playlist_length(MAX_PLAYLIST_BYTES, 1).is_err());
     }
 }

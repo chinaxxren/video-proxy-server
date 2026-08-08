@@ -1,20 +1,29 @@
 use crate::data_source_manager::DataSourceManager;
+use crate::handlers::BackgroundTasks;
 use crate::hls::DefaultHlsHandler;
+use crate::http_types::{empty_body, full_body, AppBody};
 use crate::log_info;
 use crate::request_handler::RequestHandler;
-use crate::handlers::BackgroundTasks;
 use crate::storage::StorageManagerConfig;
 use crate::utils::error::{ProxyError, Result};
+
+#[cfg(test)]
+#[path = "../examples/support/mod.rs"]
+mod test_http_client;
 use crate::utils::network_policy::NetworkPolicy;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::Server;
+use hyper::server::conn::http1::Builder as ConnectionBuilder;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
+use tokio::task::JoinSet;
 
 const STATE_CREATED: u8 = 0;
 const STATE_STARTING: u8 = 1;
@@ -53,6 +62,10 @@ pub struct ProxyConfig {
     pub max_concurrent_requests: usize,
     /// 收到停止信号后等待连接自然排空的最长时间。
     pub shutdown_timeout: Duration,
+    /// 客户端必须在此时间内发送完整 HTTP 请求头，防止半开连接长期占用任务。
+    pub request_header_timeout: Duration,
+    /// 单个 HTTP 请求允许的最大头字段数量，超出时 Hyper 返回 431。
+    pub max_request_headers: usize,
     /// 允许回源的主机白名单。**留空表示拒绝一切上游请求**——
     /// 默认拒绝而不是默认放行，是这一层 SSRF 防护的基本前提。
     pub allowed_hosts: Vec<String>,
@@ -68,6 +81,8 @@ impl Default for ProxyConfig {
             cleanup_interval: Duration::from_secs(60),
             max_concurrent_requests: 64,
             shutdown_timeout: Duration::from_secs(5),
+            request_header_timeout: Duration::from_secs(10),
+            max_request_headers: 64,
             allowed_hosts: Vec::new(),
         }
     }
@@ -81,6 +96,8 @@ pub struct ProxyServer {
     shutdown: Arc<Notify>,
     ready: watch::Sender<u8>,
     shutdown_timeout: Duration,
+    request_header_timeout: Duration,
+    max_request_headers: usize,
     background_tasks: Arc<BackgroundTasks>,
 }
 
@@ -145,6 +162,8 @@ impl ProxyServer {
             shutdown: Arc::new(Notify::new()),
             ready,
             shutdown_timeout: config.shutdown_timeout,
+            request_header_timeout: config.request_header_timeout,
+            max_request_headers: config.max_request_headers,
             background_tasks,
         }
     }
@@ -152,12 +171,12 @@ impl ProxyServer {
     /// 发送优雅停止信号。`start()` 会完成所有进行中的请求后关闭监听器。
     /// 可从任意线程安全调用；多次调用幂等。
     pub fn stop(&self) {
-        let _ = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-            match state {
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
                 STATE_CREATED | STATE_STARTING | STATE_RUNNING => Some(STATE_STOPPING),
                 _ => None,
-            }
-        });
+            });
         self.shutdown.notify_one();
     }
 
@@ -210,91 +229,98 @@ impl ProxyServer {
         }
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
 
-        let handler = self.handler.clone();
-        let make_svc = make_service_fn(move |_conn| {
-            let handler = handler.clone();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    let handler = handler.clone();
-                    async move {
-                        match handler.handle_request(req).await {
-                            Ok(response) => Ok::<_, Infallible>(response),
-                            Err(e) => {
-                                // 详细原因只进日志；响应体只给类别，避免回显
-                                // 缓存路径、上游 URL 等内部信息。
-                                log_info!("Server", "请求失败: {}", e);
-                                let mut builder =
-                                    hyper::Response::builder().status(e.status_code());
-                                if matches!(e, ProxyError::MethodNotAllowed) {
-                                    builder = builder.header(hyper::header::ALLOW, "GET");
-                                }
-                                Ok(builder
-                                    .body(hyper::Body::from(e.public_message()))
-                                    .unwrap_or_else(|_| {
-                                        let mut fallback =
-                                            hyper::Response::new(hyper::Body::empty());
-                                        *fallback.status_mut() =
-                                            hyper::StatusCode::INTERNAL_SERVER_ERROR;
-                                        fallback
-                                    }))
-                            }
-                        }
-                    }
-                }))
-            }
-        });
-
-        // try_bind 而非 bind：后者在端口被占用时直接 panic，调用方
-        // 无论怎么处理返回值都拦不住，进程会带着 panic 栈退出。
-        let shutdown = self.shutdown.clone();
-        let drain_started = Arc::new(Notify::new());
-        let drain_signal = drain_started.clone();
-        let builder = match Server::try_bind(&addr) {
-            Ok(builder) => builder,
+        let listener = match TcpListener::bind(addr).await {
+            Ok(listener) => listener,
             Err(error) => {
                 self.state.store(STATE_FAILED, Ordering::Release);
                 self.ready.send_replace(1);
                 return Err(ProxyError::IO(format!("无法绑定 {}: {}", addr, error)));
             }
         };
-        let actual_addr = builder.local_addr();
+        let actual_addr = listener
+            .local_addr()
+            .map_err(|error| ProxyError::IO(format!("无法读取监听地址: {error}")))?;
         self.bound_port.store(actual_addr.port(), Ordering::Release);
         if self.state.load(Ordering::Acquire) != STATE_STOPPING {
             self.state.store(STATE_RUNNING, Ordering::Release);
         }
         self.ready.send_replace(1);
 
-        let server = builder
-            .serve(make_svc)
-            .with_graceful_shutdown(async move {
-                shutdown.notified().await;
-                drain_signal.notify_one();
-            });
         log_info!("Server", "代理服务器正在运行在 http://{}", actual_addr);
 
-        tokio::pin!(server);
-        let result = tokio::select! {
-            result = &mut server => result
-                .map_err(|e| ProxyError::IO(format!("服务器异常终止: {}", e))),
-            _ = drain_started.notified() => {
-                match tokio::time::timeout(self.shutdown_timeout, &mut server).await {
-                    Ok(result) => result
-                        .map_err(|e| ProxyError::IO(format!("服务器异常终止: {}", e))),
-                    Err(_) => {
-                        log_info!("Server", "等待连接排空超过 {:?}，强制停止", self.shutdown_timeout);
-                        self.background_tasks.abort_all();
-                        Ok(())
-                    }
+        let graceful = GracefulShutdown::new();
+        let mut connections = JoinSet::new();
+        let request_header_timeout = self.request_header_timeout;
+        let max_request_headers = self.max_request_headers;
+        loop {
+            tokio::select! {
+                _ = self.shutdown.notified() => break,
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted
+                        .map_err(|error| ProxyError::IO(format!("接受连接失败: {error}")))?;
+                    let handler = self.handler.clone();
+                    let watcher = graceful.watcher();
+                    connections.spawn(async move {
+                        let service = service_fn(move |request| {
+                            let handler = handler.clone();
+                            async move {
+                                let response = match handler.handle_request(request).await {
+                                    Ok(response) => response,
+                                    Err(error) => error_response(error),
+                                };
+                                Ok::<_, Infallible>(response)
+                            }
+                        });
+                        let mut builder = ConnectionBuilder::new();
+                        builder
+                            .timer(TokioTimer::new())
+                            .header_read_timeout(request_header_timeout)
+                            .max_headers(max_request_headers);
+                        let connection = builder.serve_connection(TokioIo::new(stream), service);
+                        let _ = watcher.watch(connection).await;
+                    });
                 }
             }
-        };
+        }
+        if tokio::time::timeout(self.shutdown_timeout, graceful.shutdown())
+            .await
+            .is_err()
+        {
+            log_info!(
+                "Server",
+                "等待连接排空超过 {:?}，强制停止",
+                self.shutdown_timeout
+            );
+            connections.abort_all();
+        }
+        while connections.join_next().await.is_some() {}
+        let result = Ok(());
         self.background_tasks.abort_all();
         self.state.store(
-            if result.is_ok() { STATE_STOPPED } else { STATE_FAILED },
+            if result.is_ok() {
+                STATE_STOPPED
+            } else {
+                STATE_FAILED
+            },
             Ordering::Release,
         );
         result
     }
+}
+
+fn error_response(error: ProxyError) -> hyper::Response<AppBody> {
+    log_info!("Server", "请求失败: {}", error);
+    let mut builder = hyper::Response::builder().status(error.status_code());
+    if matches!(error, ProxyError::MethodNotAllowed) {
+        builder = builder.header(hyper::header::ALLOW, "GET, HEAD");
+    }
+    builder
+        .body(full_body(error.public_message()))
+        .unwrap_or_else(|_| {
+            let mut response = hyper::Response::new(empty_body());
+            *response.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        })
 }
 
 pub async fn run_server(port: u16, cache_dir: &str) -> Result<()> {
@@ -310,8 +336,83 @@ pub async fn run_server_with_config(config: ProxyConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_http_client as local_http;
     use super::*;
     use std::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn incomplete_request_headers_are_closed_after_timeout() {
+        let cache = tempfile::tempdir().unwrap();
+        let server = Arc::new(ProxyServer::with_config(ProxyConfig {
+            port: 0,
+            cache_dir: cache.path().to_path_buf(),
+            request_header_timeout: std::time::Duration::from_millis(100),
+            ..Default::default()
+        }));
+        let running = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.start().await }
+        });
+        let port = server.wait_until_ready().await.unwrap();
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Incomplete:")
+            .await
+            .unwrap();
+
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut byte))
+            .await
+            .expect("半开请求头没有在配置时间内关闭")
+            .expect("读取连接关闭状态失败");
+        assert_eq!(read, 0, "超时后连接应以 EOF 关闭");
+
+        server.stop();
+        running.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn excessive_request_headers_return_431() {
+        let cache = tempfile::tempdir().unwrap();
+        let server = Arc::new(ProxyServer::with_config(ProxyConfig {
+            port: 0,
+            cache_dir: cache.path().to_path_buf(),
+            max_request_headers: 2,
+            ..Default::default()
+        }));
+        let running = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.start().await }
+        });
+        let port = server.wait_until_ready().await.unwrap();
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-One: 1\r\nX-Two: 2\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut response),
+        )
+        .await
+        .expect("超出头数量的请求没有及时结束")
+        .expect("读取 431 响应失败");
+        assert!(
+            response.starts_with(b"HTTP/1.1 431"),
+            "响应不是 431: {response:?}"
+        );
+
+        server.stop();
+        running.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     async fn occupied_port_returns_error_instead_of_panicking() {
@@ -401,17 +502,15 @@ mod tests {
         });
         wait_until_listening(port).await;
 
-        let client = hyper::Client::new();
-        let request = hyper::Request::builder()
-            .uri(format!("http://127.0.0.1:{}/proxy/media", port))
+        let request = local_http::Client::new()
+            .get(format!("http://127.0.0.1:{}/proxy/media", port))
             .header("X-Original-Url", "https://example.com/video.mp4")
             .header("X-Cache-Asset-Id", "asset-1")
             .header("X-Cache-Asset-Revision", "1")
-            .header(hyper::header::RANGE, "bytes=0-1023")
-            .body(hyper::Body::empty())
-            .unwrap();
+            .header("Range", "bytes=0-1023")
+            .send();
 
-        let response = tokio::time::timeout(std::time::Duration::from_secs(5), client.request(request))
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
             .await
             .expect("请求超时")
             .expect("请求失败");
@@ -424,7 +523,7 @@ mod tests {
             response.status()
         );
 
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body = response.bytes().await.unwrap();
         let text = String::from_utf8_lossy(&body);
         // 响应体不能回显上游 URL 或缓存路径。
         assert!(
@@ -472,7 +571,7 @@ mod tests {
         });
         wait_until_listening(port).await;
 
-        let _connection = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        let mut connection = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .unwrap();
         server.stop();
@@ -482,6 +581,15 @@ mod tests {
             .expect("停止操作超过外层测试时限")
             .expect("服务器任务 panic");
         assert!(result.is_ok());
+
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(1), connection.read(&mut byte))
+            .await
+            .expect("停止后连接仍未关闭");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "停止后 socket 仍可读取: {read:?}"
+        );
     }
 
     #[tokio::test]

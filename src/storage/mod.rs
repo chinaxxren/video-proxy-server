@@ -1,6 +1,7 @@
 use crate::utils::error::Result;
 use bytes::Bytes;
-use futures::Stream;
+use futures_util::Stream;
+use std::future::Future;
 use std::path::PathBuf;
 
 pub mod disk;
@@ -15,32 +16,50 @@ pub struct StorageConfig {
     pub chunk_size: usize,
 }
 
-#[async_trait::async_trait]
 pub trait StorageEngine: Send + Sync {
-    async fn write<S>(&self, key: &str, stream: S, range: (u64, u64)) -> Result<u64>
+    fn write<'a, S>(
+        &'a self,
+        key: &'a str,
+        stream: S,
+        range: (u64, u64),
+    ) -> impl Future<Output = Result<u64>> + Send + 'a
     where
         S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static;
 
-    async fn read(
-        &self,
-        key: &str,
+    fn read<'a>(
+        &'a self,
+        key: &'a str,
         range: (u64, u64),
-    ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>>;
+    ) -> impl Future<Output = Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>>> + Send + 'a;
 
-    async fn get_size(&self, key: &str) -> Result<Option<u64>>;
+    fn get_size<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> impl Future<Output = Result<Option<u64>>> + Send + 'a;
 
-    async fn check_range(&self, key: &str, range: (u64, u64)) -> Result<bool>;
+    fn check_range<'a>(
+        &'a self,
+        key: &'a str,
+        range: (u64, u64),
+    ) -> impl Future<Output = Result<bool>> + Send + 'a;
 
-    async fn delete(&self, key: &str) -> Result<()>;
+    fn delete<'a>(&'a self, key: &'a str) -> impl Future<Output = Result<()>> + Send + 'a;
 
     /// 持久化上游元数据（总长度、Content-Type）。
     ///
     /// 缓存命中时用它替代「再向上游发一次 `bytes=0-0` 探针」取这些值，
     /// 否则上游不可达会让已完整缓存的请求整体失败。
-    async fn record_upstream_meta(&self, key: &str, meta: &UpstreamMeta) -> Result<()>;
+    fn record_upstream_meta<'a>(
+        &'a self,
+        key: &'a str,
+        meta: &'a UpstreamMeta,
+    ) -> impl Future<Output = Result<()>> + Send + 'a;
 
     /// 读取已持久化的上游元数据；字段未知时为 `None`。
-    async fn upstream_meta(&self, key: &str) -> Result<UpstreamMeta>;
+    fn upstream_meta<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> impl Future<Output = Result<UpstreamMeta>> + Send + 'a;
 
     /// 枚举已落盘的缓存条目，返回 `(key, 已占用字节数)`。
     ///
@@ -49,8 +68,8 @@ pub trait StorageEngine: Send + Sync {
     ///
     /// 默认返回空表：不支持枚举的引擎退化成「重启后从零开始记账」，
     /// 行为与加这个方法之前一致。
-    async fn enumerate(&self) -> Result<Vec<(String, u64)>> {
-        Ok(Vec::new())
+    fn enumerate(&self) -> impl Future<Output = Result<Vec<(String, u64)>>> + Send + '_ {
+        async { Ok(Vec::new()) }
     }
 }
 

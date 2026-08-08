@@ -17,9 +17,23 @@ build_target() {
   }
   cargo build --locked --$PROFILE --target "$target"
   mkdir -p "$OUT_DIR/$platform/$target"
-  cp "target/$target/$PROFILE/libproxy_server.a" "$OUT_DIR/$platform/$target/" 2>/dev/null || true
-  cp "target/$target/$PROFILE/libproxy_server.dylib" "$OUT_DIR/$platform/$target/" 2>/dev/null || true
-  cp "target/$target/$PROFILE/libproxy_server.so" "$OUT_DIR/$platform/$target/" 2>/dev/null || true
+  local copied=0
+  for artifact in \
+    "target/$target/$PROFILE/libproxy_server.a" \
+    "target/$target/$PROFILE/libproxy_server.dylib" \
+    "target/$target/$PROFILE/libproxy_server.so" \
+    "target/$target/$PROFILE/proxy_server.dll" \
+    "target/$target/$PROFILE/proxy_server.dll.a" \
+    "target/$target/$PROFILE/proxy_server.lib"; do
+    if [[ -f "$artifact" ]]; then
+      cp "$artifact" "$OUT_DIR/$platform/$target/"
+      copied=1
+    fi
+  done
+  if [[ "$copied" -eq 0 ]]; then
+    echo "No native library artifact produced for target $target" >&2
+    return 1
+  fi
 }
 
 case "${PLATFORM:-all}" in

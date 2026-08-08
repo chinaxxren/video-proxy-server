@@ -1,5 +1,6 @@
-use hyper::{Client, Request, Body};
-use hyper_tls::HttpsConnector;
+mod support;
+use support as local_http;
+
 use proxy_server::{log_info, server};
 
 #[tokio::main]
@@ -17,20 +18,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 等待服务器启动
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, hyper::Body>(https);
+    let client = local_http::Client::new();
 
     // 测试 HTTPS URL
     let https_url = "https://media.w3.org/2010/05/sintel/trailer.mp4";
 
     log_info!("Example", "发送 HTTPS 请求");
-    let req = Request::builder()
-        .method("GET")
-        .uri("http://127.0.0.1:8080")
+    let resp = client
+        .get("http://127.0.0.1:8080")
         .header("X-Original-Url", https_url)
-        .body(Body::empty())?;
-
-    let resp = client.request(req).await?;
+        .header("X-Cache-User-Id", "example-user")
+        .header("X-Cache-Asset-Id", "sintel-trailer")
+        .header("X-Cache-Asset-Revision", "1")
+        .send()
+        .await?;
     log_info!("Example", "响应状态: {}", resp.status());
     log_info!("Example", "响应头: {:#?}", resp.headers());
 

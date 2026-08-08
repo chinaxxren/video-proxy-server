@@ -1,7 +1,5 @@
-use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use futures::Stream;
-use md5;
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
@@ -10,10 +8,12 @@ use std::path::{Path, PathBuf};
 use tokio::fs as tokio_fs;
 use tokio::io as tokio_io;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
 use tokio::sync::{Mutex, RwLock};
 
 use super::{StorageConfig, StorageEngine, UpstreamMeta};
 use crate::log_info;
+use crate::utils::digest::{sha256_first_byte, sha256_hex};
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::range::{range_length, OPEN_ENDED};
 
@@ -87,8 +87,7 @@ impl DiskStorage {
     }
 
     fn shard_of(key: &str) -> usize {
-        let digest = md5::compute(key.as_bytes());
-        usize::from(digest.0[0]) % WRITE_LOCK_SHARDS
+        usize::from(sha256_first_byte(key.as_bytes())) % WRITE_LOCK_SHARDS
     }
 
     fn write_lock_for(&self, key: &str) -> &Mutex<()> {
@@ -227,7 +226,7 @@ impl DiskStorage {
 
     fn get_file_path(&self, key: &str) -> PathBuf {
         // 使用MD5生成URL的哈希值
-        let hash = format!("{:x}", md5::compute(key.as_bytes()));
+        let hash = sha256_hex(key.as_bytes());
 
         // 创建二级目录结构，使用哈希的前两个字符
         let dir1 = &hash[0..2];
@@ -276,162 +275,170 @@ fn merge_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
     ranges.splice(first..last, [(merged_start, merged_end)]);
 }
 
-#[async_trait]
 impl StorageEngine for DiskStorage {
-    async fn write<S>(&self, key: &str, mut stream: S, range: (u64, u64)) -> Result<u64>
+    // The explicit future preserves the trait's higher-ranked Send guarantee.
+    #[allow(clippy::manual_async_fn)]
+    fn write<'a, S>(
+        &'a self,
+        key: &'a str,
+        mut stream: S,
+        range: (u64, u64),
+    ) -> impl std::future::Future<Output = Result<u64>> + Send + 'a
     where
         S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
     {
-        let max_length = if range.1 == OPEN_ENDED {
-            None
-        } else {
-            Some(range_length(range.0, range.1)?)
-        };
-        let file_path = self.get_file_path(key);
-        self.ensure_dir_exists(&file_path).await?;
-
-        // 同一 key 的写必须串行：否则两个请求会在重叠偏移上交错写入，
-        // 而 record_completed_range 只按字节数记账，会把交错结果标记为完整。
-        let _write_guard = self.write_lock_for(key).lock().await;
-
-        log_info!(
-            "Storage",
-            "写入文件: {:?}, 范围: {}-{}",
-            file_path,
-            range.0,
-            range.1
-        );
-
-        let mut file = tokio_fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            // 绝不能 truncate：这是一个稀疏文件，不同 range 会在不同偏移上
-            // 陆续写入。截断会抹掉此前已缓存的区间，而 ranges.json 仍然记着
-            // 它们「已完整」，后续读取就会拿到一片零字节。
-            .truncate(false)
-            .open(&file_path)
-            .await?;
-
-        // 设置文件写入位置。必须在包 BufWriter 之前 seek：BufWriter 自己不
-        // 转发 seek，包上之后再 seek 会把已缓冲但未落盘的字节写到错误偏移。
-        file.seek(SeekFrom::Start(range.0)).await?;
-
-        // 攒够 WRITE_BUFFER_BYTES 再下一次 write syscall。
-        //
-        // 上游给的块由 TLS 记录和 socket 读缓冲决定，通常十几 KB，此前每块
-        // 直接 write_all 一次 —— 1GB 视频就是六万多次 write syscall，而每次
-        // 只搬十几 KB。缓冲之后按 256KB 成批下发，syscall 数量降一个量级。
-        let mut writer = tokio_io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
-
-        let mut written = 0u64;
-
-        // 提前中止的原因，留到 flush + 记账之后再上抛。
-        //
-        // 之所以不直接 `return Err(..)`：`BufWriter` 每攒满 256KB 就下发一次
-        // 真实 write，所以中止时前面的字节**已经在文件里了**。直接返回会跳过
-        // `record_completed_range`，那些字节就成了幽灵——占着磁盘、计入容量
-        // 簿记（`enumerate` 按文件长度统计）、却不在 ranges.json 里，于是永远
-        // 不会被任何读命中，只能等整条缓存被淘汰时一起消失。
-        let mut failure = None;
-
-        // 中止时 `written` 这个前缀能不能记账。三条中止路径的答案并不相同，
-        // 所以逐条判断，不做统一处理：
-        //
-        // - **超出声明范围**：能记。检查发生在写这一块**之前**，`written` 是
-        //   精确值；而这些字节正是上游 `Content-Range` 承诺的那一段（该头已由
-        //   `net_source` 校验过），tee 也已经把它们发给客户端了。记下来既准确，
-        //   又让缓存和客户端拿到的内容保持一致。
-        // - **`write_all` 失败**：不能记。`write_all` 出错时不会告诉你写进去了
-        //   多少字节，`written` 此刻是个高估值。记账就等于把可能并不存在的
-        //   字节标记成已缓存，后续读会拿到空洞。
-        // - **上游流报错**：保留前缀。此处 `written` 是精确的，已拿到的数据都是
-        //   有效的，配合网络层重试可以让缓存边界逐步前进。分段下载场景下，丢弃
-        //   已下载的部分既浪费带宽也让用户体验变差。
-        let mut prefix_is_recordable = true;
-
-        while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    failure = Some(error);
-                    // 流错误时 written 是准确的，保留前缀以便下次从断点继续。
-                    break;
-                }
+        async move {
+            let max_length = if range.1 == OPEN_ENDED {
+                None
+            } else {
+                Some(range_length(range.0, range.1)?)
             };
-            let Some(next_written) = written.checked_add(chunk.len() as u64) else {
-                failure = Some(ProxyError::Storage("写入字节数溢出".to_string()));
-                prefix_is_recordable = false;
-                break;
-            };
-            if max_length.is_some_and(|maximum| next_written > maximum) {
-                failure = Some(ProxyError::Storage(
-                    "上游响应体超过请求的缓存范围".to_string(),
-                ));
-                break;
-            }
-            if let Err(error) = writer.write_all(&chunk).await {
-                failure = Some(error.into());
-                prefix_is_recordable = false;
-                break;
-            }
-            written = next_written;
-        }
+            let file_path = self.get_file_path(key);
+            self.ensure_dir_exists(&file_path).await?;
 
-        let mut sync_failure = None;
+            // 同一 key 的写必须串行：否则两个请求会在重叠偏移上交错写入，
+            // 而 record_completed_range 只按字节数记账，会把交错结果标记为完整。
+            let _write_guard = self.write_lock_for(key).lock().await;
 
-        if written > 0 && prefix_is_recordable {
-            // flush 把缓冲交给内核，sync_data 才是让内核落盘。两步都不能少，
-            // 且必须都在 record_completed_range 之前 —— 否则元数据可能先于数据
-            // 落盘，崩溃后区间被标记完整而内容还是空洞。
-            //
-            // `?` 换成显式处理，是为了不让 flush 自己的错误盖掉 `failure` 里那个
-            // 更能说明问题的原因。
-            match writer.flush().await {
-                Ok(()) => {
-                    if let Err(error) = writer.into_inner().sync_data().await {
-                        sync_failure = Some(ProxyError::from(error));
-                    }
-                }
-                Err(error) => sync_failure = Some(ProxyError::from(error)),
-            }
-
-            // 落盘失败时绝不能记账：那会把可能并不在磁盘上的字节标记成已缓存。
-            if sync_failure.is_none() {
-                let end = range
-                    .0
-                    .checked_add(written - 1)
-                    .ok_or_else(|| ProxyError::Storage("写入范围溢出".to_string()))?;
-                self.record_completed_range(key, range.0, end).await?;
-            }
-        }
-        // 不记账的中止路径上连 flush 都不做，直接把 writer 丢掉。
-        //
-        // tokio 的 `BufWriter` 在 drop 时不会（也无法）异步 flush，所以缓冲里
-        // 那最多 256KB 还没下发的字节就随之丢弃了——既然不会记账，写进文件
-        // 只是白占磁盘。循环中途按 256KB 已经下发过的部分收不回来，那是
-        // 缓冲写入固有的代价；它们会在下一次对同一区间的成功写入中被覆盖并
-        // 正确记账，不会永久留着。
-
-        if let Some(error) = failure.or(sync_failure) {
             log_info!(
                 "Storage",
-                "写入中止: {:?}, 已落盘并记账 {} 字节, 原因: {}",
+                "写入文件: {:?}, 范围: {}-{}",
                 file_path,
-                written,
-                error
+                range.0,
+                range.1
             );
-            return Err(error);
+
+            let mut file = tokio_fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                // 绝不能 truncate：这是一个稀疏文件，不同 range 会在不同偏移上
+                // 陆续写入。截断会抹掉此前已缓存的区间，而 ranges.json 仍然记着
+                // 它们「已完整」，后续读取就会拿到一片零字节。
+                .truncate(false)
+                .open(&file_path)
+                .await?;
+
+            // 设置文件写入位置。必须在包 BufWriter 之前 seek：BufWriter 自己不
+            // 转发 seek，包上之后再 seek 会把已缓冲但未落盘的字节写到错误偏移。
+            file.seek(SeekFrom::Start(range.0)).await?;
+
+            // 攒够 WRITE_BUFFER_BYTES 再下一次 write syscall。
+            //
+            // 上游给的块由 TLS 记录和 socket 读缓冲决定，通常十几 KB，此前每块
+            // 直接 write_all 一次 —— 1GB 视频就是六万多次 write syscall，而每次
+            // 只搬十几 KB。缓冲之后按 256KB 成批下发，syscall 数量降一个量级。
+            let mut writer = tokio_io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
+
+            let mut written = 0u64;
+
+            // 提前中止的原因，留到 flush + 记账之后再上抛。
+            //
+            // 之所以不直接 `return Err(..)`：`BufWriter` 每攒满 256KB 就下发一次
+            // 真实 write，所以中止时前面的字节**已经在文件里了**。直接返回会跳过
+            // `record_completed_range`，那些字节就成了幽灵——占着磁盘、计入容量
+            // 簿记（`enumerate` 按文件长度统计）、却不在 ranges.json 里，于是永远
+            // 不会被任何读命中，只能等整条缓存被淘汰时一起消失。
+            let mut failure = None;
+
+            // 中止时 `written` 这个前缀能不能记账。三条中止路径的答案并不相同，
+            // 所以逐条判断，不做统一处理：
+            //
+            // - **超出声明范围**：能记。检查发生在写这一块**之前**，`written` 是
+            //   精确值；而这些字节正是上游 `Content-Range` 承诺的那一段（该头已由
+            //   `net_source` 校验过），tee 也已经把它们发给客户端了。记下来既准确，
+            //   又让缓存和客户端拿到的内容保持一致。
+            // - **`write_all` 失败**：不能记。`write_all` 出错时不会告诉你写进去了
+            //   多少字节，`written` 此刻是个高估值。记账就等于把可能并不存在的
+            //   字节标记成已缓存，后续读会拿到空洞。
+            // - **上游流报错**：保留前缀。此处 `written` 是精确的，已拿到的数据都是
+            //   有效的，配合网络层重试可以让缓存边界逐步前进。分段下载场景下，丢弃
+            //   已下载的部分既浪费带宽也让用户体验变差。
+            let mut prefix_is_recordable = true;
+
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        failure = Some(error);
+                        // 流错误时 written 是准确的，保留前缀以便下次从断点继续。
+                        break;
+                    }
+                };
+                let Some(next_written) = written.checked_add(chunk.len() as u64) else {
+                    failure = Some(ProxyError::Storage("写入字节数溢出".to_string()));
+                    prefix_is_recordable = false;
+                    break;
+                };
+                if max_length.is_some_and(|maximum| next_written > maximum) {
+                    failure = Some(ProxyError::Storage(
+                        "上游响应体超过请求的缓存范围".to_string(),
+                    ));
+                    break;
+                }
+                if let Err(error) = writer.write_all(&chunk).await {
+                    failure = Some(error.into());
+                    prefix_is_recordable = false;
+                    break;
+                }
+                written = next_written;
+            }
+
+            let mut sync_failure = None;
+
+            if written > 0 && prefix_is_recordable {
+                // flush 把缓冲交给内核，sync_data 才是让内核落盘。两步都不能少，
+                // 且必须都在 record_completed_range 之前 —— 否则元数据可能先于数据
+                // 落盘，崩溃后区间被标记完整而内容还是空洞。
+                //
+                // `?` 换成显式处理，是为了不让 flush 自己的错误盖掉 `failure` 里那个
+                // 更能说明问题的原因。
+                match writer.flush().await {
+                    Ok(()) => {
+                        if let Err(error) = writer.into_inner().sync_data().await {
+                            sync_failure = Some(ProxyError::from(error));
+                        }
+                    }
+                    Err(error) => sync_failure = Some(ProxyError::from(error)),
+                }
+
+                // 落盘失败时绝不能记账：那会把可能并不在磁盘上的字节标记成已缓存。
+                if sync_failure.is_none() {
+                    let end = range
+                        .0
+                        .checked_add(written - 1)
+                        .ok_or_else(|| ProxyError::Storage("写入范围溢出".to_string()))?;
+                    self.record_completed_range(key, range.0, end).await?;
+                }
+            }
+            // 不记账的中止路径上连 flush 都不做，直接把 writer 丢掉。
+            //
+            // tokio 的 `BufWriter` 在 drop 时不会（也无法）异步 flush，所以缓冲里
+            // 那最多 256KB 还没下发的字节就随之丢弃了——既然不会记账，写进文件
+            // 只是白占磁盘。循环中途按 256KB 已经下发过的部分收不回来，那是
+            // 缓冲写入固有的代价；它们会在下一次对同一区间的成功写入中被覆盖并
+            // 正确记账，不会永久留着。
+
+            if let Some(error) = failure.or(sync_failure) {
+                log_info!(
+                    "Storage",
+                    "写入中止: {:?}, 已落盘并记账 {} 字节, 原因: {}",
+                    file_path,
+                    written,
+                    error
+                );
+                return Err(error);
+            }
+
+            log_info!(
+                "Storage",
+                "写入完成: {:?}, 写入字节数: {}",
+                file_path,
+                written
+            );
+
+            Ok(written)
         }
-
-        log_info!(
-            "Storage",
-            "写入完成: {:?}, 写入字节数: {}",
-            file_path,
-            written
-        );
-
-        Ok(written)
     }
 
     async fn read(
@@ -486,7 +493,7 @@ impl StorageEngine for DiskStorage {
         file.seek(SeekFrom::Start(range.0)).await?;
 
         // 只在开头 seek 一次，之后顺序读取。
-        let stream = Box::pin(futures::stream::try_unfold(
+        let stream = Box::pin(futures_util::stream::try_unfold(
             (file, chunk_size, 0u64, total_bytes),
             |(mut file, chunk_size, mut bytes_read, total_bytes)| async move {
                 if bytes_read >= total_bytes {
@@ -681,8 +688,7 @@ impl StorageEngine for DiskStorage {
                         let _ = tokio_fs::remove_file(&path).await;
                         continue;
                     }
-                    if !name.ends_with(".ranges.json")
-                    {
+                    if !name.ends_with(".ranges.json") {
                         continue;
                     }
 
@@ -759,13 +765,21 @@ async fn remove_cache_pair(metadata_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{stream, StreamExt};
+    use futures_util::{stream, StreamExt};
 
     fn storage(root: &Path) -> DiskStorage {
         DiskStorage::new(StorageConfig {
             root_path: root.to_path_buf(),
             chunk_size: 4,
         })
+    }
+
+    #[test]
+    fn cache_keys_can_reach_every_write_lock_shard() {
+        let shards: std::collections::HashSet<_> = (0..10_000)
+            .map(|index| DiskStorage::shard_of(&format!("asset-{index}")))
+            .collect();
+        assert_eq!(shards.len(), WRITE_LOCK_SHARDS);
     }
 
     #[tokio::test]

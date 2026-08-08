@@ -1,8 +1,9 @@
 use crate::data_request::DataRequest;
 use crate::handlers::{
-    tee_to_cache, BackgroundTasks, CacheHandler, Follower, Join, LeaderGuard, MixedSourceHandler, NetworkHandler,
-    ResponseBuilder, SingleFlight,
+    tee_to_cache, BackgroundTasks, CacheHandler, Follower, Join, LeaderGuard, MixedSourceHandler,
+    NetworkHandler, ResponseBuilder, SingleFlight,
 };
+use crate::http_types::{empty_body, AppBody};
 use crate::log_info;
 use crate::storage::{
     DiskStorage, StorageConfig, StorageManager, StorageManagerConfig, UpstreamMeta,
@@ -10,10 +11,11 @@ use crate::storage::{
 use crate::utils::error::Result;
 use crate::utils::network_policy::NetworkPolicy;
 use crate::utils::range::{
-    clamp_end_to_upstream_length, format_range, parse_range_spec, resolve_range, RangeSpec,
+    clamp_end_to_upstream_length, format_range, parse_range_spec, range_length, resolve_range,
+    RangeSpec,
 };
-use hyper::header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE};
-use hyper::{Body, Response, StatusCode};
+use hyper::header::{HeaderMap, CONTENT_TYPE};
+use hyper::{Response, StatusCode};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -69,7 +71,8 @@ impl DataSourceManager {
 
         let cache_handler = Arc::new(CacheHandler::new(storage_manager));
         let network_handler = NetworkHandler::new(policy.clone());
-        let mixed_source_handler = MixedSourceHandler::with_tasks(cache_handler.clone(), policy, tasks.clone());
+        let mixed_source_handler =
+            MixedSourceHandler::with_tasks(cache_handler.clone(), policy, tasks.clone());
         let response_builder = ResponseBuilder::new();
 
         Self {
@@ -82,7 +85,7 @@ impl DataSourceManager {
         }
     }
 
-    pub async fn process_request(&self, req: &DataRequest) -> Result<Response<Body>> {
+    pub async fn process_request(&self, req: &DataRequest) -> Result<Response<AppBody>> {
         let url = req.get_url();
         let key = req.get_cache_key().to_string();
         let spec = parse_range_spec(req.get_range())?;
@@ -137,7 +140,7 @@ impl DataSourceManager {
     }
 
     /// Build a HEAD response without starting the normal tee/cache body pipeline.
-    pub async fn process_head(&self, req: &DataRequest) -> Result<Response<Body>> {
+    pub async fn process_head(&self, req: &DataRequest) -> Result<Response<AppBody>> {
         let key = req.get_cache_key().to_string();
         let mut meta = self.cache_handler.upstream_meta(&key).await?;
 
@@ -145,11 +148,9 @@ impl DataSourceManager {
             meta = self.probe_upstream_meta(req.get_url(), &key).await?;
         }
 
-        let total = meta
-            .total_size
-            .ok_or_else(|| crate::utils::error::ProxyError::InvalidRange(
-                "上游未提供资源总长度".to_string(),
-            ))?;
+        let total = meta.total_size.ok_or_else(|| {
+            crate::utils::error::ProxyError::InvalidRange("上游未提供资源总长度".to_string())
+        })?;
         let (status, content_length, content_range) = if req.client_sent_range() {
             // 后缀范围在这里也要先借总长度定位；HEAD 已经拿到了 total，
             // 直接复用，不必再探一次上游。
@@ -157,7 +158,7 @@ impl DataSourceManager {
             let (start, end) = resolve_range(start, end, Some(total))?;
             (
                 StatusCode::PARTIAL_CONTENT,
-                end - start + 1,
+                range_length(start, end)?,
                 Some(format!("bytes {}-{}/{}", start, end, total)),
             )
         } else {
@@ -166,16 +167,16 @@ impl DataSourceManager {
 
         let mut builder = Response::builder()
             .status(status)
-            .header(ACCEPT_RANGES, "bytes")
-            .header(CONTENT_LENGTH, content_length);
+            .header(hyper::header::ACCEPT_RANGES, "bytes")
+            .header(hyper::header::CONTENT_LENGTH, content_length);
         if let Some(content_type) = meta.content_type {
-            builder = builder.header(CONTENT_TYPE, content_type);
+            builder = builder.header(hyper::header::CONTENT_TYPE, content_type);
         }
         if let Some(content_range) = content_range {
-            builder = builder.header(CONTENT_RANGE, content_range);
+            builder = builder.header(hyper::header::CONTENT_RANGE, content_range);
         }
         builder
-            .body(Body::empty())
+            .body(empty_body())
             .map_err(|error| crate::utils::error::ProxyError::Request(error.to_string()))
     }
 
@@ -216,7 +217,7 @@ impl DataSourceManager {
         range: &str,
         start: u64,
         requested_end: u64,
-    ) -> Result<Response<Body>> {
+    ) -> Result<Response<AppBody>> {
         if follower.wait().await {
             log_info!("Cache", "合并等待结束，改从缓存读取: {}", range);
         } else {
@@ -256,7 +257,7 @@ impl DataSourceManager {
         meta: &UpstreamMeta,
         start: u64,
         requested_end: u64,
-    ) -> Result<Option<Response<Body>>> {
+    ) -> Result<Option<Response<AppBody>>> {
         let Some(total_size) = meta.total_size else {
             return Ok(None);
         };
@@ -283,7 +284,7 @@ impl DataSourceManager {
         meta: &UpstreamMeta,
         start: u64,
         requested_end: u64,
-    ) -> Result<Option<Response<Body>>> {
+    ) -> Result<Option<Response<AppBody>>> {
         let Some(total_size) = meta.total_size else {
             return Ok(None);
         };
@@ -333,7 +334,7 @@ impl DataSourceManager {
         start: u64,
         requested_end: u64,
         guard: Option<LeaderGuard>,
-    ) -> Result<Response<Body>> {
+    ) -> Result<Response<AppBody>> {
         log_info!("Cache", "开始从网络获取: {}", range);
         let fetched = self.network_handler.fetch(url, range).await?;
         // 上游实际声明的本次响应体长度，必须在拆解之前取出。
@@ -435,8 +436,8 @@ mod tests {
     use super::*;
     use crate::storage::StorageEngine;
     use bytes::Bytes;
-    use futures::stream;
-    use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
+    use futures_util::stream;
+    use http_body_util::BodyExt;
 
     fn request(url: &str, range: &str, asset: &str) -> DataRequest {
         let request = hyper::Request::builder()
@@ -444,8 +445,8 @@ mod tests {
             .header("X-Original-Url", url)
             .header("X-Cache-Asset-Id", asset)
             .header("X-Cache-Asset-Revision", "1")
-            .header(hyper::header::RANGE, range)
-            .body(Body::empty())
+            .header("Range", range)
+            .body(())
             .unwrap();
         DataRequest::new(&request).unwrap()
     }
@@ -500,7 +501,10 @@ mod tests {
     fn mixed_plan_skips_when_cache_does_not_reach_start() {
         assert_eq!(plan_mixed(100, 199, 0), MixedPlan::NoCache);
         assert_eq!(plan_mixed(100, 199, 100), MixedPlan::NoCache);
-        assert_eq!(plan_mixed(100, 199, 101), MixedPlan::Stitch { cached_end: 101 });
+        assert_eq!(
+            plan_mixed(100, 199, 101),
+            MixedPlan::Stitch { cached_end: 101 }
+        );
     }
 
     #[test]
@@ -550,11 +554,11 @@ mod tests {
         // deny-all proves these responses cannot have fallen back to the upstream.
         let manager = DataSourceManager::new(dir.path().to_path_buf());
         let response = manager.process_request(&closed).await.unwrap();
-        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 2-5/10");
-        assert_eq!(response.headers()[CONTENT_LENGTH], "4");
-        assert_eq!(response.headers()[CONTENT_TYPE], "audio/mp4");
+        assert_eq!(response.headers()["content-range"], "bytes 2-5/10");
+        assert_eq!(response.headers()["content-length"], "4");
+        assert_eq!(response.headers()["content-type"], "audio/mp4");
         assert_eq!(
-            hyper::body::to_bytes(response.into_body()).await.unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             "cdef"
         );
 
@@ -565,9 +569,9 @@ mod tests {
         );
         assert_eq!(open.get_cache_key(), key);
         let response = manager.process_request(&open).await.unwrap();
-        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 6-9/10");
+        assert_eq!(response.headers()["content-range"], "bytes 6-9/10");
         assert_eq!(
-            hyper::body::to_bytes(response.into_body()).await.unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             "ghij"
         );
     }

@@ -11,6 +11,7 @@
 use std::fmt;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 日志总开关，默认开。
 ///
@@ -59,13 +60,24 @@ pub fn info(tag: &str, args: fmt::Arguments<'_>) {
 
     // 忽略写入错误。`println!` 在写失败时是 panic 的——服务被 daemonize
     // 之后 stdout 可能已经关掉，一条日志不该把进程带走。
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (hour, minute, second) = utc_clock_time(seconds);
     let _ = writeln!(
         out,
-        "[{} INFO {}] {}",
-        chrono::Local::now().format("%H:%M:%S"),
-        tag,
-        args
+        "[{hour:02}:{minute:02}:{second:02}Z INFO {tag}] {args}"
     );
+}
+
+fn utc_clock_time(unix_seconds: u64) -> (u64, u64, u64) {
+    let seconds_today = unix_seconds % 86_400;
+    (
+        seconds_today / 3_600,
+        (seconds_today % 3_600) / 60,
+        seconds_today % 60,
+    )
 }
 
 #[cfg(test)]
@@ -87,5 +99,12 @@ mod tests {
         assert!(is_enabled());
 
         set_enabled(original);
+    }
+
+    #[test]
+    fn utc_clock_time_wraps_at_midnight() {
+        assert_eq!(utc_clock_time(0), (0, 0, 0));
+        assert_eq!(utc_clock_time(86_399), (23, 59, 59));
+        assert_eq!(utc_clock_time(86_400), (0, 0, 0));
     }
 }

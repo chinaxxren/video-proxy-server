@@ -6,13 +6,15 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         init { System.loadLibrary("proxy_server") }
 
         @JvmStatic
-        fun create(port: Int, cacheDirectory: String): MediaProxyCache {
+        fun create(port: Int, cacheDirectory: String, allowedHosts: List<String>): MediaProxyCache {
             require(port in 0..65535)
             require(cacheDirectory.isNotBlank())
-            return MediaProxyCache(nativeCreate(port, cacheDirectory))
+            require(allowedHosts.isNotEmpty())
+            require(allowedHosts.none { it.isBlank() || ',' in it })
+            return MediaProxyCache(nativeCreate(port, cacheDirectory, allowedHosts.joinToString(",")))
         }
 
-        @JvmStatic private external fun nativeCreate(port: Int, cacheDirectory: String): Long
+        @JvmStatic private external fun nativeCreate(port: Int, cacheDirectory: String, allowedHosts: String): Long
     }
 
     @Synchronized fun start(): Int {

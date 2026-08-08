@@ -1,9 +1,10 @@
+use crate::http_types::{stream_body, AppBody};
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::range::{range_length, OPEN_ENDED};
 use bytes::Bytes;
-use futures::Stream;
-use hyper::header::{HeaderName, HeaderValue};
-use hyper::{Body, HeaderMap, Response};
+use futures_util::Stream;
+use hyper::header::HeaderName;
+use hyper::HeaderMap;
 
 /// 允许透传给客户端的安全响应头。范围和长度由代理重新计算，不在此列表中。
 pub(crate) const ALLOWED_UPSTREAM_HEADERS: [HeaderName; 5] = [
@@ -34,42 +35,39 @@ impl ResponseBuilder {
         start: u64,
         end: u64,
         total_size: u64,
-    ) -> Result<Response<Body>> {
+    ) -> Result<hyper::Response<AppBody>> {
         if end == OPEN_ENDED {
             return Err(ProxyError::InvalidRange(
                 "响应范围未收敛：end 仍为开区间哨兵值".to_string(),
             ));
         }
         let length = range_length(start, end)?;
-
         let content_range = if total_size > 0 {
             format!("bytes {}-{}/{}", start, end, total_size)
         } else {
             format!("bytes {}-{}/*", start, end)
         };
-        let content_range = HeaderValue::from_str(&content_range)
-            .map_err(|_| ProxyError::Request("无法构建 Content-Range".to_string()))?;
 
-        let mut response = Response::new(Body::wrap_stream(stream));
+        let mut response = hyper::Response::new(stream_body(stream));
         *response.status_mut() = hyper::StatusCode::PARTIAL_CONTENT;
-
-        // 先透传上游头（白名单之外的逐跳头被剔除），再写入本层权威的范围头，
-        // 避免上游值覆盖我们计算的结果。
-        {
-            let out = response.headers_mut();
-            for (key, value) in headers.iter() {
-                if !ALLOWED_UPSTREAM_HEADERS
-                    .iter()
-                    .any(|allowed| allowed == key)
-                {
-                    continue;
-                }
-                out.insert(key, value.clone());
+        for (key, value) in &headers {
+            if !ALLOWED_UPSTREAM_HEADERS
+                .iter()
+                .any(|allowed| allowed.as_str() == key.as_str())
+            {
+                continue;
             }
-            out.insert(hyper::header::CONTENT_RANGE, content_range);
-            out.insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(length));
+            response.headers_mut().append(key, value.clone());
         }
-
+        response.headers_mut().insert(
+            hyper::header::CONTENT_RANGE,
+            hyper::header::HeaderValue::from_str(&content_range)
+                .map_err(|_| ProxyError::Request("无法构建 Content-Range".to_string()))?,
+        );
+        response.headers_mut().insert(
+            hyper::header::CONTENT_LENGTH,
+            hyper::header::HeaderValue::from(length),
+        );
         Ok(response)
     }
 }
@@ -77,13 +75,14 @@ impl ResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
     use hyper::header::{
-        ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION,
-        SET_COOKIE, TRANSFER_ENCODING,
+        ACCEPT_RANGES, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
+        CONTENT_TYPE, LOCATION, SET_COOKIE, TRANSFER_ENCODING,
     };
 
     fn body() -> Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> {
-        Box::new(futures::stream::iter([
+        Box::new(futures_util::stream::iter([
             Ok(Bytes::from_static(b"abcd")),
             Ok(Bytes::from_static(b"ef")),
         ]))
@@ -100,14 +99,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), hyper::StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 10-15/100");
-        assert_eq!(response.headers()[CONTENT_LENGTH], "6");
-        assert_eq!(response.headers()[CONTENT_TYPE], "audio/mp4");
-        assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+        assert_eq!(response.headers()["content-range"], "bytes 10-15/100");
+        assert_eq!(response.headers()["content-length"], "6");
+        assert_eq!(response.headers()["content-type"], "audio/mp4");
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
         assert_eq!(
-            hyper::body::to_bytes(response.into_body()).await.unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             "abcdef"
         );
+    }
+
+    #[test]
+    fn preserves_duplicate_allowed_upstream_headers() {
+        let mut headers = HeaderMap::new();
+        headers.append(CACHE_CONTROL, "private".parse().unwrap());
+        headers.append(CACHE_CONTROL, "no-store".parse().unwrap());
+
+        let response = ResponseBuilder::new()
+            .build_partial_content_response(body(), headers, 0, 5, 6)
+            .unwrap();
+        let values: Vec<_> = response
+            .headers()
+            .get_all(CACHE_CONTROL)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+
+        assert_eq!(values, ["private", "no-store"]);
     }
 
     #[test]
@@ -124,8 +142,8 @@ mod tests {
         let response = ResponseBuilder::new()
             .build_partial_content_response(body(), HeaderMap::new(), 0, 5, 0)
             .unwrap();
-        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 0-5/*");
-        assert_eq!(response.headers()[CONTENT_LENGTH], "6");
+        assert_eq!(response.headers()["content-range"], "bytes 0-5/*");
+        assert_eq!(response.headers()["content-length"], "6");
     }
 
     #[test]
@@ -143,10 +161,10 @@ mod tests {
             .build_partial_content_response(body(), headers, 0, 5, 6)
             .unwrap();
 
-        assert!(!response.headers().contains_key(SET_COOKIE));
-        assert!(!response.headers().contains_key(LOCATION));
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert!(!response.headers().contains_key("location"));
         assert!(!response.headers().contains_key("x-upstream-token"));
-        assert_eq!(response.headers()[CONTENT_TYPE], "audio/mpeg");
+        assert_eq!(response.headers()["content-type"], "audio/mpeg");
     }
 
     #[test]
@@ -161,10 +179,10 @@ mod tests {
             .build_partial_content_response(body(), upstream_headers, 10, 15, 100)
             .unwrap();
 
-        assert!(!response.headers().contains_key(TRANSFER_ENCODING));
-        assert!(!response.headers().contains_key(CONTENT_ENCODING));
+        assert!(!response.headers().contains_key("transfer-encoding"));
+        assert!(!response.headers().contains_key("content-encoding"));
         // 上游的范围头没有覆盖本层计算结果。
-        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 10-15/100");
-        assert_eq!(response.headers()[CONTENT_LENGTH], "6");
+        assert_eq!(response.headers()["content-range"], "bytes 10-15/100");
+        assert_eq!(response.headers()["content-length"], "6");
     }
 }

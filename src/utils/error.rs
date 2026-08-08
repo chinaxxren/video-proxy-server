@@ -104,7 +104,7 @@ impl From<hyper::http::Error> for ProxyError {
 
 impl From<hyper::header::ToStrError> for ProxyError {
     fn from(err: hyper::header::ToStrError) -> Self {
-        ProxyError::Request(err.to_string())
+        ProxyError::Request(format!("Invalid header value: {}", err))
     }
 }
 

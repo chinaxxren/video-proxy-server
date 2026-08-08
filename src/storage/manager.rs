@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use futures::Stream;
+use futures_util::Stream;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -29,14 +29,13 @@ mod tests {
         deleted: Arc<Notify>,
     }
 
-    #[async_trait::async_trait]
     impl StorageEngine for DeleteTrackingStorage {
         async fn write<S>(&self, _key: &str, mut stream: S, _range: (u64, u64)) -> Result<u64>
         where
             S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
         {
             let mut total = 0;
-            while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
                 total += chunk?.len() as u64;
             }
             Ok(total)
@@ -85,7 +84,7 @@ mod tests {
         manager
             .write(
                 "asset",
-                futures::stream::iter([Ok(Bytes::from_static(b"data"))]),
+                futures_util::stream::iter([Ok(Bytes::from_static(b"data"))]),
                 (0, 3),
             )
             .await
@@ -102,14 +101,13 @@ mod tests {
         allow_delete: Arc<Notify>,
     }
 
-    #[async_trait::async_trait]
     impl StorageEngine for CoordinatedStorage {
         async fn write<S>(&self, _key: &str, mut stream: S, _range: (u64, u64)) -> Result<u64>
         where
             S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
         {
             let mut bytes = Vec::new();
-            while let Some(chunk) = futures::StreamExt::next(&mut stream).await {
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
                 bytes.extend_from_slice(&chunk?);
             }
             let len = bytes.len() as u64;
@@ -123,7 +121,9 @@ mod tests {
             _range: (u64, u64),
         ) -> Result<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> {
             let bytes = self.data.lock().await.clone();
-            Ok(Box::new(futures::stream::iter([Ok(Bytes::from(bytes))])))
+            Ok(Box::new(futures_util::stream::iter([Ok(Bytes::from(
+                bytes,
+            ))])))
         }
 
         async fn get_size(&self, _key: &str) -> Result<Option<u64>> {
@@ -167,7 +167,7 @@ mod tests {
         manager
             .write(
                 "asset",
-                futures::stream::iter([Ok(Bytes::from_static(b"old"))]),
+                futures_util::stream::iter([Ok(Bytes::from_static(b"old"))]),
                 (0, 2),
             )
             .await
@@ -182,7 +182,7 @@ mod tests {
                 manager
                     .write(
                         "asset",
-                        futures::stream::iter([Ok(Bytes::from_static(b"new"))]),
+                        futures_util::stream::iter([Ok(Bytes::from_static(b"new"))]),
                         (0, 2),
                     )
                     .await
@@ -201,7 +201,6 @@ mod tests {
         notify: Arc<Notify>,
     }
 
-    #[async_trait::async_trait]
     impl StorageEngine for PreexistingStorage {
         async fn write<S>(&self, _key: &str, _stream: S, _range: (u64, u64)) -> Result<u64>
         where
@@ -460,43 +459,52 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
         });
     }
 
-    pub async fn write<S>(&self, key: &str, stream: S, range: (u64, u64)) -> Result<u64>
+    // Keeping the Send bound explicit lets callers move this future into spawned tasks.
+    #[allow(clippy::manual_async_fn)]
+    pub fn write<'a, S>(
+        &'a self,
+        key: &'a str,
+        stream: S,
+        range: (u64, u64),
+    ) -> impl std::future::Future<Output = Result<u64>> + Send + 'a
     where
         S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
     {
-        let _mutation = self.mutation_locks[mutation_shard(key)].lock().await;
-        let bytes_written = self.engine.write(key, stream, range).await?;
+        async move {
+            let _mutation = self.mutation_locks[mutation_shard(key)].lock().await;
+            let bytes_written = self.engine.write(key, stream, range).await?;
 
-        // 更新缓存信息
-        let mut entries = self.cache_entries.write().await;
-        let mut total = self.total_size.write().await;
+            // 更新缓存信息
+            let mut entries = self.cache_entries.write().await;
+            let mut total = self.total_size.write().await;
 
-        let end_pos = range.0.saturating_add(bytes_written);
+            let end_pos = range.0.saturating_add(bytes_written);
 
-        if let Some(entry) = entries.get_mut(key) {
-            // 更新文件的总大小（如果新写入的范围扩展了文件）
-            if end_pos > entry.total_size {
-                // saturating：记账漂移时宁可低估，不要在减法上 panic。
-                *total = total
-                    .saturating_sub(entry.total_size)
-                    .saturating_add(end_pos);
-                entry.total_size = end_pos;
+            if let Some(entry) = entries.get_mut(key) {
+                // 更新文件的总大小（如果新写入的范围扩展了文件）
+                if end_pos > entry.total_size {
+                    // saturating：记账漂移时宁可低估，不要在减法上 panic。
+                    *total = total
+                        .saturating_sub(entry.total_size)
+                        .saturating_add(end_pos);
+                    entry.total_size = end_pos;
+                }
+                entry.last_access = SystemTime::now();
+            } else {
+                entries.insert(
+                    key.to_string(),
+                    CacheEntry {
+                        key: key.to_string(),
+                        total_size: end_pos,
+                        last_access: SystemTime::now(),
+                    },
+                );
+                // saturating 与上面的分支保持一致：记账漂移不该让写入路径 panic。
+                *total = total.saturating_add(end_pos);
             }
-            entry.last_access = SystemTime::now();
-        } else {
-            entries.insert(
-                key.to_string(),
-                CacheEntry {
-                    key: key.to_string(),
-                    total_size: end_pos,
-                    last_access: SystemTime::now(),
-                },
-            );
-            // saturating 与上面的分支保持一致：记账漂移不该让写入路径 panic。
-            *total = total.saturating_add(end_pos);
-        }
 
-        Ok(bytes_written)
+            Ok(bytes_written)
+        }
     }
 
     pub async fn read(

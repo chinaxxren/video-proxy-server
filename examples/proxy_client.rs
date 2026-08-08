@@ -1,4 +1,6 @@
-use hyper::{Body, Client, Request};
+mod support;
+use support as local_http;
+
 use proxy_server::{log_info, server};
 use std::env;
 use tokio::time::Duration;
@@ -33,20 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy_url = format!("http://{}/proxy/{}", proxy_host, target_url);
 
     // 创建 HTTP 客户端
-    let client = Client::new();
-
-    // 构建请求
-    let req = Request::builder()
-        .method("GET")
-        .uri(&proxy_url)
+    let client = local_http::Client::new();
+    let resp = client
+        .get(&proxy_url)
         .header("X-Cache-User-Id", "example-user")
         .header("X-Cache-Asset-Id", "sintel-trailer")
         .header("X-Cache-Asset-Revision", "1")
-        .body(Body::empty())?;
-
-    // 发送请求
-    log_info!("Client", "发送请求...");
-    let resp = client.request(req).await?;
+        .send()
+        .await?;
 
     // 输出响应信息
     log_info!("Client", "响应状态: {}", resp.status());

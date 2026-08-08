@@ -4,7 +4,7 @@
 
 一个使用 Rust 实现的 HTTP 媒体代理缓存。服务监听 `127.0.0.1`，从明确允许的上游域名流式读取媒体，并在磁盘上持久化真实完成的字节区间。
 
-> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。移动端 FFI 和 localhost 调用方认证边界尚未完成。
+> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI 生命周期接口已经提供，生产可用的 JNI/AAR、XCFramework 和 N-API/HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
 
 ## 功能
 
@@ -18,12 +18,13 @@
 - 基于容量和文件数量的缓存清理，并真实删除磁盘文件
 - 不受 signed URL 变化影响的稳定缓存身份
 - 上游域名白名单和私网地址拦截
-- 仅监听 localhost
+- 使用内置 WebPKI 根证书的纯 Rust TLS，保证移动端构建一致性
+- 仅监听 localhost 的 HTTP/1.1 服务（支持 HTTP 和 HTTPS 上游）
 - 面向移动端 Adapter 的 C ABI 生命周期入口（`include/media_proxy_cache.h`）
 
 ## 环境要求
 
-- Rust 1.70 或更高版本
+- Rust 1.85 或更高版本
 - Cargo
 - Linux、macOS 或 Windows
 
@@ -33,6 +34,22 @@
 cargo build --locked
 cargo test --locked
 ```
+
+### 依赖安全
+
+CI 会在每次 push 和 pull request 时运行 RustSec 审计。本地可用以下命令复现：
+
+```bash
+cargo install cargo-audit --locked
+cargo audit
+cargo install cargo-license --locked
+cargo license --avoid-dev-deps --avoid-build-deps
+```
+
+当前锁文件审计覆盖 116 个包，没有 RustSec 安全公告。生产依赖使用宽松的
+Apache-2.0、MIT、ISC、BSD-3-Clause、Unicode-3.0、Unlicense、
+CDLA-Permissive-2.0，或包含宽松许可选项的多许可证表达式；不存在强制 GPL、
+AGPL 或 SSPL 依赖。
 
 当前测试覆盖稳定缓存键、稀疏区间正确性、区间元数据持久化、物理删除、缓存清理、区块锁回归以及核心网络策略拒绝场景。
 
@@ -58,8 +75,11 @@ MediaSource 解码，以及重复请求首分片时的缓存命中。
 
 该 crate 现在同时构建 `staticlib` 和 `cdylib` 产物。移动端 Adapter 可包含
 [`include/media_proxy_cache.h`](include/media_proxy_cache.h)，传入由 Host 管理的缓存目录，
-在固定端口或端口 `0` 上启动服务，并通过 `stop`/`destroy` 释放资源。这仍是预览 ABI，
-平台专用的 JNI、Swift 和 N-API 封装以及 Releases 打包脚本尚未完成。
+在固定端口或端口 `0` 上启动服务，并通过 `stop`/`destroy` 释放资源。这仍是预览 ABI。
+项目已提供构建和 Releases 打包脚本，平台专用的 JNI、Swift 和 N-API 封装仍需由宿主工程完成接入。
+
+访问真实上游必须调用 `proxy_server_create_with_hosts` 并传入逗号分隔的域名白名单。
+简化版 `proxy_server_create` 会有意使用拒绝全部上游的策略。
 
 统一原生库构建脚本位于 `scripts/build-mobile.sh`：
 
@@ -84,7 +104,9 @@ JNI、Swift module map 或 N-API 桥接实现。
 
 推送匹配 `v*` 的 tag 后，`.github/workflows/release.yml` 会自动发布 macOS ARM64/Intel、
 Windows x86_64 和 Linux x86_64 压缩包。也可以手动运行工作流，只生成可下载的
-Actions Artifacts 而不创建 GitHub Release。
+Actions Artifacts 而不创建 GitHub Release。每个归档都会附带对应的 `.sha256` 文件；
+macOS/Linux 可运行 `shasum -a 256 -c <归档>.sha256` 校验，Windows 可运行
+`Get-FileHash <归档> -Algorithm SHA256` 校验。
 
 在 macOS 上运行 `./scripts/test-ffi-macos.sh`，会构建一个链接 Release dylib 的小型
 C 程序，并真实执行 create/start/stop/destroy 完整生命周期。
@@ -115,6 +137,8 @@ cargo run -- 8080 ./cache media.example.com,cdn.example.com
 
 可通过环境变量调整限制。`PROXY_SHUTDOWN_TIMEOUT_MS` 控制有界的优雅排空时间（默认
 `5000` 毫秒）；超时后会取消当前实例登记的回源和缓存转发任务。其他可调项包括
+请求头超时和数量限制可通过 `PROXY_REQUEST_HEADER_TIMEOUT_MS`（默认 `10000` 毫秒）以及
+`PROXY_MAX_REQUEST_HEADERS`（默认 `64`）配置。其他可调项包括
 `PROXY_MAX_CACHE_BYTES`、`PROXY_MAX_FILES`、`PROXY_MAX_CONCURRENT` 和
 `PROXY_CLEANUP_SECS`。
 

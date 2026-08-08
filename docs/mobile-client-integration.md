@@ -90,7 +90,7 @@ The source URL is mutable network information. It must never be used as the cach
 
 The Core must implement these guarantees before mobile packaging begins:
 
-1. `start` binds to `127.0.0.1` on port `0`, then returns the actual assigned port.
+1. `start` binds an HTTP/1.1 endpoint to `127.0.0.1` on port `0`, then returns the actual assigned port. The adapter must not require HTTP/2 or h2c for localhost playback.
 2. Repeated `start` calls are idempotent or return a documented state error.
 3. `stop` stops accepting requests, cancels upstream work, flushes committed metadata, releases the socket, and completes within a bounded timeout.
 4. A client instance owns its runtime resources; dropping or destroying it cannot leave detached server tasks behind.
@@ -221,6 +221,7 @@ HarmonyOS work items:
 - Use an unguessable per-process token or opaque request ID so unrelated local callers cannot freely use the proxy.
 - Require an exact upstream host allowlist.
 - Reject non-HTTP(S) schemes, URL credentials, private/reserved addresses, and unsafe redirects.
+- Production HTTPS uses Rustls with bundled WebPKI roots. Private enterprise CAs are not trusted unless the Core adds an explicit host-supplied trust-store API.
 - Pin validated DNS results to the connection to close the DNS-rebinding time-of-check/time-of-use gap.
 - Never log source URLs, authorization headers, cookies, opaque request IDs, or stable cache identities.
 - Restrict forwarded upstream headers to an explicit allowlist.
@@ -256,8 +257,8 @@ Each platform POC should demonstrate:
 
 ## Recommended Delivery Order
 
-1. Extract an embeddable Rust Core with start/stop, dynamic port, Host cache directory, opaque request registration, and source-refresh callback.
-2. Complete unit and desktop integration tests for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy.
+1. Complete the remaining Core host contracts: opaque request registration and source-refresh callback. Start/stop, dynamic port, and Host cache-directory injection are already available through the C ABI.
+2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
 3. Build the Android JNI/AAR POC and validate Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
 5. Build the iOS XCFramework/Swift adapter and validate AVPlayer.
@@ -266,4 +267,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The current public API starts a blocking server on a configured port and has no stop handle. It does not yet expose any C ABI, JNI, N-API, dynamic-port result, opaque request registry, or source-refresh callback. Treat this document as the implementation and acceptance contract for the mobile SDK work, not as documentation for already released artifacts.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts and ownership-wrapper templates. It does not yet provide production JNI/AAR, XCFramework, or N-API/HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform packages have been validated on real devices.

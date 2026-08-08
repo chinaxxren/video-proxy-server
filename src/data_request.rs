@@ -1,12 +1,12 @@
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
+use crate::utils::percent_encoding::decode_component;
 use hyper::{
-    header::{HeaderMap, HeaderValue, RANGE},
+    header::{HeaderMap, RANGE},
     Request,
 };
 use std::fmt::Write;
 use url::Url;
-use urlencoding;
 
 /// 代理路径前缀。播放器回请的 URL 会带上这一段。
 const PROXY_PREFIX: &str = "/proxy/";
@@ -42,7 +42,7 @@ pub struct DataRequest {
 }
 
 impl DataRequest {
-    pub fn new(req: &Request<hyper::Body>) -> Result<Self> {
+    pub fn new<B>(req: &Request<B>) -> Result<Self> {
         let url = if let Some(original_url) = req.headers().get("X-Original-Url") {
             original_url.to_str()?.to_string()
         } else {
@@ -60,7 +60,7 @@ impl DataRequest {
                 }
 
                 // 解码 URL
-                urlencoding::decode(clean_url)
+                decode_component(clean_url)
                     .map_err(|e| ProxyError::Request(format!("URL 解码失败: {}", e)))?
                     .into_owned()
             } else {
@@ -172,25 +172,6 @@ impl DataRequest {
         Ok(key)
     }
 
-    pub fn new_request_with_range(url: &str, range: &str) -> Request<hyper::Body> {
-        let mut builder = Request::builder().method("GET").uri(url);
-
-        // 总是添加 Range 头，因为现在我们总是有一个值
-        if let Ok(value) = HeaderValue::from_str(range) {
-            builder = builder.header(RANGE, value);
-            log_info!("Request", "Range header: {}", range);
-        }
-
-        builder = builder
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-            .header("Accept", "*/*")
-            .header("Connection", "keep-alive");
-
-        builder
-            .body(hyper::Body::empty())
-            .unwrap_or_else(|_| Request::new(hyper::Body::empty()))
-    }
-
     pub fn get_url(&self) -> &str {
         &self.url
     }
@@ -265,7 +246,13 @@ fn push_component(key: &mut String, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::Body;
+    struct Body;
+
+    impl Body {
+        fn empty() -> http_body_util::Empty<bytes::Bytes> {
+            http_body_util::Empty::new()
+        }
+    }
 
     /// 测试用：从字符串取规范身份。`canonical_upstream_identity` 现在收
     /// `&Url`，因为调用方（`DataRequest::new`）已经解析过一次了。
@@ -287,10 +274,7 @@ mod tests {
 
         let first = DataRequest::new(&build("https://media.example/song?token=one")).unwrap();
         let second = DataRequest::new(&build("https://media.example/song?token=two")).unwrap();
-        assert_eq!(
-            first.get_cache_key(),
-            second.get_cache_key()
-        );
+        assert_eq!(first.get_cache_key(), second.get_cache_key());
     }
 
     /// 没有身份头时缓存键退化成「只有上游身份」，而不是报错。
@@ -407,6 +391,19 @@ mod tests {
     }
 
     #[test]
+    fn malformed_percent_encoding_is_rejected() {
+        for uri in [
+            "/proxy/https%3A%2F%2Fmedia.example%2Fbad%",
+            "/proxy/https%3A%2F%2Fmedia.example%2Fbad%GG",
+            "/proxy/https%3A%2F%2Fmedia.example%2Fbad%FF",
+        ] {
+            let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let error = DataRequest::new(&request).unwrap_err();
+            assert!(matches!(error, ProxyError::Request(_)), "URI: {uri}");
+        }
+    }
+
+    #[test]
     fn malformed_signed_url_is_not_exposed_in_error_text() {
         let request = Request::builder()
             .uri("/proxy/not-a-url%3Ftoken%3Dsuper-secret")
@@ -457,10 +454,7 @@ mod tests {
 
         let first = DataRequest::new(&build("ab", "c")).unwrap();
         let second = DataRequest::new(&build("a", "bc")).unwrap();
-        assert_ne!(
-            first.get_cache_key(),
-            second.get_cache_key()
-        );
+        assert_ne!(first.get_cache_key(), second.get_cache_key());
     }
 
     /// 伪造身份头不能把请求映射到另一个上游资源的缓存条目上。
@@ -485,10 +479,7 @@ mod tests {
         );
 
         let other_host = DataRequest::new(&build("https://evil.example/private/a.mp4")).unwrap();
-        assert_ne!(
-            victim.get_cache_key(),
-            other_host.get_cache_key()
-        );
+        assert_ne!(victim.get_cache_key(), other_host.get_cache_key());
     }
 
     #[test]
@@ -522,17 +513,5 @@ mod tests {
             .unwrap();
 
         assert!(DataRequest::new(&request).is_err());
-    }
-
-    #[test]
-    fn outbound_range_request_contains_required_transport_headers() {
-        let request =
-            DataRequest::new_request_with_range("https://media.example/song", "bytes=10-20");
-
-        assert_eq!(request.method(), hyper::Method::GET);
-        assert_eq!(request.uri(), "https://media.example/song");
-        assert_eq!(request.headers()[RANGE], "bytes=10-20");
-        assert_eq!(request.headers()[hyper::header::ACCEPT], "*/*");
-        assert!(request.headers().contains_key(hyper::header::USER_AGENT));
     }
 }

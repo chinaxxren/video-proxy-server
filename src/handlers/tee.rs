@@ -3,13 +3,12 @@ use crate::handlers::CacheHandler;
 use crate::log_info;
 use crate::utils::error::Result;
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_stream::wrappers::ReceiverStream;
 
 /// 转发通道容量（数据块个数）。上下游之间的缓冲窗口。
 pub const FORWARD_CHANNEL_CAPACITY: usize = 32;
@@ -21,20 +20,30 @@ pub struct BackgroundTasks {
 }
 
 impl BackgroundTasks {
-    pub fn new() -> Arc<Self> { Arc::new(Self::default()) }
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
 
     pub fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let mut handles = self.handles.lock().expect("background task lock poisoned");
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handles.retain(|handle| !handle.is_finished());
         handles.push(tokio::spawn(future).abort_handle());
     }
 
     pub fn abort_all(&self) {
-        let mut handles = self.handles.lock().expect("background task lock poisoned");
-        for handle in handles.drain(..) { handle.abort(); }
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for handle in handles.drain(..) {
+            handle.abort();
+        }
     }
 }
 
@@ -59,7 +68,7 @@ pub fn tee_to_cache(
     range: (u64, u64),
     guard: Option<LeaderGuard>,
     tasks: Arc<BackgroundTasks>,
-) -> ReceiverStream<Result<Bytes>> {
+) -> impl Stream<Item = Result<Bytes>> + Send + Unpin {
     let (client_tx, client_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
     let (cache_tx, cache_rx) = mpsc::channel::<Result<Bytes>>(FORWARD_CHANNEL_CAPACITY);
 
@@ -70,13 +79,20 @@ pub fn tee_to_cache(
     tasks.spawn(async move {
         // 显式绑定：守卫要活到这个任务结束，不能被优化掉，也不能提前 drop。
         let _leader = guard;
-        let stream = Box::pin(ReceiverStream::new(cache_rx));
-        if let Err(error) = cache_handler.write_stream(&key, range, stream).await {
+        let stream = Box::pin(receiver_stream(cache_rx));
+        if let Err(error) = cache_handler.write_stream(key, range, stream).await {
             log_info!("Cache", "缓存写入失败: {}", error);
         }
     });
 
-    ReceiverStream::new(client_rx)
+    receiver_stream(client_rx)
+}
+
+fn receiver_stream<T>(mut receiver: mpsc::Receiver<T>) -> impl Stream<Item = T> + Send + Unpin
+where
+    T: Send,
+{
+    futures_util::stream::poll_fn(move |context| receiver.poll_recv(context))
 }
 
 /// 缓存侧被阻塞时最多等多久。超过就放弃缓存，只喂客户端。
@@ -175,9 +191,28 @@ async fn send_to_cache(cache_tx: &mpsc::Sender<Result<Bytes>>, item: Result<Byte
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn background_tasks_recovers_after_lock_poisoning() {
+        let tasks = BackgroundTasks::new();
+        let poison_target = Arc::clone(&tasks);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = poison_target.handles.lock().unwrap();
+            panic!("poison background task registry");
+        });
+        assert!(poisoned.join().is_err());
+
+        tasks.spawn(async { std::future::pending::<()>().await });
+        tasks.abort_all();
+        assert!(tasks
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+    }
     use crate::storage::{DiskStorage, StorageConfig, StorageManager, StorageManagerConfig};
     use crate::utils::error::ProxyError;
-    use futures::stream;
+    use futures_util::stream;
 
     /// 收集通道里剩下的全部数据，遇错即停。
     async fn drain(mut rx: mpsc::Receiver<Result<Bytes>>) -> Result<Vec<u8>> {

@@ -17,13 +17,20 @@
 //! ```
 #![cfg(feature = "allow-private-upstream")]
 
+#[path = "../examples/support/mod.rs"]
+mod local_http;
+
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use http_body_util::Full;
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server, StatusCode};
+use hyper::server::conn::http1::Builder as ConnectionBuilder;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use proxy_server::server::{ProxyConfig, ProxyServer};
 
 const ORIGIN_SIZE: u64 = 300_007;
@@ -52,25 +59,30 @@ fn spawn_origin(mode: OriginMode) -> String {
     let addr: SocketAddr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
 
-    let service = make_service_fn(move |_| async move {
-        Ok::<_, std::convert::Infallible>(service_fn(move |req: Request<Body>| async move {
-            Ok::<_, std::convert::Infallible>(serve(&req, mode))
-        }))
-    });
-
     tokio::spawn(async move {
-        let _ = Server::from_tcp(listener).unwrap().serve(service).await;
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let service = service_fn(move |req| async move {
+                    Ok::<_, std::convert::Infallible>(serve(&req, mode))
+                });
+                let builder = ConnectionBuilder::new();
+                let _ = builder
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
     });
 
     format!("http://{}/media.mp4", addr)
 }
 
-fn serve(req: &Request<Body>, mode: OriginMode) -> Response<Body> {
+fn serve<B>(req: &Request<B>, mode: OriginMode) -> Response<Full<Bytes>> {
     let full = || {
         Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, ORIGIN_SIZE)
-            .body(Body::from(expected_bytes(0, ORIGIN_SIZE - 1)))
+            .body(Full::new(Bytes::from(expected_bytes(0, ORIGIN_SIZE - 1))))
             .unwrap()
     };
 
@@ -98,7 +110,7 @@ fn serve(req: &Request<Body>, mode: OriginMode) -> Response<Body> {
             CONTENT_RANGE,
             format!("bytes {}-{}/{}", start, end, ORIGIN_SIZE),
         )
-        .body(Body::from(expected_bytes(start, end)))
+        .body(Full::new(Bytes::from(expected_bytes(start, end))))
         .unwrap()
 }
 
@@ -153,31 +165,34 @@ async fn fetch(
 ) -> (StatusCode, hyper::HeaderMap, Vec<u8>) {
     wait_until_listening(port).await;
 
-    let mut builder = Request::builder()
-        .uri(format!("http://127.0.0.1:{}/playback", port))
+    let client = local_http::Client::new();
+    let mut builder = client
+        .get(format!("http://127.0.0.1:{}/playback", port))
         .header("X-Original-Url", origin_url)
         .header("X-Cache-Asset-Id", "asset-1")
         .header("X-Cache-Asset-Revision", "1");
     if let Some(range) = range {
-        builder = builder.header(RANGE, range);
+        builder = builder.header("Range", range);
     }
 
-    let response = Client::new()
-        .request(builder.body(Body::empty()).unwrap())
-        .await
-        .expect("代理请求失败");
+    let response = builder.send().await.expect("代理请求失败");
 
-    let status = response.status();
-    let headers = response.headers().clone();
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+    let mut headers = hyper::HeaderMap::new();
+    for (name, value) in response.headers() {
+        if let (Ok(name), Ok(value)) = (
+            hyper::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+            hyper::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            headers.append(name, value);
+        }
+    }
     // 这一步就是「客户端挂死」的观测点：声明长度大于真实字节数时，
     // 读响应体会以 `end of file before message length reached` 失败。
-    let body = tokio::time::timeout(
-        Duration::from_secs(10),
-        hyper::body::to_bytes(response.into_body()),
-    )
-    .await
-    .expect("读响应体超时")
-    .expect("响应体不可读");
+    let body = tokio::time::timeout(Duration::from_secs(10), response.bytes())
+        .await
+        .expect("读响应体超时")
+        .expect("响应体不可读");
 
     (status, headers, body.to_vec())
 }
@@ -210,7 +225,12 @@ async fn capped_upstream_range_is_served_as_an_honest_short_206() {
     );
 
     // 续请求剩下的部分必须能正常拿到，否则播放器无法走完整个文件。
-    let (status, _, rest) = fetch(port, &origin, Some(&format!("bytes={}-{}", CAP, CAP * 2 - 1))).await;
+    let (status, _, rest) = fetch(
+        port,
+        &origin,
+        Some(&format!("bytes={}-{}", CAP, CAP * 2 - 1)),
+    )
+    .await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(rest, expected_bytes(CAP, CAP * 2 - 1), "续传区间字节不对");
 

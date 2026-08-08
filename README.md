@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. Mobile FFI and the authenticated localhost boundary are still pending.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle is available; production JNI/AAR, XCFramework, and N-API/HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -18,12 +18,13 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - Size/count-based cache cleanup with physical file deletion
 - Stable cache identity independent of signed URLs
 - Upstream host allowlist and private-address rejection
-- Localhost-only listener
+- Pure-Rust TLS with bundled WebPKI roots for consistent mobile builds
+- Localhost-only HTTP/1.1 listener (HTTP and HTTPS origins are supported)
 - C ABI lifecycle entry points for mobile adapters (`include/media_proxy_cache.h`)
 
 ## Requirements
 
-- Rust 1.70 or later
+- Rust 1.85 or later
 - Cargo
 - Linux, macOS, or Windows
 
@@ -33,6 +34,24 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 cargo build --locked
 cargo test --locked
 ```
+
+### Dependency security
+
+CI runs the RustSec audit on every push and pull request. The same checks can be
+reproduced locally:
+
+```bash
+cargo install cargo-audit --locked
+cargo audit
+cargo install cargo-license --locked
+cargo license --avoid-dev-deps --avoid-build-deps
+```
+
+The current lockfile audit covers 116 packages with no RustSec advisories. The
+production dependency licenses are permissive Apache-2.0, MIT, ISC,
+BSD-3-Clause, Unicode-3.0, Unlicense, CDLA-Permissive-2.0, or multi-license
+expressions with a permissive option; no mandatory GPL, AGPL, or SSPL dependency
+is present.
 
 The unit suite covers stable cache keys, sparse-range correctness, range metadata
 persistence, physical deletion, cleanup behavior, block-lock regression, tee
@@ -114,8 +133,13 @@ and are not included in the production server path.
 The crate also builds `staticlib` and `cdylib` artifacts. Mobile adapters can
 include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
 server with a host-owned cache directory, start it on a fixed port or port `0`,
-and release it with `stop`/`destroy`. This is a preview ABI; platform-specific
-JNI, Swift, and N-API wrappers and release packaging are still pending.
+and release it with `stop`/`destroy`. This is a preview ABI. Build and release
+packaging scripts are provided; platform-specific JNI, Swift, and N-API wrappers
+still require integration in the host projects.
+
+Real upstream access must use `proxy_server_create_with_hosts` and pass the
+comma-separated host allowlist. The simpler `proxy_server_create` intentionally
+uses the deny-all policy.
 
 The native build helper is available at `scripts/build-mobile.sh`:
 
@@ -144,7 +168,9 @@ linker on the build host. Desktop consumers can use the generated `cdylib` or
 Tagged pushes matching `v*` run `.github/workflows/release.yml` and publish
 macOS ARM64/Intel, Windows x86_64, and Linux x86_64 archives. The workflow can
 also be run manually to produce downloadable Actions artifacts without creating
-a GitHub Release.
+a GitHub Release. Each archive includes a matching `.sha256` file; verify a
+download on macOS/Linux with `shasum -a 256 -c <archive>.sha256` or on Windows
+with `Get-FileHash <archive> -Algorithm SHA256`.
 
 On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
 release dylib and exercises the complete create/start/stop/destroy lifecycle.
@@ -176,9 +202,12 @@ If the allowlist is omitted, the server starts but rejects every upstream reques
 
 Optional limits can be set with environment variables. `PROXY_SHUTDOWN_TIMEOUT_MS`
 controls the bounded graceful-drain period (default `5000`); after it expires,
-the server cancels its outstanding upstream/cache forwarding tasks. The other
-limits are `PROXY_MAX_CACHE_BYTES`, `PROXY_MAX_FILES`, `PROXY_MAX_CONCURRENT`,
-and `PROXY_CLEANUP_SECS`.
+the server cancels its outstanding upstream/cache forwarding tasks. The request
+header deadline and count limit are configurable with
+`PROXY_REQUEST_HEADER_TIMEOUT_MS` (default `10000`) and
+`PROXY_MAX_REQUEST_HEADERS` (default `64`). The other limits are
+`PROXY_MAX_CACHE_BYTES`, `PROXY_MAX_FILES`, `PROXY_MAX_CONCURRENT`, and
+`PROXY_CLEANUP_SECS`.
 
 You can also run the maintained client example:
 

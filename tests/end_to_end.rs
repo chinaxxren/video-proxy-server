@@ -13,16 +13,23 @@
 //! ```
 #![cfg(feature = "allow-private-upstream")]
 
+#[path = "../examples/support/mod.rs"]
+mod local_http;
+
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use bytes::Bytes;
+use futures_util::StreamExt;
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};
 use hyper::header::{ACCEPT_RANGES, ALLOW, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
+use hyper::server::conn::http1::Builder as ConnectionBuilder;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use proxy_server::server::{ProxyConfig, ProxyServer};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -122,36 +129,36 @@ fn spawn_origin(mode: OriginMode) -> Origin {
     let addr: SocketAddr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
     let offline = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_hits = hits.clone();
+    let server_offline = offline.clone();
 
-    let make_svc = {
-        let hits = hits.clone();
-        let offline = offline.clone();
-        make_service_fn(move |_conn| {
-            let hits = hits.clone();
-            let offline = offline.clone();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
+    tokio::spawn(async move {
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        while let Ok((stream, _)) = listener.accept().await {
+            let hits = server_hits.clone();
+            let offline = server_offline.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |req| {
                     let hits = hits.clone();
                     let offline = offline.clone();
                     async move {
                         hits.fetch_add(1, Ordering::SeqCst);
                         if offline.load(Ordering::SeqCst) {
-                            // 返回 Err 让 hyper 直接断掉这条连接，不发任何响应。
-                            // 代理侧看到的是连接被对端掐了，与设备断网同形。
-                            return Err("origin is offline");
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                "origin is offline",
+                            ));
                         }
                         Ok(serve_origin(&req, mode).await)
                     }
-                }))
-            }
-        })
-    };
-
-    tokio::spawn(async move {
-        let _ = Server::from_tcp(listener)
-            .expect("假源站无法接管 listener")
-            .serve(make_svc)
-            .await;
+                });
+                let builder = ConnectionBuilder::new();
+                let _ = builder
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
     });
 
     Origin {
@@ -161,7 +168,9 @@ fn spawn_origin(mode: OriginMode) -> Origin {
     }
 }
 
-async fn serve_origin(req: &Request<Body>, mode: OriginMode) -> Response<Body> {
+type OriginBody = UnsyncBoxBody<Bytes, Infallible>;
+
+async fn serve_origin<B>(req: &Request<B>, mode: OriginMode) -> Response<OriginBody> {
     if mode == OriginMode::Slow {
         tokio::time::sleep(ORIGIN_DELAY).await;
     }
@@ -176,7 +185,7 @@ async fn serve_origin(req: &Request<Body>, mode: OriginMode) -> Response<Body> {
             .status(StatusCode::OK)
             .header(ACCEPT_RANGES, "bytes")
             .header(CONTENT_LENGTH, ORIGIN_SIZE)
-            .body(Body::from(expected_bytes(0, ORIGIN_SIZE - 1)))
+            .body(Full::new(Bytes::from(expected_bytes(0, ORIGIN_SIZE - 1))).boxed_unsync())
             .unwrap()
     };
 
@@ -188,14 +197,14 @@ async fn serve_origin(req: &Request<Body>, mode: OriginMode) -> Response<Body> {
     let Some((start, end)) = parse_range(range) else {
         return Response::builder()
             .status(StatusCode::RANGE_NOT_SATISFIABLE)
-            .body(Body::empty())
+            .body(Full::new(Bytes::new()).boxed_unsync())
             .unwrap();
     };
 
     let body = if mode == OriginMode::Trickle {
         trickle_body(start, end)
     } else {
-        Body::from(expected_bytes(start, end))
+        Full::new(Bytes::from(expected_bytes(start, end))).boxed_unsync()
     };
 
     Response::builder()
@@ -220,7 +229,7 @@ const TRICKLE_CHUNK: u64 = 4 * 1024;
 const TRICKLE_GAP: Duration = Duration::from_millis(5);
 
 /// 把 `[start, end]` 切成小块，块间留间隔，做成一个流式 body。
-fn trickle_body(start: u64, end: u64) -> Body {
+fn trickle_body(start: u64, end: u64) -> OriginBody {
     let chunks = (start..=end)
         .step_by(TRICKLE_CHUNK as usize)
         .map(move |from| {
@@ -229,10 +238,11 @@ fn trickle_body(start: u64, end: u64) -> Body {
         })
         .collect::<Vec<_>>();
 
-    Body::wrap_stream(futures::stream::iter(chunks).then(|chunk| async move {
+    StreamBody::new(futures_util::stream::iter(chunks).then(|chunk| async move {
         tokio::time::sleep(TRICKLE_GAP).await;
-        Ok::<_, Infallible>(chunk)
+        Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from(chunk)))
     }))
+    .boxed_unsync()
 }
 
 /// 解析 `bytes=a-b` / `bytes=a-`，返回闭区间。
@@ -419,13 +429,14 @@ async fn fetch(
     wait_until_listening(proxy.port).await;
 
     let upstream = ask.origin_url.unwrap_or_else(|| origin.url());
-    let mut builder = Request::builder()
-        .method(ask.method)
-        .uri(proxy.url())
+    let client = local_http::Client::new();
+    let method = ask.method.as_str().parse().expect("无效请求方法");
+    let mut builder = client
+        .request(method, proxy.url())
         .header("X-Original-Url", upstream);
 
     if let Some(range) = ask.range {
-        builder = builder.header(RANGE, range);
+        builder = builder.header("Range", range);
     }
     if let Some((id, revision)) = ask.asset {
         builder = builder
@@ -433,17 +444,19 @@ async fn fetch(
             .header("X-Cache-Asset-Revision", revision);
     }
 
-    let response = Client::new()
-        .request(builder.body(Body::empty()).unwrap())
-        .await
-        .expect("代理请求失败");
+    let response = builder.send().await.expect("代理请求失败");
 
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = hyper::body::to_bytes(response.into_body())
-        .await
-        .expect("读取响应体失败")
-        .to_vec();
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+    let mut headers = hyper::HeaderMap::new();
+    for (name, value) in response.headers() {
+        if let (Ok(name), Ok(value)) = (
+            hyper::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+            hyper::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            headers.append(name, value);
+        }
+    }
+    let body = response.bytes().await.expect("读取响应体失败").to_vec();
 
     (status, headers, body)
 }
@@ -577,10 +590,12 @@ async fn concurrent_identical_ranges_are_merged_into_one_upstream_fetch() {
 
     let requests = (0..8).map(|_| fetch(&proxy, &origin, Ask::default().range("bytes=0-99999")));
 
-    let results =
-        tokio::time::timeout(Duration::from_secs(30), futures::future::join_all(requests))
-            .await
-            .expect("并发同区间请求卡死");
+    let results = tokio::time::timeout(
+        Duration::from_secs(30),
+        futures_util::future::join_all(requests),
+    )
+    .await
+    .expect("并发同区间请求卡死");
 
     // 正确性优先：合并做错最容易表现为某几路拿到截断或错位的字节。
     for (status, _, body) in results {
@@ -672,12 +687,7 @@ async fn head_reports_metadata_without_downloading_or_caching_the_media_body() {
     assert!(second_body.is_empty());
     assert_eq!(origin.hits(), 1, "已有元数据时 HEAD 不应再次回源");
 
-    let (_, _, get_body) = fetch(
-        &proxy,
-        &origin,
-        Ask::default().range("bytes=0-1023"),
-    )
-    .await;
+    let (_, _, get_body) = fetch(&proxy, &origin, Ask::default().range("bytes=0-1023")).await;
     assert_eq!(get_body.len(), 1024);
     assert_eq!(origin.hits(), 2, "HEAD 不应把媒体字节误标记为已缓存");
 }
@@ -706,12 +716,7 @@ async fn ranged_head_returns_206_headers_and_no_body() {
 async fn unsupported_multiple_ranges_return_416() {
     let origin = spawn_origin(OriginMode::Honest);
     let proxy = spawn_proxy(None);
-    let (status, _, body) = fetch(
-        &proxy,
-        &origin,
-        Ask::default().range("bytes=0-9,20-29"),
-    )
-    .await;
+    let (status, _, body) = fetch(&proxy, &origin, Ask::default().range("bytes=0-9,20-29")).await;
 
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(body, b"Requested range not satisfiable");
@@ -795,7 +800,10 @@ async fn requests_without_identity_headers_are_served() {
     .await;
 
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(headers[CONTENT_RANGE], format!("bytes 0-1023/{ORIGIN_SIZE}"));
+    assert_eq!(
+        headers[CONTENT_RANGE],
+        format!("bytes 0-1023/{ORIGIN_SIZE}")
+    );
     assert_eq!(body, expected_bytes(0, 1_023));
 }
 
@@ -813,19 +821,17 @@ async fn exactly_one_identity_header_is_rejected() {
         ("X-Cache-Asset-Id", "asset-1"),
         ("X-Cache-Asset-Revision", "1"),
     ] {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(proxy.url())
+        let response = local_http::Client::new()
+            .get(proxy.url())
             .header("X-Original-Url", origin.url())
-            .header(RANGE, "bytes=0-1023")
+            .header("Range", "bytes=0-1023")
             .header(name, value)
-            .body(Body::empty())
-            .unwrap();
-
-        let response = Client::new().request(request).await.expect("代理请求失败");
+            .send()
+            .await
+            .expect("代理请求失败");
         assert_eq!(
-            response.status(),
-            StatusCode::BAD_REQUEST,
+            response.status().as_u16(),
+            StatusCode::BAD_REQUEST.as_u16(),
             "只发 {name} 应被拒绝"
         );
     }
@@ -870,7 +876,7 @@ async fn non_get_methods_are_rejected_with_allow_header() {
     .await;
 
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(headers.get(ALLOW).unwrap().to_str().unwrap(), "GET");
+    assert_eq!(headers.get(ALLOW).unwrap().to_str().unwrap(), "GET, HEAD");
 }
 
 /// 重启后缓存还在：这是问题 E（启动索引预热）的端到端形态。
@@ -1038,17 +1044,13 @@ async fn cached_range_replays_after_origin_goes_offline() {
     //
     // 请求一个**没缓存**的区间必须失败，这才说明后面「缓存命中成功」是缓存
     // 的功劳，不是上游还活着的功劳。
-    let probe = Client::new().request(
-        Request::builder()
-            .method(Method::GET)
-            .uri(proxy.url())
-            .header("X-Original-Url", origin.url())
-            .header("X-Cache-Asset-Id", "asset-1")
-            .header("X-Cache-Asset-Revision", "1")
-            .header(RANGE, "bytes=250000-259999")
-            .body(Body::empty())
-            .unwrap(),
-    );
+    let probe = local_http::Client::new()
+        .get(proxy.url())
+        .header("X-Original-Url", origin.url())
+        .header("X-Cache-Asset-Id", "asset-1")
+        .header("X-Cache-Asset-Revision", "1")
+        .header("Range", "bytes=250000-259999")
+        .send();
     let probe_failed = match tokio::time::timeout(Duration::from_secs(10), probe).await {
         // 连接直接断掉也算「失败」，这是源站消失后最常见的形态。
         Err(_) | Ok(Err(_)) => true,
@@ -1147,7 +1149,7 @@ async fn two_players_requesting_overlapping_ranges_both_get_correct_bytes() {
 
     let (first, second) = tokio::time::timeout(
         Duration::from_secs(30),
-        futures::future::join(first, second),
+        futures_util::future::join(first, second),
     )
     .await
     .expect("并发重叠区间请求卡死");
@@ -1249,19 +1251,14 @@ async fn proxy_path_without_identity_headers_serves_bytes() {
         percent_encode(&origin.url())
     );
 
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(&uri)
-        .header(RANGE, "bytes=0-4095")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = Client::new().request(request).await.expect("代理请求失败");
-    let status = response.status();
-    let body = hyper::body::to_bytes(response.into_body())
+    let response = local_http::Client::new()
+        .get(&uri)
+        .header("Range", "bytes=0-4095")
+        .send()
         .await
-        .expect("读取响应体失败")
-        .to_vec();
+        .expect("代理请求失败");
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+    let body = response.bytes().await.expect("读取响应体失败").to_vec();
 
     assert_eq!(
         status,
@@ -1288,23 +1285,21 @@ async fn identity_headers_still_partition_the_cache() {
 
     // 同一区间、同一上游，但走不带头的 /proxy/ 路径：必须重新回源。
     let before = origin.hits();
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(format!(
+    let response = local_http::Client::new()
+        .get(format!(
             "http://127.0.0.1:{}/proxy/{}",
             proxy.port,
             percent_encode(&origin.url())
         ))
-        .header(RANGE, "bytes=0-4095")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = Client::new().request(request).await.expect("代理请求失败");
-    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-    let body = hyper::body::to_bytes(response.into_body())
+        .header("Range", "bytes=0-4095")
+        .send()
         .await
-        .expect("读取响应体失败")
-        .to_vec();
+        .expect("代理请求失败");
+    assert_eq!(
+        response.status().as_u16(),
+        StatusCode::PARTIAL_CONTENT.as_u16()
+    );
+    let body = response.bytes().await.expect("读取响应体失败").to_vec();
 
     assert_eq!(body, expected_bytes(0, 4_095));
     assert!(
@@ -1323,8 +1318,7 @@ async fn suffix_range_serves_the_last_bytes() {
     let origin = spawn_origin(OriginMode::Honest);
     let proxy = spawn_proxy(None);
 
-    let (status, headers, body) =
-        fetch(&proxy, &origin, Ask::default().range("bytes=-1024")).await;
+    let (status, headers, body) = fetch(&proxy, &origin, Ask::default().range("bytes=-1024")).await;
 
     assert_eq!(status, StatusCode::PARTIAL_CONTENT, "后缀范围被拒绝了");
     assert_eq!(
@@ -1371,12 +1365,8 @@ async fn head_with_suffix_range_reports_the_tail() {
     let origin = spawn_origin(OriginMode::Honest);
     let proxy = spawn_proxy(None);
 
-    let (status, headers, body) = fetch(
-        &proxy,
-        &origin,
-        Ask::default().range("bytes=-2048").head(),
-    )
-    .await;
+    let (status, headers, body) =
+        fetch(&proxy, &origin, Ask::default().range("bytes=-2048").head()).await;
 
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert!(body.is_empty(), "HEAD 不该带响应体");

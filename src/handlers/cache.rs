@@ -2,7 +2,7 @@ use crate::log_info;
 use crate::storage::{DiskStorage, StorageManager, UpstreamMeta};
 use crate::utils::error::Result;
 use bytes::Bytes;
-use futures::Stream;
+use futures_util::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -45,14 +45,21 @@ impl CacheHandler {
     /// 旧实现在这里按 64KB 重新分块，每块都调一次 `write`，于是每 64KB
     /// 就触发一次「打开文件 + fsync + 全量重写 ranges.json」——1GB 视频
     /// 约 16000 次 fsync，且中途失败会留下一串已标记完成的碎片区间。
-    pub async fn write_stream(
-        &self,
-        key: &str,
+    pub fn write_stream(
+        self: Arc<Self>,
+        key: String,
         range: (u64, u64),
         stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
-    ) -> Result<()> {
-        let written = self.storage_manager.write(key, stream, range).await?;
-        log_info!("Cache", "缓存写入完成: {} 字节 (起始偏移 {})", written, range.0);
-        Ok(())
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+        Box::pin(async move {
+            let written = self.storage_manager.write(&key, stream, range).await?;
+            log_info!(
+                "Cache",
+                "缓存写入完成: {} 字节 (起始偏移 {})",
+                written,
+                range.0
+            );
+            Ok(())
+        })
     }
 }

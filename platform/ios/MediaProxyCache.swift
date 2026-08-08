@@ -4,9 +4,14 @@ import Foundation
 public final class MediaProxyCache {
     private var handle: OpaquePointer?
 
-    public init?(port: UInt16, cacheDirectory: String) {
-        guard !cacheDirectory.isEmpty else { return nil }
-        handle = cacheDirectory.withCString { proxy_server_create(port, $0) }
+    public init?(port: UInt16, cacheDirectory: String, allowedHosts: [String]) {
+        guard !cacheDirectory.isEmpty, !allowedHosts.isEmpty else { return nil }
+        let hosts = allowedHosts.joined(separator: ",")
+        handle = cacheDirectory.withCString { cachePath in
+            hosts.withCString { hostList in
+                proxy_server_create_with_hosts(port, cachePath, hostList)
+            }
+        }
         guard handle != nil else { return nil }
     }
 

@@ -15,6 +15,8 @@
 //! 需要 `allow-private-upstream`：假源站在 127.0.0.1 上，生产逻辑会拒绝
 //! 回环地址的上游。
 
+mod support;
+
 #[cfg(feature = "allow-private-upstream")]
 mod playground {
     use std::collections::HashMap;
@@ -24,13 +26,28 @@ mod playground {
     use std::process::Command;
     use std::sync::Arc;
 
+    use crate::support as local_http;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+    use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};
     use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
-    use hyper::service::{make_service_fn, service_fn};
-    use hyper::{Body, Client, Request, Response, Server, StatusCode};
+    use hyper::server::conn::http1::Builder as ConnectionBuilder;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
     use proxy_server::server::{ProxyConfig, ProxyServer};
 
     /// 没给真实文件时合成多大。5MB 足够让播放器发出好几轮 range 请求。
     const SYNTHETIC_SIZE: usize = 5 * 1024 * 1024;
+
+    type PlaygroundError = Box<dyn std::error::Error + Send + Sync>;
+    type PlaygroundBody = UnsyncBoxBody<Bytes, PlaygroundError>;
+
+    fn full_body(value: impl Into<Bytes>) -> PlaygroundBody {
+        Full::new(value.into())
+            .map_err(|never| match never {})
+            .boxed_unsync()
+    }
 
     struct HlsAsset {
         path: PathBuf,
@@ -67,22 +84,25 @@ mod playground {
             }
             None => (None, Arc::new(HashMap::new())),
         };
-        let port = 8099;
-        let origin = spawn_origin(Arc::new(body), content_type, hls_assets, port);
-        let origin_url = format!("{origin}/media.mp4");
-
         let cache_dir = std::env::temp_dir().join("video-proxy-playground");
         let server = Arc::new(ProxyServer::with_config(ProxyConfig {
-            port,
+            port: 0,
             cache_dir: cache_dir.clone(),
             allowed_hosts: vec!["127.0.0.1".to_string()],
             ..Default::default()
         }));
+        let running = tokio::spawn({
+            let server = server.clone();
+            async move { server.start().await }
+        });
+        let port = server.wait_until_ready().await?;
+        let origin = spawn_origin(Arc::new(body), content_type, hls_assets, port);
+        let origin_url = format!("{origin}/media.mp4");
 
         print_usage(&label, &origin_url, port, &cache_dir);
 
-        if let Err(e) = server.start().await {
-            eprintln!("代理退出: {e}");
+        if let Err(error) = running.await? {
+            eprintln!("代理退出: {error}");
         }
         drop(hls_temp_dir);
         Ok(())
@@ -171,7 +191,7 @@ mod playground {
         body: Arc<Vec<u8>>,
         content_type: &'static str,
         hls_assets: Arc<HashMap<String, HlsAsset>>,
-        client: Client<hyper::client::HttpConnector>,
+        client: local_http::Client,
         origin_url: String,
         hls_url: String,
         proxy_url: String,
@@ -190,33 +210,37 @@ mod playground {
             body,
             content_type,
             hls_assets,
-            client: Client::new(),
+            client: local_http::Client::new(),
             origin_url: format!("{base_url}/media.mp4"),
             hls_url: format!("{base_url}/hls/master.m3u8"),
             proxy_url: format!("http://127.0.0.1:{proxy_port}/playback"),
         });
 
-        let make_svc = make_service_fn(move |_conn| {
-            let state = state.clone();
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-                    let state = state.clone();
-                    async move { Ok::<_, Infallible>(serve_web_or_media(req, &state).await) }
-                }))
-            }
-        });
-
         tokio::spawn(async move {
-            let _ = Server::from_tcp(listener)
-                .expect("假源站无法接管 listener")
-                .serve(make_svc)
-                .await;
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            while let Ok((stream, _)) = listener.accept().await {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req| {
+                        let state = state.clone();
+                        async move { Ok::<_, Infallible>(serve_web_or_media(req, &state).await) }
+                    });
+                    let builder = ConnectionBuilder::new();
+                    let _ = builder
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
         });
 
         base_url
     }
 
-    async fn serve_web_or_media(req: Request<Body>, state: &OriginState) -> Response<Body> {
+    async fn serve_web_or_media<B>(
+        req: Request<B>,
+        state: &OriginState,
+    ) -> Response<PlaygroundBody> {
         let OriginState {
             body,
             content_type,
@@ -257,78 +281,97 @@ mod playground {
                         Ok(bytes) => serve_named(&req, &bytes, asset.content_type, name),
                         Err(_) => Response::builder()
                             .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from("Unable to read HLS asset"))
+                            .body(full_body("Unable to read HLS asset"))
                             .unwrap(),
                     },
                     None => Response::builder()
                         .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("HLS asset not found"))
+                        .body(full_body("HLS asset not found"))
                         .unwrap(),
                 }
             }
             _ => Response::builder()
                 .status(StatusCode::NOT_FOUND)
-                .body(Body::from("Not found"))
+                .body(full_body("Not found"))
                 .unwrap(),
         }
     }
 
-    fn static_response(content_type: &'static str, content: &'static str) -> Response<Body> {
+    fn static_response(
+        content_type: &'static str,
+        content: &'static str,
+    ) -> Response<PlaygroundBody> {
         Response::builder()
             .header(CONTENT_TYPE, content_type)
             .header("Cache-Control", "no-store")
-            .body(Body::from(content))
+            .body(full_body(content))
             .unwrap()
     }
 
     async fn forward_to_proxy(
-        browser_request: Request<Body>,
-        client: &Client<hyper::client::HttpConnector>,
+        browser_request: Request<impl Sized>,
+        client: &local_http::Client,
         proxy_url: &str,
         original_url: Option<&str>,
         asset_id: &str,
-    ) -> Response<Body> {
-        let mut builder = Request::builder()
-            .method(browser_request.method())
-            .uri(proxy_url)
+    ) -> Response<PlaygroundBody> {
+        let mut builder = client
+            .request(
+                browser_request.method().as_str().parse().unwrap(),
+                proxy_url,
+            )
             .header("X-Cache-Asset-Id", asset_id)
             .header("X-Cache-Asset-Revision", "1");
         if let Some(original_url) = original_url {
             builder = builder.header("X-Original-Url", original_url);
         }
         if let Some(range) = browser_request.headers().get(RANGE) {
-            builder = builder.header(RANGE, range);
+            if let Ok(range) = range.to_str() {
+                builder = builder.header("Range", range);
+            }
         }
 
-        let request = match builder.body(Body::empty()) {
-            Ok(request) => request,
-            Err(_) => {
-                return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from("Invalid test request"))
-                    .unwrap()
+        match builder.send().await {
+            Ok(response) => {
+                let status = StatusCode::from_u16(response.status().as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                let mut output = Response::builder().status(status);
+                for (name, value) in response.headers() {
+                    if let (Ok(name), Ok(value)) = (
+                        hyper::header::HeaderName::from_bytes(name.as_str().as_bytes()),
+                        hyper::header::HeaderValue::from_bytes(value.as_bytes()),
+                    ) {
+                        output = output.header(name, value);
+                    }
+                }
+                let stream = response.bytes_stream().map(|chunk| {
+                    chunk
+                        .map(hyper::body::Frame::data)
+                        .map_err(|error| Box::new(error) as PlaygroundError)
+                });
+                output.body(StreamBody::new(stream).boxed_unsync()).unwrap()
             }
-        };
-
-        match client.request(request).await {
-            Ok(response) => response,
             Err(error) => Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(format!("Proxy unavailable: {error}")))
+                .body(full_body(format!("Proxy unavailable: {error}")))
                 .unwrap(),
         }
     }
 
-    fn serve(req: &Request<Body>, body: &[u8], content_type: &'static str) -> Response<Body> {
+    fn serve<B>(
+        req: &Request<B>,
+        body: &[u8],
+        content_type: &'static str,
+    ) -> Response<PlaygroundBody> {
         serve_named(req, body, content_type, "media.mp4")
     }
 
     fn serve_named(
-        req: &Request<Body>,
+        req: &Request<impl Sized>,
         body: &[u8],
         content_type: &'static str,
         name: &str,
-    ) -> Response<Body> {
+    ) -> Response<PlaygroundBody> {
         let total = body.len() as u64;
         let range = req
             .headers()
@@ -349,14 +392,14 @@ mod playground {
                 .header(ACCEPT_RANGES, "bytes")
                 .header(CONTENT_LENGTH, end - start + 1)
                 .header(CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
-                .body(Body::from(body[start as usize..=end as usize].to_vec()))
+                .body(full_body(body[start as usize..=end as usize].to_vec()))
                 .unwrap(),
             None => Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, content_type)
                 .header(ACCEPT_RANGES, "bytes")
                 .header(CONTENT_LENGTH, total)
-                .body(Body::from(body.to_vec()))
+                .body(full_body(body.to_vec()))
                 .unwrap(),
         }
     }

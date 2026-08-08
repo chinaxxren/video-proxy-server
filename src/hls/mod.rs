@@ -3,14 +3,16 @@ mod handler;
 pub use handler::DefaultHlsHandler;
 
 use crate::log_info;
+use crate::utils::digest::sha256_hex;
 use crate::utils::error::Result;
-use async_trait::async_trait;
+use crate::utils::percent_encoding::{decode_component, encode_component};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use url::Url;
@@ -45,8 +47,8 @@ pub struct PlaylistInfo {
     pub segments: Vec<Segment>,
     /// 变体流信息（仅用于主播放列表）
     pub variants: Vec<VariantStream>,
-    /// 最后更新时间
-    pub last_updated: chrono::DateTime<chrono::Utc>,
+    /// Unix epoch 之后的纳秒数，用于确定内存缓存淘汰顺序。
+    pub updated_at_unix_nanos: u128,
 }
 
 /// 变体流信息
@@ -72,6 +74,13 @@ const MAX_PLAYLIST_ITEMS: usize = 20_000;
 const MAX_PLAYLIST_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_PLAYLIST_BODIES: usize = 128;
 const MAX_PLAYLIST_BODY_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+fn unix_time_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos()
+}
 
 struct CachedPlaylistBody {
     content: Arc<str>,
@@ -153,7 +162,7 @@ impl HlsManager {
                     is_endlist: false,
                     segments: vec![],
                     variants,
-                    last_updated: chrono::Utc::now(),
+                    updated_at_unix_nanos: unix_time_nanos(),
                 });
 
                 // 缓存播放列表信息
@@ -191,12 +200,12 @@ impl HlsManager {
 
                 let info = PlaylistInfo {
                     url: url.to_string(),
-                    target_duration: media.target_duration,
+                    target_duration: media.target_duration as f32,
                     media_sequence: media.media_sequence,
                     is_endlist: media.end_list,
                     segments,
                     variants: vec![],
-                    last_updated: chrono::Utc::now(),
+                    updated_at_unix_nanos: unix_time_nanos(),
                 };
 
                 let info = Arc::new(info);
@@ -210,7 +219,7 @@ impl HlsManager {
     ///
     /// 直播场景下 URL 常带轮换的签名 query，每次轮换都是一个新 key；
     /// 无上限的 map 会随播放时长单调增长，最终 OOM。这里按
-    /// `last_updated` 淘汰最旧的条目，把内存占用钉在常量级。
+    /// `updated_at_unix_nanos` 淘汰最旧的条目，把内存占用钉在常量级。
     async fn cache_playlist(&self, url: &str, info: Arc<PlaylistInfo>) {
         let mut playlists = self.playlists.write().await;
 
@@ -228,7 +237,7 @@ impl HlsManager {
         {
             let evict = playlists
                 .iter()
-                .min_by_key(|(_, entry)| entry.last_updated)
+                .min_by_key(|(_, entry)| entry.updated_at_unix_nanos)
                 .map(|(key, _)| key.clone());
             if let Some(key) = evict {
                 log_info!("HLS", "播放列表缓存已满，淘汰最旧条目");
@@ -356,8 +365,11 @@ impl HlsManager {
     /// 获取分片的缓存路径
     pub fn get_segment_cache_path(&self, url: &str, sequence: u64) -> PathBuf {
         // 一次 format 直接拼出文件名，不再先把摘要格式化成一个中间 String。
-        self.cache_dir
-            .join(format!("{:x}_seg_{}.ts", md5::compute(url), sequence))
+        self.cache_dir.join(format!(
+            "{}_seg_{}.ts",
+            sha256_hex(url.as_bytes()),
+            sequence
+        ))
     }
 }
 
@@ -445,7 +457,7 @@ fn absolutize<'a>(reference: &'a str, base: &Base<'_>) -> Cow<'a, str> {
     let reference: Cow<'a, str> = match reference.strip_prefix(PROXY_PREFIX) {
         // decode 返回 Cow：没有转义序列时借用，不分配。原先无条件
         // `into_owned()`，等于每个已代理的引用都白复制一次。
-        Some(inner) => urlencoding::decode(inner).unwrap_or(Cow::Borrowed(inner)),
+        Some(inner) => decode_component(inner).unwrap_or(Cow::Borrowed(inner)),
         None => Cow::Borrowed(reference),
     };
 
@@ -453,7 +465,11 @@ fn absolutize<'a>(reference: &'a str, base: &Base<'_>) -> Cow<'a, str> {
         return reference;
     }
 
-    match base.parsed.as_ref().and_then(|url| url.join(&reference).ok()) {
+    match base
+        .parsed
+        .as_ref()
+        .and_then(|url| url.join(&reference).ok())
+    {
         Some(joined) => Cow::Owned(joined.to_string()),
         // base 不可解析（或 join 失败）时退回字符串拼接，至少保持旧行为
         // 而不是丢掉这条引用。
@@ -476,7 +492,7 @@ fn is_absolute_http(reference: &str) -> bool {
 fn push_proxied(output: &mut String, absolute_url: &str, proxy_prefix: &str) {
     output.push_str(proxy_prefix);
     output.push('/');
-    output.push_str(&urlencoding::encode(absolute_url));
+    output.push_str(&encode_component(absolute_url));
 }
 
 /// 重写标签行里所有 `URI="..."` 属性的值。
@@ -514,15 +530,29 @@ fn push_rewritten_tag(output: &mut String, line: &str, base: &Base<'_>, proxy_pr
     output.push_str(rest);
 }
 
-#[async_trait]
-pub trait HlsHandler {
+pub trait HlsHandler: Send + Sync {
     /// 处理 m3u8 请求
-    async fn handle_m3u8(&self, url: &str) -> Result<String>;
+    fn handle_m3u8<'a>(&'a self, url: &'a str) -> impl Future<Output = Result<String>> + Send + 'a;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_timestamp_uses_unix_nanoseconds() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let timestamp = unix_time_nanos();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        assert!((before..=after).contains(&timestamp));
+    }
 
     fn manager() -> (tempfile::TempDir, HlsManager) {
         let dir = tempfile::tempdir().unwrap();
@@ -580,8 +610,8 @@ mod tests {
 
         let rewritten = manager.rewrite_m3u8(content, "https://media.example/live/", "/proxy");
 
-        let key = urlencoding::encode("https://media.example/live/key.bin");
-        let map = urlencoding::encode("https://media.example/live/init.mp4");
+        let key = encode_component("https://media.example/live/key.bin");
+        let map = encode_component("https://media.example/live/init.mp4");
         assert!(
             rewritten.contains(&format!("URI=\"/proxy/{}\"", key)),
             "key URI not rewritten: {rewritten}"
@@ -610,13 +640,10 @@ mod tests {
     #[test]
     fn root_absolute_reference_replaces_path() {
         let (_dir, manager) = manager();
-        let rewritten = manager.rewrite_m3u8(
-            "/v2/segment.ts\n",
-            "https://media.example/live/",
-            "/proxy",
-        );
+        let rewritten =
+            manager.rewrite_m3u8("/v2/segment.ts\n", "https://media.example/live/", "/proxy");
 
-        let expected = urlencoding::encode("https://media.example/v2/segment.ts");
+        let expected = encode_component("https://media.example/v2/segment.ts");
         assert!(
             rewritten.contains(expected.as_ref()),
             "unexpected: {rewritten}"
@@ -685,7 +712,7 @@ mod tests {
                     cached: false,
                 }],
                 variants: Vec::new(),
-                last_updated: chrono::Utc::now(),
+                updated_at_unix_nanos: unix_time_nanos(),
             });
             manager.cache_playlist(&url, info).await;
         }
@@ -705,7 +732,7 @@ mod tests {
             is_endlist: false,
             segments: vec![],
             variants: vec![],
-            last_updated: chrono::Utc::now(),
+            updated_at_unix_nanos: unix_time_nanos(),
         };
         assert_eq!(playlist_refresh_ttl(&base), Duration::from_secs(6));
 
@@ -733,7 +760,10 @@ mod tests {
         manager
             .cache_playlist_body(url, "rewritten".to_string(), Duration::from_secs(2))
             .await;
-        assert_eq!(&*manager.cached_playlist_body(url).await.unwrap(), "rewritten");
+        assert_eq!(
+            &*manager.cached_playlist_body(url).await.unwrap(),
+            "rewritten"
+        );
 
         tokio::time::advance(Duration::from_secs(2)).await;
         assert!(manager.cached_playlist_body(url).await.is_none());
@@ -763,7 +793,8 @@ mod tests {
     #[tokio::test]
     async fn segment_update_finds_the_right_entry_among_many() {
         let (_dir, manager) = manager();
-        let mut content = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:100\n");
+        let mut content =
+            String::from("#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:100\n");
         for i in 0..64 {
             content.push_str(&format!("#EXTINF:5.0,\nsegment-{i}.ts\n"));
         }
@@ -841,12 +872,12 @@ mod tests {
         let rewritten = manager.rewrite_m3u8(&content, "https://media.example/live/", "/proxy");
         assert!(rewritten.contains(&format!(
             "/proxy/{}",
-            urlencoding::encode("https://media.example/live/segment-1.ts")
+            encode_component("https://media.example/live/segment-1.ts")
         )));
-        assert!(rewritten.contains(&format!("/proxy/{}", urlencoding::encode(absolute))));
+        assert!(rewritten.contains(&format!("/proxy/{}", encode_component(absolute))));
         assert!(rewritten.contains(&format!(
             "/proxy/{}",
-            urlencoding::encode("https://media.example/live/segment-3.ts")
+            encode_component("https://media.example/live/segment-3.ts")
         )));
         assert!(rewritten.starts_with("#EXTM3U\n"));
     }

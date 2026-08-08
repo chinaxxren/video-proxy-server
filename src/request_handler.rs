@@ -1,10 +1,14 @@
 use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
+use crate::http_types::{empty_body, full_body, AppBody};
 use crate::utils::error::{ProxyError, Result};
+use http_body_util::BodyExt;
 use hyper::header::{HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE};
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub struct RequestHandler {
@@ -32,7 +36,7 @@ impl RequestHandler {
         }
     }
 
-    pub async fn handle_request(&self, req: Request<Body>) -> Result<Response<Body>> {
+    pub async fn handle_request<B>(&self, req: Request<B>) -> Result<Response<AppBody>> {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
@@ -45,7 +49,7 @@ impl RequestHandler {
                     .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
                     .header(CACHE_CONTROL, "no-cache")
                     .header(hyper::header::CONTENT_LENGTH, content.len())
-                    .body(Body::empty())
+                    .body(empty_body())
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 HEAD 响应失败: {}", e)))
             }
             (true, _) => self.source_manager.process_head(&data_request).await,
@@ -57,7 +61,7 @@ impl RequestHandler {
                 Response::builder()
                     .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
                     .header(CACHE_CONTROL, "no-cache")
-                    .body(Body::from(content))
+                    .body(full_body(content))
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
             // 非播放列表一律走字节范围缓存管线（HLS 分片也在内）。
@@ -90,9 +94,9 @@ impl RequestHandler {
 /// 收敛成整个资源（总长度未知时它直接报错，根本走不到这里），所以此处的 206
 /// 必然覆盖全资源——正是 200 该有的语义。因此无需再去检查区间是否真的完整。
 fn full_content_if_no_range_requested(
-    mut response: Response<Body>,
+    mut response: Response<AppBody>,
     request: &DataRequest,
-) -> Response<Body> {
+) -> Response<AppBody> {
     // 状态码判断把 m3u8 那条本来就返回 200 的路径自动排除在外。
     if request.client_sent_range() || response.status() != StatusCode::PARTIAL_CONTENT {
         return response;
@@ -110,13 +114,41 @@ fn full_content_if_no_range_requested(
     response
 }
 
-fn guard_response(response: Response<Body>, permit: OwnedSemaphorePermit) -> Response<Body> {
+fn guard_response(response: Response<AppBody>, permit: OwnedSemaphorePermit) -> Response<AppBody> {
     let (parts, body) = response.into_parts();
-    let guarded = futures::stream::unfold((body, permit), |(mut body, permit)| async move {
-        use futures::StreamExt;
-        body.next().await.map(|item| (item, (body, permit)))
-    });
-    Response::from_parts(parts, Body::wrap_stream(guarded))
+    Response::from_parts(
+        parts,
+        PermitBody {
+            body,
+            _permit: permit,
+        }
+        .boxed_unsync(),
+    )
+}
+
+struct PermitBody {
+    body: AppBody,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl hyper::body::Body for PermitBody {
+    type Data = bytes::Bytes;
+    type Error = ProxyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.body).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
 }
 
 fn validate_method(method: &Method) -> Result<()> {
@@ -151,13 +183,13 @@ mod tests {
             .header("X-Cache-Asset-Id", "asset-1")
             .header("X-Cache-Asset-Revision", "1");
         if let Some(range) = range {
-            builder = builder.header(hyper::header::RANGE, range);
+            builder = builder.header("Range", range);
         }
-        DataRequest::new(&builder.body(Body::empty()).unwrap()).unwrap()
+        DataRequest::new(&builder.body(()).unwrap()).unwrap()
     }
 
-    fn partial_response() -> Response<Body> {
-        let mut response = Response::new(Body::from("media"));
+    fn partial_response() -> Response<AppBody> {
+        let mut response = Response::new(full_body("media"));
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
         response
             .headers_mut()
@@ -203,7 +235,7 @@ mod tests {
     fn non_partial_responses_are_left_alone() {
         // m3u8 那条路径本来就返回 200，不能被这里再动一次（尤其不能被塞上
         // Accept-Ranges——播放列表不是可 seek 的字节流）。
-        let mut original = Response::new(Body::from("#EXTM3U"));
+        let mut original = Response::new(full_body("#EXTM3U"));
         original.headers_mut().insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/x-mpegURL"),
@@ -219,11 +251,11 @@ mod tests {
     async fn concurrency_permit_lives_until_response_body_finishes() {
         let semaphore = Arc::new(Semaphore::new(1));
         let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let response = guard_response(Response::new(Body::from("media")), permit);
+        let response = guard_response(Response::new(full_body("media")), permit);
 
         assert!(semaphore.clone().try_acquire_owned().is_err());
         assert_eq!(
-            hyper::body::to_bytes(response.into_body()).await.unwrap(),
+            response.into_body().collect().await.unwrap().to_bytes(),
             "media"
         );
         assert!(semaphore.try_acquire_owned().is_ok());

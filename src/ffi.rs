@@ -41,13 +41,56 @@ pub unsafe extern "C" fn proxy_server_create(
     port: u16,
     cache_dir: *const c_char,
 ) -> *mut ProxyServerHandle {
-    let Some(cache_dir) = read_string(cache_dir) else { return ptr::null_mut() };
+    let Some(cache_dir) = read_string(cache_dir) else {
+        return ptr::null_mut();
+    };
+    create_handle(port, cache_dir, Vec::new())
+}
+
+/// Creates a server handle with a comma-separated upstream host allowlist.
+/// Empty items and surrounding ASCII whitespace are ignored.
+///
+/// # Safety
+///
+/// `cache_dir` and `allowed_hosts` must point to valid NUL-terminated strings
+/// for the duration of this call. Either pointer may be null, in which case
+/// creation fails.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_create_with_hosts(
+    port: u16,
+    cache_dir: *const c_char,
+    allowed_hosts: *const c_char,
+) -> *mut ProxyServerHandle {
+    let (Some(cache_dir), Some(allowed_hosts)) =
+        (read_string(cache_dir), read_string(allowed_hosts))
+    else {
+        return ptr::null_mut();
+    };
+    let allowed_hosts = allowed_hosts
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect();
+    create_handle(port, cache_dir, allowed_hosts)
+}
+
+fn create_handle(
+    port: u16,
+    cache_dir: String,
+    allowed_hosts: Vec<String>,
+) -> *mut ProxyServerHandle {
     let config = ProxyConfig {
         port,
         cache_dir: PathBuf::from(cache_dir),
+        allowed_hosts,
         ..Default::default()
     };
-    Box::into_raw(Box::new(ProxyServerHandle { config: Mutex::new(Some(config)), server: Arc::new(Mutex::new(None)), thread: Mutex::new(None) }))
+    Box::into_raw(Box::new(ProxyServerHandle {
+        config: Mutex::new(Some(config)),
+        server: Arc::new(Mutex::new(None)),
+        thread: Mutex::new(None),
+    }))
 }
 
 /// Starts the server and waits until its socket is bound. Returns the bound port,
@@ -59,21 +102,40 @@ pub unsafe extern "C" fn proxy_server_create(
 /// `proxy_server_destroy` 释放的指针。
 #[no_mangle]
 pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u16 {
-    let Some(handle) = handle.as_ref() else { return 0 };
-    let Ok(mut slot) = handle.thread.lock() else { return 0 };
-    if slot.is_some() { return 0; }
-    let Some(config) = handle.config.lock().ok().and_then(|mut value| value.take()) else { return 0; };
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let Ok(mut slot) = handle.thread.lock() else {
+        return 0;
+    };
+    if slot.is_some() {
+        return 0;
+    }
+    let Some(config) = handle.config.lock().ok().and_then(|mut value| value.take()) else {
+        return 0;
+    };
     let (tx, rx) = mpsc::sync_channel(1);
     let published = handle.server.clone();
     let thread = std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => runtime,
-            Err(_) => { let _ = tx.send(0); return; }
+            Err(_) => {
+                let _ = tx.send(0);
+                return;
+            }
         };
         let result = runtime.block_on(async {
             let server = Arc::new(ProxyServer::with_config(config));
-            if let Ok(mut value) = published.lock() { *value = Some(server.clone()); }
-            let start = tokio::spawn({ let server = server.clone(); async move { server.start().await } });
+            if let Ok(mut value) = published.lock() {
+                *value = Some(server.clone());
+            }
+            let start = tokio::spawn({
+                let server = server.clone();
+                async move { server.start().await }
+            });
             let port = server.wait_until_ready().await.unwrap_or(0);
             let _ = tx.send(port);
             let _ = start.await;
@@ -94,8 +156,14 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
 /// `proxy_server_destroy` 释放的指针。
 #[no_mangle]
 pub unsafe extern "C" fn proxy_server_stop(handle: *mut ProxyServerHandle) {
-    let Some(handle) = handle.as_ref() else { return };
-    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+    let Some(handle) = handle.as_ref() else {
+        return;
+    };
+    if let Ok(server) = handle.server.lock() {
+        if let Some(server) = server.as_ref() {
+            server.stop();
+        }
+    }
 }
 
 /// Stops the server, joins its thread, and frees the handle.
@@ -106,11 +174,19 @@ pub unsafe extern "C" fn proxy_server_stop(handle: *mut ProxyServerHandle) {
 /// 其所有权，因此每个句柄只能调用一次，调用后该指针不得再被使用。
 #[no_mangle]
 pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
-    if handle.is_null() { return; }
+    if handle.is_null() {
+        return;
+    }
     let handle = Box::from_raw(handle);
-    if let Ok(server) = handle.server.lock() { if let Some(server) = server.as_ref() { server.stop(); } }
+    if let Ok(server) = handle.server.lock() {
+        if let Some(server) = server.as_ref() {
+            server.stop();
+        }
+    }
     if let Ok(mut slot) = handle.thread.lock() {
-        if let Some(thread) = slot.take() { let _ = thread.join(); }
+        if let Some(thread) = slot.take() {
+            let _ = thread.join();
+        }
     };
 }
 
@@ -142,6 +218,24 @@ mod tests {
             assert_eq!(proxy_server_start(ptr::null_mut()), 0);
             proxy_server_stop(ptr::null_mut());
             proxy_server_destroy(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn ffi_accepts_and_normalizes_an_upstream_allowlist() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let hosts = CString::new(" media.example.com,cdn.example.com, ").unwrap();
+        unsafe {
+            let handle = proxy_server_create_with_hosts(0, path.as_ptr(), hosts.as_ptr());
+            assert!(!handle.is_null());
+            let config = (*handle).config.lock().unwrap();
+            assert_eq!(
+                config.as_ref().unwrap().allowed_hosts,
+                ["media.example.com", "cdn.example.com"]
+            );
+            drop(config);
+            proxy_server_destroy(handle);
         }
     }
 }

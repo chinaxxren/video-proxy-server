@@ -1,13 +1,14 @@
 use crate::handlers::network::FetchedUpstream;
 use crate::handlers::tee::tee_to_cache;
 use crate::handlers::{BackgroundTasks, CacheHandler, NetworkHandler, ResponseBuilder};
+use crate::http_types::AppBody;
 use crate::log_info;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
 use crate::utils::range::{clamp_end_to_upstream_length, range_length, OPEN_ENDED};
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
-use hyper::{Body, Response};
+use futures_util::{Stream, StreamExt};
+use hyper::Response;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +29,11 @@ impl MixedSourceHandler {
         Self::with_tasks(cache_handler, policy, BackgroundTasks::new())
     }
 
-    pub fn with_tasks(cache_handler: Arc<CacheHandler>, policy: Arc<NetworkPolicy>, tasks: Arc<BackgroundTasks>) -> Self {
+    pub fn with_tasks(
+        cache_handler: Arc<CacheHandler>,
+        policy: Arc<NetworkPolicy>,
+        tasks: Arc<BackgroundTasks>,
+    ) -> Self {
         Self {
             cache_handler,
             network_handler: NetworkHandler::new(policy),
@@ -49,7 +54,7 @@ impl MixedSourceHandler {
         start: u64,
         end: u64,
         cached_end: u64,
-    ) -> Result<Response<Body>> {
+    ) -> Result<Response<AppBody>> {
         // 先校验、再打日志。旧实现在校验之前就打印 `cached_end - 1`，
         // cached_end == 0 时直接下溢 panic。
         if end == OPEN_ENDED {
@@ -260,7 +265,7 @@ impl MixedSourceHandler {
             chunk_count: 0,
         };
 
-        Box::pin(futures::stream::unfold(
+        Box::pin(futures_util::stream::unfold(
             state,
             move |mut state| async move {
                 if state.error_occurred {
@@ -429,7 +434,7 @@ impl MixedSourceHandler {
 mod tests {
     use super::*;
     use crate::storage::{DiskStorage, StorageConfig, StorageManager, StorageManagerConfig};
-    use futures::stream;
+    use futures_util::stream;
 
     fn handler() -> (tempfile::TempDir, MixedSourceHandler) {
         let dir = tempfile::tempdir().unwrap();

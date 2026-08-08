@@ -1,4 +1,6 @@
-use hyper::{Client, Request, Body};
+mod support;
+use support as local_http;
+
 use proxy_server::{log_info, server};
 
 #[tokio::main]
@@ -18,19 +20,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     // 创建 HTTP 客户端
-    let client = Client::new();
+    let client = local_http::Client::new();
     let video_url = "https://www.w3school.com.cn/i/movie.mp4";
 
     // 第一次请求
     log_info!("Example", "发送第一次请求");
-    let req1 = Request::builder()
-        .method("GET")
-        .uri("http://127.0.0.1:8080")
-        // .header("Range", "bytes=0-1023")
+    let resp1 = client
+        .get("http://127.0.0.1:8080")
         .header("X-Original-Url", video_url)
-        .body(Body::empty())?;
-
-    let resp1 = client.request(req1).await?;
+        .header("X-Cache-User-Id", "example-user")
+        .header("X-Cache-Asset-Id", "w3school-movie")
+        .header("X-Cache-Asset-Revision", "1")
+        .send()
+        .await?;
     log_info!("Example", "第一次响应状态: {}", resp1.status());
     log_info!("Example", "第一次响应头: {:#?}", resp1.headers());
 
@@ -39,14 +41,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 第二次请求相同的内容
     log_info!("Example", "发送第二次请求（相同范围）");
-    let req2 = Request::builder()
-        .method("GET")
-        .uri("http://127.0.0.1:8080")
-        // .header("Range", "bytes=0-1023")
+    let resp2 = client
+        .get("http://127.0.0.1:8080")
         .header("X-Original-Url", video_url)
-        .body(Body::empty())?;
-
-    let resp2 = client.request(req2).await?;
+        .header("X-Cache-User-Id", "example-user")
+        .header("X-Cache-Asset-Id", "w3school-movie")
+        .header("X-Cache-Asset-Revision", "1")
+        .send()
+        .await?;
     log_info!("Example", "第二次响应状态: {}", resp2.status());
     log_info!("Example", "第二次响应头: {:#?}", resp2.headers());
 
