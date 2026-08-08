@@ -17,6 +17,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - HLS playlist rewriting and segment proxying
 - Size/count-based cache cleanup with physical file deletion
 - Stable cache identity independent of signed URLs
+- Opaque native source registration and signed-URL refresh primitives
 - Upstream host allowlist and private-address rejection
 - Pure-Rust TLS with bundled WebPKI roots for consistent mobile builds
 - Localhost-only HTTP/1.1 listener (HTTP and HTTPS origins are supported)

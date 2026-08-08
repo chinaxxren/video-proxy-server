@@ -293,4 +293,8 @@ ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前�
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、iOS XCFramework/Swift、Android JNI/AAR 和鸿蒙 N-API/HAR 打包。不透明请求注册和来源刷新回调合同仍未实现，三端均尚未完成真实播放器真机验证。本文档是剩余移动 SDK 工作的验收合同。
+当前仓库已经提供 create/start/stop/destroy C ABI，以及
+`proxy_source_register`、`proxy_source_refresh`、`proxy_source_remove`。这些 API
+将 signed URL 保留在 Core 内部，只返回不透明 ID。平台产物包括 iOS XCFramework/Swift、
+Android JNI/AAR 和鸿蒙 N-API/HAR。HTTP `/media/<id>` 路由和刷新回调调度是下一步
+Core 集成工作，三端均尚未完成真实播放器真机验证。本文档是剩余移动 SDK 工作的验收合同。

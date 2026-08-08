@@ -17,6 +17,7 @@
 - HLS 播放列表重写和分片代理
 - 基于容量和文件数量的缓存清理，并真实删除磁盘文件
 - 不受 signed URL 变化影响的稳定缓存身份
+- 原生 Adapter 使用的不透明来源注册和 signed URL 刷新基础接口
 - 上游域名白名单和私网地址拦截
 - 使用内置 WebPKI 根证书的纯 Rust TLS，保证移动端构建一致性
 - 仅监听 localhost 的 HTTP/1.1 服务（支持 HTTP 和 HTTPS 上游）

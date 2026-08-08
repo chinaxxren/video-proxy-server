@@ -18,6 +18,9 @@ ProxyServerHandle *proxy_server_create_with_hosts(
 uint16_t proxy_server_start(ProxyServerHandle *handle);
 void proxy_server_stop(ProxyServerHandle *handle);
 void proxy_server_destroy(ProxyServerHandle *handle);
+uint64_t proxy_source_register(ProxyServerHandle *handle, const char *identity, const char *url);
+uint8_t proxy_source_refresh(ProxyServerHandle *handle, uint64_t source_id, const char *url);
+uint8_t proxy_source_remove(ProxyServerHandle *handle, uint64_t source_id);
 
 #ifdef __cplusplus
 }

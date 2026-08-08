@@ -4,6 +4,7 @@
 //! the returned handle remains valid until `proxy_server_destroy` is called.
 
 use crate::server::{ProxyConfig, ProxyServer};
+use crate::source_registry::SourceRegistry;
 use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 use std::ptr;
@@ -14,6 +15,7 @@ pub struct ProxyServerHandle {
     config: Mutex<Option<ProxyConfig>>,
     server: Arc<Mutex<Option<Arc<ProxyServer>>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    pub(crate) sources: SourceRegistry,
 }
 
 /// # Safety
@@ -90,6 +92,7 @@ fn create_handle(
         config: Mutex::new(Some(config)),
         server: Arc::new(Mutex::new(None)),
         thread: Mutex::new(None),
+        sources: SourceRegistry::default(),
     }))
 }
 
@@ -190,6 +193,66 @@ pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
     };
 }
 
+/// Registers a source and returns an opaque process-local ID. The URL is copied
+/// into Core memory and is never returned to the caller.
+///
+/// # Safety
+///
+/// `handle` must be a live handle returned by a create function. `identity` and
+/// `url` must point to immutable NUL-terminated strings for this call.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_source_register(
+    handle: *mut ProxyServerHandle,
+    identity: *const c_char,
+    url: *const c_char,
+) -> u64 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let (Some(identity), Some(url)) = (read_string(identity), read_string(url)) else {
+        return 0;
+    };
+    handle.sources.register(&identity, &url).unwrap_or(0)
+}
+
+#[no_mangle]
+/// Replaces the current URL for an existing opaque source ID.
+///
+/// # Safety
+///
+/// `handle` must be live and `url` must point to an immutable NUL-terminated
+/// string for this call.
+pub unsafe extern "C" fn proxy_source_refresh(
+    handle: *mut ProxyServerHandle,
+    source_id: u64,
+    url: *const c_char,
+) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let Some(url) = read_string(url) else {
+        return 0;
+    };
+    handle
+        .sources
+        .refresh(source_id, &url)
+        .map(|_| 1)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+/// Removes a source ID. Repeated removal is safe and returns zero.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function.
+pub unsafe extern "C" fn proxy_source_remove(handle: *mut ProxyServerHandle, source_id: u64) -> u8 {
+    handle
+        .as_ref()
+        .map(|handle| u8::from(handle.sources.remove(source_id)))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +298,37 @@ mod tests {
                 ["media.example.com", "cdn.example.com"]
             );
             drop(config);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ffi_source_registration_refresh_and_remove_are_opaque_and_validated() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let identity = CString::new("asset-1").unwrap();
+        let source = CString::new("https://media.example/a.mp4?token=secret").unwrap();
+        let rotated = CString::new("https://media.example/a.mp4?token=rotated").unwrap();
+        let invalid = CString::new("file:///tmp/a").unwrap();
+        unsafe {
+            let handle = proxy_server_create_with_hosts(
+                0,
+                path.as_ptr(),
+                CString::new("media.example").unwrap().as_ptr(),
+            );
+            assert!(!handle.is_null());
+            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
+            assert_ne!(id, 0);
+            assert!(!id.to_string().contains("secret"));
+            assert_eq!(proxy_source_refresh(handle, id, rotated.as_ptr()), 1);
+            assert_eq!(proxy_source_refresh(handle, 999, rotated.as_ptr()), 0);
+            assert_eq!(proxy_source_refresh(handle, id, invalid.as_ptr()), 0);
+            assert_eq!(proxy_source_remove(handle, id), 1);
+            assert_eq!(proxy_source_remove(handle, id), 0);
+            assert_eq!(
+                proxy_source_register(handle, ptr::null(), source.as_ptr()),
+                0
+            );
             proxy_server_destroy(handle);
         }
     }

@@ -7,6 +7,7 @@ pub mod hls;
 pub mod http_types;
 pub mod request_handler;
 pub mod server;
+pub mod source_registry;
 pub mod storage;
 pub mod utils;
 

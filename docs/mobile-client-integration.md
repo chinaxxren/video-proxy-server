@@ -299,4 +299,9 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR packaging. Opaque request registration/source refresh callbacks are still missing, and no platform has real-player device validation yet. Treat this document as the acceptance contract for the remaining mobile SDK work.
+The repository now exposes a C ABI with create/start/stop/destroy plus
+`proxy_source_register`, `proxy_source_refresh`, and `proxy_source_remove`. These
+APIs keep signed URLs inside Core and return only opaque IDs. The platform
+packages are iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR.
+The HTTP `/media/<id>` routing and refresh callback dispatch are the next Core
+integration step; no platform has real-player device validation yet.
