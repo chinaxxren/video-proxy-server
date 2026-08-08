@@ -49,6 +49,9 @@ peer discovery。Host 必须明确确认内容授权，并提供稳定 content I
 SHA-256 和逐片 SHA-256 清单。Core 会先验证每个分片，再返回其中的字节。项目没有合法
 P2P 来源时应保持该 feature 关闭。
 
+清单、C 回调、生命周期、播放 URL 和验收合同参见
+[可选 P2P 客户端接入](docs/p2p-client-integration.zh-CN.md)。
+
 ### 依赖安全
 
 CI 会在每次 push 和 pull request 时运行 RustSec 审计。本地可用以下命令复现：

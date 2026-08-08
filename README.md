@@ -51,6 +51,9 @@ length, full-content SHA-256, and a per-piece SHA-256 manifest. Core verifies
 every supplied piece before returning bytes. Keep the feature disabled when the
 application has no authorized P2P source.
 
+See [Optional P2P Client Integration](docs/p2p-client-integration.md) for the
+manifest, C callback, lifecycle, playback URL, and acceptance contract.
+
 ### Dependency security
 
 CI runs the RustSec audit on every push and pull request. The same checks can be
