@@ -86,6 +86,13 @@ impl ProxyError {
             error => error,
         }
     }
+
+    pub fn expired_source_id(&self) -> Option<u64> {
+        match self {
+            ProxyError::UpstreamAuthorizationExpired(source_id) => *source_id,
+            _ => None,
+        }
+    }
 }
 
 impl From<hyper::Error> for ProxyError {
@@ -202,5 +209,11 @@ mod tests {
             error,
             ProxyError::UpstreamAuthorizationExpired(Some(42))
         ));
+        assert_eq!(error.expired_source_id(), Some(42));
+        assert_eq!(
+            ProxyError::UpstreamAuthorizationExpired(None).expired_source_id(),
+            None
+        );
+        assert_eq!(ProxyError::Network("x".into()).expired_source_id(), None);
     }
 }
