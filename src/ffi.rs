@@ -258,6 +258,7 @@ pub unsafe extern "C" fn proxy_source_remove(handle: *mut ProxyServerHandle, sou
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::io::{Read, Write};
 
     #[test]
     fn ffi_lifecycle_uses_dynamic_port_and_rejects_repeated_start() {
@@ -330,6 +331,33 @@ mod tests {
                 proxy_source_register(handle, ptr::null(), source.as_ptr()),
                 0
             );
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ffi_registered_id_is_visible_to_running_http_server() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let identity = CString::new("asset-ffi-route").unwrap();
+        let source = CString::new("https://media.example/video.mp4?token=secret").unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert!(!handle.is_null());
+            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
+            assert_ne!(id, 0);
+            let port = proxy_server_start(handle);
+            assert_ne!(port, 0);
+
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "GET /media/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
             proxy_server_destroy(handle);
         }
     }
