@@ -6,7 +6,7 @@
 use crate::utils::error::{ProxyError, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use url::Url;
 
 const MAX_REGISTERED_SOURCES: usize = 10_000;
@@ -23,6 +23,7 @@ pub struct SourceRegistry {
     next_id: Arc<AtomicU64>,
     entries: Arc<RwLock<HashMap<u64, RegisteredSource>>>,
     refresh_provider: Arc<RwLock<Option<RefreshProvider>>>,
+    refresh_locks: Arc<Mutex<HashMap<u64, Arc<Mutex<()>>>>>,
 }
 
 pub type RefreshProvider = Arc<dyn Fn(u64) -> Result<String> + Send + Sync>;
@@ -33,6 +34,7 @@ impl Default for SourceRegistry {
             next_id: Arc::new(AtomicU64::new(1)),
             entries: Arc::new(RwLock::new(HashMap::new())),
             refresh_provider: Arc::new(RwLock::new(None)),
+            refresh_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -130,8 +132,32 @@ impl SourceRegistry {
     }
 
     pub fn refresh_from_provider(&self, id: u64) -> Result<()> {
+        let expected_url = self
+            .resolve(id)
+            .ok_or_else(|| ProxyError::Request("来源 ID 不存在".to_string()))?
+            .url;
+        self.refresh_from_provider_if_current(id, &expected_url)
+    }
+
+    pub fn refresh_from_provider_if_current(&self, id: u64, expected_url: &str) -> Result<()> {
         if self.resolve(id).is_none() {
             return Err(ProxyError::Request("来源 ID 不存在".to_string()));
+        }
+        let lock = self
+            .refresh_locks
+            .lock()
+            .map_err(|_| ProxyError::Request("来源刷新锁不可用".to_string()))?
+            .entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock
+            .lock()
+            .map_err(|_| ProxyError::Request("来源刷新锁不可用".to_string()))?;
+        if self
+            .resolve(id)
+            .is_some_and(|source| source.url != expected_url)
+        {
+            return Ok(());
         }
         let provider = self
             .refresh_provider
@@ -245,6 +271,36 @@ mod tests {
             .unwrap();
         assert!(registry.refresh_from_provider(id).is_err());
         assert!(registry.resolve(id).unwrap().url.ends_with("token=old"));
+    }
+
+    #[test]
+    fn concurrent_provider_refresh_is_single_flight() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let registry = SourceRegistry::default();
+        let old = "https://media.example/a.mp4?token=old";
+        let id = registry.register("asset", old).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = calls.clone();
+        registry
+            .set_refresh_provider(Some(Arc::new(move |_| {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok("https://media.example/a.mp4?token=new".to_string())
+            })))
+            .unwrap();
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = registry.clone();
+                std::thread::spawn(move || {
+                    registry.refresh_from_provider_if_current(id, old).unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.resolve(id).unwrap().url.ends_with("token=new"));
     }
 
     #[test]
