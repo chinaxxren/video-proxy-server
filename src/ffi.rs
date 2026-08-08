@@ -315,6 +315,15 @@ mod tests {
         piece.len()
     }
 
+    #[cfg(feature = "p2p")]
+    fn raw_http(port: u16, request: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
     #[test]
     fn ffi_lifecycle_uses_dynamic_port_and_rejects_repeated_start() {
         let cache = tempfile::tempdir().unwrap();
@@ -391,22 +400,48 @@ mod tests {
             assert_ne!(port, 0);
             let server = (*handle).server.lock().unwrap().clone().unwrap();
             assert_eq!(server.p2p_registry().read_range(id, 0, 3).unwrap(), b"data");
-            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            write!(
-                stream,
-                "GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-2\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            let mut response = Vec::new();
-            stream.read_to_end(&mut response).unwrap();
-            let response = String::from_utf8(response).unwrap();
+            let response = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-2\r\nConnection: close\r\n\r\n"),
+            );
             assert!(response.starts_with("HTTP/1.1 206"), "{response}");
             assert!(response
                 .to_ascii_lowercase()
                 .contains("content-range: bytes 1-2/4"));
             assert!(response.ends_with("at"));
+
+            let full = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(full.starts_with("HTTP/1.1 200"));
+            assert!(full.ends_with("data"));
+
+            let suffix = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=-2\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(suffix.starts_with("HTTP/1.1 206"));
+            assert!(suffix.ends_with("ta"));
+
+            let head = raw_http(
+                port,
+                &format!("HEAD /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(head.starts_with("HTTP/1.1 200"));
+            assert!(!head.ends_with("data"));
+            let invalid_range = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=8-9\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(invalid_range.starts_with("HTTP/1.1 416"));
             assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             assert_eq!(proxy_p2p_source_remove(handle, id), 0);
+            let removed = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(removed.starts_with("HTTP/1.1 400"));
             proxy_server_destroy(handle);
         }
     }
