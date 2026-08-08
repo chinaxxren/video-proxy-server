@@ -156,7 +156,17 @@ let playbackURL = try cache.makePlaybackURL(source: source, identity: identity)
 let player = AVPlayer(url: playbackURL)
 ```
 
-iOS work items:
+iOS package contents:
+
+- `MediaProxyCacheCore.xcframework` with device ARM64 and Simulator ARM64 slices;
+- `Sources/MediaProxyCache.swift`, which owns and releases the native handle;
+- an importable `MediaProxyCacheCore` Clang module in every slice.
+
+Build it with `./scripts/build-ios-xcframework.sh`. Add the XCFramework and Swift
+source file to the application target, then use the API shown above. The app must
+provide a file URL for its cache directory and an upstream host allowlist.
+
+Remaining iOS validation work:
 
 - build device and Simulator slices;
 - expose an exception-free C ABI with explicit error codes and owned buffers;
@@ -267,4 +277,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts and ownership-wrapper templates. It does not yet provide production JNI/AAR, XCFramework, or N-API/HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform packages have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also builds an iOS XCFramework with a Swift ownership wrapper. It does not yet provide production JNI/AAR or N-API/HAR packages, and the opaque request registry/source-refresh callback contract is still missing. The iOS artifact has structural build validation, not AVPlayer device validation. Treat this document as the acceptance contract for the remaining mobile SDK work.

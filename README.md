@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle is available; production JNI/AAR, XCFramework, and N-API/HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle and iOS XCFramework/Swift adapter packaging are available; production JNI/AAR and N-API/HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -134,8 +134,8 @@ The crate also builds `staticlib` and `cdylib` artifacts. Mobile adapters can
 include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
 server with a host-owned cache directory, start it on a fixed port or port `0`,
 and release it with `stop`/`destroy`. This is a preview ABI. Build and release
-packaging scripts are provided; platform-specific JNI, Swift, and N-API wrappers
-still require integration in the host projects.
+packaging scripts are provided. iOS releases include an XCFramework and Swift
+ownership wrapper; JNI and N-API wrappers still require integration.
 
 Real upstream access must use `proxy_server_create_with_hosts` and pass the
 comma-separated host allowlist. The simpler `proxy_server_create` intentionally
@@ -151,14 +151,22 @@ PLATFORM=macos ./scripts/build-mobile.sh dist/desktop
 PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
 ```
 
+Build the directly importable iOS SDK on macOS with Xcode installed:
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+./scripts/build-ios-xcframework.sh
+```
+
 It requires the corresponding Rust targets and copies the C header beside each
 platform's native artifacts. Android Kotlin packaging should consume the
 generated `.so` files through an Android library module.
 
 Adapter ownership templates are under `platform/android`, `platform/ios`, and
-`platform/harmony`. They are API contracts only until each host project links
-the generated native library and supplies its JNI, Swift module map, or N-API
-bridge.
+`platform/harmony`. The iOS release additionally contains
+`MediaProxyCacheCore.xcframework`, its Clang module map, and
+`Sources/MediaProxyCache.swift`. Android and HarmonyOS still need JNI and N-API
+bridges.
 
 The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
 targets; Windows uses the GNU x86_64 target by default and requires a MinGW
@@ -301,7 +309,8 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- No Android JNI, iOS XCFramework, or HarmonyOS N-API adapter
+- No Android JNI/AAR or HarmonyOS N-API/HAR adapter
+- The iOS XCFramework has CI and local structural validation, but not yet AVPlayer device validation
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed

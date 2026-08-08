@@ -16,12 +16,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Test Swift adapter lifecycle
+        run: ./scripts/test-ios-adapter.sh
       - name: Build iOS libraries
         run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
+      - name: Build iOS XCFramework and Swift adapter
+        run: ./scripts/build-ios-xcframework.sh dist/mobile dist/ios-sdk
       - name: Archive iOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz -C dist/mobile ios ios-sim include
-          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios.sha256
+          ditto -c -k --norsrc --keepParent dist/ios-sdk media-proxy-cache-${GITHUB_REF_NAME}-ios.zip
+          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios.zip > media-proxy-cache-${GITHUB_REF_NAME}-ios.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: media-proxy-cache-${{ github.ref_name }}-ios

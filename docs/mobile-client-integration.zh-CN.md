@@ -155,7 +155,16 @@ let playbackURL = try cache.makePlaybackURL(source: source, identity: identity)
 let player = AVPlayer(url: playbackURL)
 ```
 
-iOS 工作项：
+iOS 产物内容：
+
+- 同时包含 ARM64 真机与 ARM64 模拟器 slice 的 `MediaProxyCacheCore.xcframework`；
+- 负责持有和释放原生句柄的 `Sources/MediaProxyCache.swift`；
+- 每个 slice 都带可直接 `import MediaProxyCacheCore` 的 Clang module。
+
+执行 `./scripts/build-ios-xcframework.sh` 构建。将 XCFramework 和 Swift 源文件加入
+应用 target 后，即可使用上面的接口。应用必须提供文件类型的缓存目录 URL 和上游域名白名单。
+
+iOS 剩余验证工作：
 
 - 构建真机和模拟器 slices；
 - 提供不会跨边界抛异常的 C ABI、明确错误码和内存所有权；
@@ -266,4 +275,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、构建/发布脚本以及所有权封装模板。尚未提供生产可用的 JNI/AAR、XCFramework 或 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台包已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入，以及带 Swift 所有权封装的 iOS XCFramework。尚未提供生产可用的 JNI/AAR 或 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。iOS 产物仅完成构建结构验证，尚未完成 AVPlayer 真机验证。本文档是剩余移动 SDK 工作的验收合同。

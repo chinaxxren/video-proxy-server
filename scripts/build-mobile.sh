@@ -6,8 +6,8 @@ OUT_DIR="${1:-${ROOT_DIR}/dist/mobile}"
 PROFILE="${PROFILE:-release}"
 
 cd "$ROOT_DIR"
-mkdir -p "$OUT_DIR/include"
-cp include/media_proxy_cache.h "$OUT_DIR/include/"
+  mkdir -p "$OUT_DIR/include"
+  cp include/media_proxy_cache.h include/module.modulemap "$OUT_DIR/include/"
 
 build_target() {
   local platform="$1" target="$2" crate_type="${3:-}"
