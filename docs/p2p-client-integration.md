@@ -27,6 +27,10 @@ P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
 P2P_ENABLED=1 ./scripts/package-mobile.sh
 ```
 
+In GitHub Actions, run the `mobile-native` workflow manually and set
+`include_p2p` to true. Tag-triggered releases always build the default core
+variant. Optional artifacts include `-p2p` in their names.
+
 ## Authorization Manifest
 
 Pass UTF-8 JSON to `proxy_p2p_source_register`:

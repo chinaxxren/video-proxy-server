@@ -25,6 +25,9 @@ P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
 P2P_ENABLED=1 ./scripts/package-mobile.sh
 ```
 
+在 GitHub Actions 中手动运行 `mobile-native`，并将 `include_p2p` 设为 true。Tag 自动
+发布始终构建默认核心包；可选产物名称会包含 `-p2p`。
+
 ## 授权清单
 
 向 `proxy_p2p_source_register` 传入 UTF-8 JSON：

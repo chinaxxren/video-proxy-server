@@ -2,6 +2,12 @@ name: mobile-native
 
 on:
   workflow_dispatch:
+    inputs:
+      include_p2p:
+        description: Build the explicitly optional P2P variant
+        required: false
+        default: false
+        type: boolean
   push:
     tags: ["v*"]
 
@@ -11,6 +17,9 @@ permissions:
 jobs:
   ios:
     runs-on: macos-14
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -20,19 +29,22 @@ jobs:
         run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
       - name: Archive iOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz -C dist/mobile ios ios-sim include
-          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz -C dist/mobile ios ios-sim include build-features.txt
+          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-ios
-          path: media-proxy-cache-${{ github.ref_name }}-ios.*
+          name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-ios.*
+          files: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
 
   android:
     runs-on: ubuntu-22.04
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Android NDK
@@ -57,20 +69,23 @@ jobs:
           PLATFORM=android ./scripts/build-mobile.sh dist/mobile
       - name: Archive Android artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz -C dist/mobile android include
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-android
-          path: media-proxy-cache-${{ github.ref_name }}-android.*
+          name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-android.*
+          files: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
 
   harmony:
     if: vars.ENABLE_HARMONY_BUILD == 'true'
     runs-on: ubuntu-22.04
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -93,13 +108,13 @@ jobs:
           PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
       - name: Archive HarmonyOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz -C dist/mobile harmony include
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz -C dist/mobile harmony include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-harmony
-          path: media-proxy-cache-${{ github.ref_name }}-harmony.*
+          name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-harmony.*
+          files: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*
