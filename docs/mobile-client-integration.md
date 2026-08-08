@@ -39,7 +39,7 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 Expected architecture targets:
 
 - iOS device: `aarch64-apple-ios`
-- iOS Simulator: `aarch64-apple-ios-sim` and, if required, `x86_64-apple-ios`
+- iOS Simulator: `aarch64-apple-ios-sim` and `x86_64-apple-ios`
 - Android: `arm64-v8a`, with `armeabi-v7a` and `x86_64` only when product support requires them
 - HarmonyOS: `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`
 

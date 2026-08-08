@@ -39,7 +39,7 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 建议支持的架构：
 
 - iOS 真机：`aarch64-apple-ios`
-- iOS 模拟器：`aarch64-apple-ios-sim`，需要时支持 `x86_64-apple-ios`
+- iOS 模拟器：`aarch64-apple-ios-sim` 和 `x86_64-apple-ios`
 - Android：优先 `arm64-v8a`；仅在产品需要时增加 `armeabi-v7a` 和 `x86_64`
 - 鸿蒙：`aarch64-unknown-linux-ohos` 和 `armv7-unknown-linux-ohos`
 
