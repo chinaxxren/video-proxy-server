@@ -31,6 +31,8 @@ P2P-enabled native builds fail if the resulting library does not export all
 three P2P ABI functions: register, complete verification, and remove.
 Packaging also requires `build-features.txt` to match `P2P_ENABLED`, preventing
 default libraries from being mislabeled as an optional P2P release (or vice versa).
+The package step also rejects inputs missing the public C header or all native
+proxy library artifacts.
 
 In GitHub Actions, run the `mobile-native` workflow manually and set
 `include_p2p` to true. Tag-triggered releases always build the default core

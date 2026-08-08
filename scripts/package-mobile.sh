@@ -17,6 +17,20 @@ if ! grep -Fqx "$EXPECTED_FEATURE" "$FEATURE_MARKER"; then
   echo "Build feature marker does not match requested package: expected $EXPECTED_FEATURE" >&2
   exit 1
 fi
+HEADER="$INPUT_DIR/include/media_proxy_cache.h"
+test -f "$HEADER" || { echo "Missing public C header: $HEADER" >&2; exit 1; }
+NATIVE_ARTIFACT="$(find "$INPUT_DIR" -type f \( \
+  -name 'libproxy_server.a' -o \
+  -name 'libproxy_server.dylib' -o \
+  -name 'libproxy_server.so' -o \
+  -name 'proxy_server.dll' -o \
+  -name 'proxy_server.dll.a' -o \
+  -name 'proxy_server.lib' \
+\) -print -quit)"
+test -n "$NATIVE_ARTIFACT" || {
+  echo "No native proxy library found in $INPUT_DIR" >&2
+  exit 1
+}
 mkdir -p "$OUTPUT_DIR"
 P2P_SUFFIX=""
 if [[ "$P2P_ENABLED" == "1" ]]; then
