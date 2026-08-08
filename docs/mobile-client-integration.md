@@ -153,7 +153,8 @@ The build script packages the Rust static libraries, C header, and module map as
 `MediaProxyCache.xcframework`. A production Swift wrapper is still required.
 The iOS archive also includes `adapter/MediaProxyCache.swift` as an ownership
 wrapper template. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
-runs `swiftc -typecheck` against the packaged header and module map.
+runs `swiftc -typecheck` against the packaged header and module map. The template
+serializes handle access so concurrent start, stop, and close calls cannot race.
 
 Recommended shape:
 

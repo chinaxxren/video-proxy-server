@@ -151,7 +151,8 @@ refreshSource(identity, reason) -> new Source
 `MediaProxyCache.xcframework`；生产级 Swift 封装仍需实现。
 iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装模板。
 模板通过 `MediaProxyCacheCore` 导入 C ABI；每次 iOS 构建都会针对打包的头文件和
-module map 执行 `swiftc -typecheck`。
+module map 执行 `swiftc -typecheck`。模板会串行化 handle 访问，避免并发调用 start、
+stop 和 close 产生竞态。
 
 建议接口形态：
 
