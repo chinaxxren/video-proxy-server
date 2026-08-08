@@ -110,16 +110,26 @@ impl SourceRegistry {
     }
 
     pub fn remove(&self, id: u64) -> bool {
-        self.entries
+        let removed = self
+            .entries
             .write()
             .ok()
             .and_then(|mut entries| entries.remove(&id))
-            .is_some()
+            .is_some();
+        if removed {
+            if let Ok(mut locks) = self.refresh_locks.lock() {
+                locks.remove(&id);
+            }
+        }
+        removed
     }
 
     pub fn clear(&self) {
         if let Ok(mut entries) = self.entries.write() {
             entries.clear();
+        }
+        if let Ok(mut locks) = self.refresh_locks.lock() {
+            locks.clear();
         }
     }
 

@@ -49,8 +49,13 @@ impl RequestHandler {
         let response = match self.execute_request(is_head, &data_request).await {
             Err(error) if error.expired_source_id().is_some() => {
                 let id = error.expired_source_id().unwrap();
-                self.source_registry
-                    .refresh_from_provider_if_current(id, data_request.get_url())?;
+                let registry = self.source_registry.clone();
+                let expected_url = data_request.get_url().to_string();
+                tokio::task::spawn_blocking(move || {
+                    registry.refresh_from_provider_if_current(id, &expected_url)
+                })
+                .await
+                .map_err(|_| ProxyError::Request("来源刷新任务失败".to_string()))??;
                 let (retry_req, retry_id) = resolve_media_route(req, &self.source_registry)?;
                 let retry = DataRequest::with_source_id(&retry_req, retry_id)?;
                 self.execute_request(is_head, &retry).await?
