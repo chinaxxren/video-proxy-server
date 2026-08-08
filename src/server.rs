@@ -4,6 +4,7 @@ use crate::hls::DefaultHlsHandler;
 use crate::http_types::{empty_body, full_body, AppBody};
 use crate::log_info;
 use crate::request_handler::RequestHandler;
+use crate::source_registry::SourceRegistry;
 use crate::storage::StorageManagerConfig;
 use crate::utils::error::{ProxyError, Result};
 
@@ -99,6 +100,7 @@ pub struct ProxyServer {
     request_header_timeout: Duration,
     max_request_headers: usize,
     background_tasks: Arc<BackgroundTasks>,
+    source_registry: SourceRegistry,
 }
 
 impl ProxyServer {
@@ -147,10 +149,12 @@ impl ProxyServer {
         let hls_handler = Arc::new(DefaultHlsHandler::new(cache_dir, policy));
 
         // 创建请求处理器
+        let source_registry = SourceRegistry::default();
         let handler = Arc::new(RequestHandler::with_limit(
             source_manager,
             hls_handler,
             config.max_concurrent_requests,
+            source_registry.clone(),
         ));
 
         let (ready, _) = watch::channel(0);
@@ -165,7 +169,12 @@ impl ProxyServer {
             request_header_timeout: config.request_header_timeout,
             max_request_headers: config.max_request_headers,
             background_tasks,
+            source_registry,
         }
+    }
+
+    pub fn source_registry(&self) -> SourceRegistry {
+        self.source_registry.clone()
     }
 
     /// 发送优雅停止信号。`start()` 会完成所有进行中的请求后关闭监听器。

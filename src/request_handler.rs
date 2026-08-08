@@ -2,6 +2,7 @@ use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
 use crate::http_types::{empty_body, full_body, AppBody};
+use crate::source_registry::SourceRegistry;
 use crate::utils::error::{ProxyError, Result};
 use http_body_util::BodyExt;
 use hyper::header::{HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE};
@@ -15,6 +16,7 @@ pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
     request_limit: Arc<Semaphore>,
+    source_registry: SourceRegistry,
 }
 
 impl RequestHandler {
@@ -28,11 +30,13 @@ impl RequestHandler {
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
         max_concurrent_requests: usize,
+        source_registry: SourceRegistry,
     ) -> Self {
         Self {
             source_manager,
             hls_handler,
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
+            source_registry,
         }
     }
 
@@ -40,6 +44,7 @@ impl RequestHandler {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
+        let req = resolve_media_route(req, &self.source_registry)?;
         let data_request = DataRequest::new(&req)?;
 
         let response = match (is_head, data_request.get_type()) {
@@ -74,6 +79,37 @@ impl RequestHandler {
         // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
         Ok(guard_response(response, permit))
     }
+}
+
+/// Resolve the opaque `/media/<id>` route without exposing the signed source URL
+/// in the client-visible URI. Legacy `/proxy` and header routes remain supported.
+fn resolve_media_route<B>(req: Request<B>, registry: &SourceRegistry) -> Result<Request<B>> {
+    let path = req.uri().path();
+    let Some(raw_id) = path.strip_prefix("/media/") else {
+        return Ok(req);
+    };
+    if raw_id.is_empty() || raw_id.contains('/') || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ProxyError::Request("媒体来源 ID 无效".to_string()));
+    }
+    let id = raw_id
+        .parse::<u64>()
+        .map_err(|_| ProxyError::Request("媒体来源 ID 无效".to_string()))?;
+    let source = registry
+        .resolve(id)
+        .ok_or_else(|| ProxyError::Request("媒体来源不存在".to_string()))?;
+    let mut builder = Request::builder()
+        .method(req.method())
+        .uri(req.uri().clone());
+    for (name, value) in req.headers() {
+        if name != "X-Original-Url" {
+            builder = builder.header(name, value);
+        }
+    }
+    builder = builder.header("X-Original-Url", source.url);
+    let body = req.into_body();
+    builder
+        .body(body)
+        .map_err(|_| ProxyError::Request("请求构造失败".to_string()))
 }
 
 /// 客户端没发 `Range` 时把 206 改写成 200。
@@ -162,6 +198,7 @@ fn validate_method(method: &Method) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source_registry::SourceRegistry;
 
     #[test]
     fn get_and_head_are_accepted() {
@@ -171,6 +208,33 @@ mod tests {
             let error = validate_method(&method).unwrap_err();
             assert!(matches!(error, ProxyError::MethodNotAllowed));
             assert_eq!(error.status_code(), hyper::StatusCode::METHOD_NOT_ALLOWED);
+        }
+    }
+
+    #[test]
+    fn media_route_resolves_opaque_id_without_client_url() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/a.mp4?token=secret")
+            .unwrap();
+        let request = Request::builder()
+            .uri(format!("/media/{id}"))
+            .body(())
+            .unwrap();
+        let resolved = resolve_media_route(request, &registry).unwrap();
+        assert_eq!(resolved.uri().path(), format!("/media/{id}"));
+        assert_eq!(
+            resolved.headers().get("X-Original-Url").unwrap(),
+            "https://media.example/a.mp4?token=secret"
+        );
+    }
+
+    #[test]
+    fn media_route_rejects_unknown_and_malformed_ids() {
+        let registry = SourceRegistry::default();
+        for path in ["/media/0", "/media/abc", "/media/1/child", "/media/"] {
+            let request = Request::builder().uri(path).body(()).unwrap();
+            assert!(resolve_media_route(request, &registry).is_err());
         }
     }
 
