@@ -242,4 +242,30 @@ mod tests {
             .refresh(id, "https://media.example/video-new.mp4")
             .is_err());
     }
+
+    #[test]
+    fn concurrent_refresh_keeps_identity_and_valid_url() {
+        let registry = SourceRegistry::default();
+        let id = registry
+            .register("asset", "https://media.example/video-0.mp4")
+            .unwrap();
+        let mut workers = Vec::new();
+        for index in 0..16 {
+            let registry = registry.clone();
+            workers.push(std::thread::spawn(move || {
+                registry
+                    .refresh(
+                        id,
+                        &format!("https://media.example/video-{index}.mp4?token={index}"),
+                    )
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let source = registry.resolve(id).unwrap();
+        assert_eq!(source.identity, "asset");
+        assert!(source.url.starts_with("https://media.example/video-"));
+    }
 }
