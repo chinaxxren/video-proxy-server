@@ -90,7 +90,9 @@ all pieces and the complete content digest. It returns `1` on success and `0`
 on any provider or integrity failure; the operation may fetch the entire asset.
 If the complete digest mismatches, Core permanently invalidates every registered
 source sharing that manifest cache identity; subsequent Range requests fail and
-the Host must register a corrected authorized source.
+the Host must register a corrected authorized source. The invalidation survives
+Core restart for that identity; explicit removal of its final registration
+purges the directory and its marker.
 
 ## Playback
 

@@ -248,6 +248,14 @@ impl P2pSourceRegistry {
                 manifest_cache_key(&manifest)
             ))
         });
+        if disk_dir
+            .as_ref()
+            .is_some_and(|directory| directory.join(".invalid").exists())
+        {
+            return Err(ProxyError::Request(
+                "P2P manifest identity was previously invalidated".to_string(),
+            ));
+        }
         entries.insert(
             id,
             RegisteredP2pSource {
@@ -336,6 +344,7 @@ impl P2pSourceRegistry {
         if actual != source_digest {
             invalid.store(true, Ordering::Release);
             if let Some(directory) = invalid_directory {
+                persist_invalid_manifest(&directory);
                 if let Ok(entries) = self.entries.read() {
                     for other in entries.values() {
                         if other.disk_dir.as_ref() == Some(&directory) {
@@ -391,6 +400,12 @@ impl P2pSourceRegistry {
         } else {
             false
         }
+    }
+}
+
+fn persist_invalid_manifest(directory: &Path) {
+    if std::fs::create_dir_all(directory).is_ok() {
+        let _ = std::fs::write(directory.join(".invalid"), []);
     }
 }
 
@@ -1028,10 +1043,16 @@ mod tests {
         let first = registry
             .register(source.clone(), manifest.clone(), provider.clone())
             .unwrap();
-        let second = registry.register(source, manifest, provider).unwrap();
+        let second = registry
+            .register(source.clone(), manifest.clone(), provider.clone())
+            .unwrap();
         assert!(registry.verify_complete(first).is_err());
         assert!(registry.read_range(first, 0, 3).is_err());
         assert!(registry.read_range(second, 0, 3).is_err());
+        drop(registry);
+
+        let restarted = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        assert!(restarted.register(source, manifest, provider).is_err());
     }
 
     #[test]

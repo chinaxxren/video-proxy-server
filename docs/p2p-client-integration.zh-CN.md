@@ -77,7 +77,8 @@ Core 初始化时也会执行一次 P2P 淘汰，确保前一个进程留下的�
 Adapter 可在播放前调用 `proxy_p2p_source_verify_complete` 校验全部分片和完整内容摘要。
 成功返回 `1`，Provider 或完整性校验失败返回 `0`；该操作可能会获取整个资源。
 如果完整摘要不匹配，Core 会永久使共享该 manifest 缓存身份的全部已注册 source 失效，
-后续 Range 请求会失败；Host 必须注册修正后的授权 source。
+后续 Range 请求会失败；Host 必须注册修正后的授权 source。该失效标记会跨 Core 重启保留；
+显式移除其最后一个注册会清理目录及标记。
 
 ## 播放
 
