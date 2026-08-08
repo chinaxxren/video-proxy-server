@@ -21,6 +21,33 @@ mkdir -p "$OUT_DIR/include"
 cp include/media_proxy_cache.h "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
+verify_p2p_symbols() {
+  local artifact="$1" nm_tool
+  [[ "$P2P_ENABLED" == "1" ]] || return 0
+  if [[ -n "${NM:-}" ]]; then
+    nm_tool="$NM"
+  elif command -v llvm-nm >/dev/null 2>&1; then
+    nm_tool="$(command -v llvm-nm)"
+  else
+    nm_tool="$(command -v nm || true)"
+  fi
+  [[ -n "$nm_tool" ]] || { echo "No nm tool available to verify P2P ABI" >&2; return 1; }
+  local symbols
+  symbols="$("$nm_tool" -g "$artifact" 2>/dev/null)" || {
+    echo "Unable to inspect native symbols in $artifact" >&2
+    return 1
+  }
+  for symbol in \
+    proxy_p2p_source_register \
+    proxy_p2p_source_verify_complete \
+    proxy_p2p_source_remove; do
+    rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
+      echo "Missing P2P ABI symbol $symbol in $artifact" >&2
+      return 1
+    }
+  done
+}
+
 build_target() {
   local platform="$1" target="$2" crate_type="${3:-}"
   rustup target list --installed | rg -qx "$target" || {
@@ -42,6 +69,7 @@ build_target() {
     "target/$target/$PROFILE/proxy_server.dll.a" \
     "target/$target/$PROFILE/proxy_server.lib"; do
     if [[ -f "$artifact" ]]; then
+      verify_p2p_symbols "$artifact"
       cp "$artifact" "$OUT_DIR/$platform/$target/"
       copied=1
     fi
