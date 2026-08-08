@@ -162,6 +162,7 @@ impl ProxyServer {
                 max_cache_size: config.max_cache_bytes,
                 max_file_count: config.max_file_count,
                 cleanup_interval: config.cleanup_interval,
+                external_cache_dirs: vec![cache_dir.join("p2p")],
             },
             background_tasks.clone(),
         ));
