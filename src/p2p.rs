@@ -64,6 +64,7 @@ struct RegisteredP2pSource {
     manifest: P2pPieceManifest,
     provider: P2pPieceProvider,
     piece_cache: Arc<Mutex<VerifiedPieceCache>>,
+    piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Default)]
@@ -150,6 +151,7 @@ impl P2pSourceRegistry {
                 manifest,
                 provider,
                 piece_cache: Arc::new(Mutex::new(VerifiedPieceCache::default())),
+                piece_locks: Arc::new(Mutex::new(HashMap::new())),
             },
         );
         Ok(id)
@@ -166,8 +168,9 @@ impl P2pSourceRegistry {
         let manifest = entry.manifest.clone();
         let provider = entry.provider.clone();
         let cache = entry.piece_cache.clone();
+        let piece_locks = entry.piece_locks.clone();
         drop(entries);
-        let provider = cached_verified_provider(manifest.clone(), provider, cache);
+        let provider = cached_verified_provider(manifest.clone(), provider, cache, piece_locks);
         manifest.read_verified_range(start, end, &provider)
     }
 
@@ -183,8 +186,9 @@ impl P2pSourceRegistry {
         let manifest = entry.manifest.clone();
         let provider = entry.provider.clone();
         let cache = entry.piece_cache.clone();
+        let piece_locks = entry.piece_locks.clone();
         drop(entries);
-        let provider = cached_verified_provider(manifest.clone(), provider, cache);
+        let provider = cached_verified_provider(manifest.clone(), provider, cache, piece_locks);
 
         let mut hasher = Sha256::new();
         for index in 0..manifest.piece_sha256.len() {
@@ -222,8 +226,25 @@ fn cached_verified_provider(
     manifest: P2pPieceManifest,
     provider: P2pPieceProvider,
     cache: Arc<Mutex<VerifiedPieceCache>>,
+    piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
 ) -> P2pPieceProvider {
     Arc::new(move |index| {
+        if let Some(piece) = cache
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
+            .get(index)
+        {
+            return Ok(piece.as_ref().clone());
+        }
+        let piece_lock = piece_locks
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P piece locks unavailable".to_string()))?
+            .entry(index)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = piece_lock
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P piece lock unavailable".to_string()))?;
         if let Some(piece) = cache
             .lock()
             .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
@@ -627,6 +648,33 @@ mod tests {
         assert_eq!(registry.read_range(id, 0, 1).unwrap(), b"da");
         assert_eq!(registry.read_range(id, 2, 3).unwrap(), b"ta");
         assert!(registry.verify_complete(id).is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_ranges_fetch_each_piece_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let source =
+            AuthorizedP2pSource::new("asset", 4, &sha256_hex(b"data"), "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = calls.clone();
+        let provider: P2pPieceProvider = Arc::new(move |_| {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = registry.clone();
+                std::thread::spawn(move || registry.read_range(id, 0, 3).unwrap())
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), b"data");
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
