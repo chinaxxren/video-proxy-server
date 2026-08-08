@@ -1,6 +1,7 @@
 use super::{playlist_refresh_ttl, HlsHandler, HlsManager, PROXY_PREFIX};
 use crate::data_source::net_source::{shared_client_v1, SharedClientV1};
 use crate::log_info;
+use crate::source_registry::SourceRegistry;
 use crate::utils::error::{ProxyError, Result};
 use crate::utils::network_policy::NetworkPolicy;
 use crate::utils::percent_encoding::decode_component;
@@ -30,14 +31,20 @@ pub struct DefaultHlsHandler {
     /// m3u8 这条路径上的 DNS rebinding 防护是完全失效的。
     client: SharedClientV1,
     policy: Arc<NetworkPolicy>,
+    source_registry: SourceRegistry,
 }
 
 impl DefaultHlsHandler {
-    pub fn new(cache_dir: PathBuf, policy: Arc<NetworkPolicy>) -> Self {
+    pub fn new(
+        cache_dir: PathBuf,
+        policy: Arc<NetworkPolicy>,
+        source_registry: SourceRegistry,
+    ) -> Self {
         Self {
             manager: Arc::new(HlsManager::new(cache_dir)),
             client: shared_client_v1(),
             policy,
+            source_registry,
         }
     }
 
@@ -166,11 +173,35 @@ impl HlsHandler for DefaultHlsHandler {
 
         // 重写 m3u8 内容
         let rewritten = self.manager.rewrite_m3u8(&content, &base_url, "/proxy");
+        let rewritten = self.register_rewritten_sources(&rewritten)?;
         self.manager
             .cache_playlist_body(&clean_url, rewritten.clone(), playlist_refresh_ttl(&info))
             .await;
 
         Ok(rewritten)
+    }
+}
+
+impl DefaultHlsHandler {
+    fn register_rewritten_sources(&self, content: &str) -> Result<String> {
+        let mut out = String::with_capacity(content.len());
+        let mut rest = content;
+        while let Some(start) = rest.find("/proxy/") {
+            out.push_str(&rest[..start]);
+            let tail = &rest[start + "/proxy/".len()..];
+            let end = tail
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .unwrap_or(tail.len());
+            let encoded = &tail[..end];
+            let source_url = decode_component(encoded)
+                .map_err(|e| ProxyError::Request(format!("URL 解码失败: {}", e)))?;
+            let id = self.source_registry.register("hls", &source_url)?;
+            out.push_str("/media/");
+            out.push_str(&id.to_string());
+            rest = &tail[end..];
+        }
+        out.push_str(rest);
+        Ok(out)
     }
 }
 

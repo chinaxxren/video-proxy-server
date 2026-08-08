@@ -146,10 +146,14 @@ impl ProxyServer {
         ));
 
         // 创建 HLS 处理器
-        let hls_handler = Arc::new(DefaultHlsHandler::new(cache_dir, policy));
+        let source_registry = SourceRegistry::default();
+        let hls_handler = Arc::new(DefaultHlsHandler::new(
+            cache_dir,
+            policy,
+            source_registry.clone(),
+        ));
 
         // 创建请求处理器
-        let source_registry = SourceRegistry::default();
         let handler = Arc::new(RequestHandler::with_limit(
             source_manager,
             hls_handler,
