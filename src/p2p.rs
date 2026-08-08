@@ -6,14 +6,108 @@
 
 use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::RwLock;
 
 const SHA256_HEX_LENGTH: usize = 64;
 const MAX_CONTENT_ID_LENGTH: usize = 512;
 const MAX_AUTHORIZATION_LENGTH: usize = 2048;
 const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_P2P_SOURCES: usize = 1024;
 
 pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
+
+struct RegisteredP2pSource {
+    source: AuthorizedP2pSource,
+    manifest: P2pPieceManifest,
+    provider: P2pPieceProvider,
+}
+
+#[derive(Clone)]
+pub struct P2pSourceRegistry {
+    next_id: Arc<AtomicU64>,
+    entries: Arc<RwLock<HashMap<u64, RegisteredP2pSource>>>,
+}
+
+impl Default for P2pSourceRegistry {
+    fn default() -> Self {
+        Self {
+            next_id: Arc::new(AtomicU64::new(1)),
+            entries: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl P2pSourceRegistry {
+    pub fn register(
+        &self,
+        source: AuthorizedP2pSource,
+        manifest: P2pPieceManifest,
+        provider: P2pPieceProvider,
+    ) -> Result<u64> {
+        if source.content_length != manifest.content_length {
+            return Err(ProxyError::Request(
+                "P2P source and manifest lengths differ".to_string(),
+            ));
+        }
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| ProxyError::Storage("P2P registry unavailable".to_string()))?;
+        if entries.len() >= MAX_P2P_SOURCES {
+            return Err(ProxyError::Request(
+                "P2P source registry is full".to_string(),
+            ));
+        }
+        let id = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value != 0).then_some(value.wrapping_add(1).max(1))
+            })
+            .map_err(|_| ProxyError::Request("P2P source ID exhausted".to_string()))?;
+        entries.insert(
+            id,
+            RegisteredP2pSource {
+                source,
+                manifest,
+                provider,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn read_range(&self, id: u64, start: u64, end: u64) -> Result<Vec<u8>> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| ProxyError::Storage("P2P registry unavailable".to_string()))?;
+        let entry = entries
+            .get(&id)
+            .ok_or_else(|| ProxyError::Request("P2P source ID not found".to_string()))?;
+        let manifest = entry.manifest.clone();
+        let provider = entry.provider.clone();
+        drop(entries);
+        manifest.read_verified_range(start, end, &provider)
+    }
+
+    pub fn content_length(&self, id: u64) -> Option<u64> {
+        self.entries
+            .read()
+            .ok()?
+            .get(&id)
+            .map(|entry| entry.source.content_length)
+    }
+
+    pub fn remove(&self, id: u64) -> bool {
+        self.entries
+            .write()
+            .ok()
+            .and_then(|mut entries| entries.remove(&id))
+            .is_some()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedP2pSource {
@@ -264,5 +358,38 @@ mod tests {
         let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"good")]).unwrap();
         let provider: P2pPieceProvider = Arc::new(|_| Ok(b"evil".to_vec()));
         assert!(manifest.read_verified_range(0, 3, &provider).is_err());
+    }
+
+    #[test]
+    fn registry_returns_verified_ranges_by_opaque_id() {
+        let source = AuthorizedP2pSource::new("asset", 6, DIGEST, "license", true).unwrap();
+        let pieces = [b"abcd".to_vec(), b"ef".to_vec()];
+        let manifest =
+            P2pPieceManifest::new(6, 4, pieces.iter().map(|piece| sha256_hex(piece)).collect())
+                .unwrap();
+        let provider_pieces = pieces.clone();
+        let provider: P2pPieceProvider = Arc::new(move |index| {
+            provider_pieces
+                .get(index)
+                .cloned()
+                .ok_or_else(|| ProxyError::Request("missing piece".to_string()))
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        assert_ne!(id, 0);
+        assert_eq!(registry.content_length(id), Some(6));
+        assert_eq!(registry.read_range(id, 1, 5).unwrap(), b"bcdef");
+        assert!(registry.remove(id));
+        assert!(registry.read_range(id, 0, 0).is_err());
+    }
+
+    #[test]
+    fn registry_rejects_mismatched_source_and_manifest() {
+        let source = AuthorizedP2pSource::new("asset", 8, DIGEST, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| Ok(b"data".to_vec()));
+        assert!(P2pSourceRegistry::default()
+            .register(source, manifest, provider)
+            .is_err());
     }
 }
