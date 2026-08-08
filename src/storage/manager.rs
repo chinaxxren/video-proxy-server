@@ -407,7 +407,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
 
                     // 按最后访问时间排序（LRU）
                     let mut entry_list: Vec<_> = entries.values().cloned().collect();
-                    entry_list.sort_by(|a, b| a.last_access.cmp(&b.last_access));
+                    entry_list.sort_by_key(|entry| entry.last_access);
 
                     let mut current_total = total;
                     let mut current_count = entries.len();

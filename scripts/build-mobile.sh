@@ -11,7 +11,7 @@ cp include/media_proxy_cache.h "$OUT_DIR/include/"
 
 build_target() {
   local platform="$1" target="$2" crate_type="${3:-}"
-  rustup target list --installed | rg -qx "$target" || {
+  rustup target list --installed | grep -Fxq "$target" || {
     echo "Missing Rust target $target; install it with: rustup target add $target" >&2
     return 1
   }
