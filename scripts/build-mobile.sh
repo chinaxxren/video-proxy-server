@@ -96,6 +96,7 @@ build_ios_xcframework() {
     -library "$simulator_dir/libproxy_server.a" \
     -headers "$OUT_DIR/include" \
     -output "$framework"
+  swiftc -typecheck -I "$OUT_DIR/include" platform/ios/MediaProxyCache.swift
 }
 
 install_adapter_template() {

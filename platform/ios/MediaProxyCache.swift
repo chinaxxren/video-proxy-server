@@ -1,4 +1,5 @@
 import Foundation
+import MediaProxyCacheCore
 
 /// Swift ownership wrapper for the shared Rust C ABI.
 public final class MediaProxyCache {
