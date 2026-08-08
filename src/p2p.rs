@@ -8,10 +8,9 @@ use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 const SHA256_HEX_LENGTH: usize = 64;
 const MAX_CONTENT_ID_LENGTH: usize = 512;
@@ -19,6 +18,7 @@ const MAX_AUTHORIZATION_LENGTH: usize = 2048;
 const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_P2P_SOURCES: usize = 1024;
 const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
+const MAX_VERIFIED_PIECE_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
 
@@ -63,6 +63,42 @@ struct RegisteredP2pSource {
     source: AuthorizedP2pSource,
     manifest: P2pPieceManifest,
     provider: P2pPieceProvider,
+    piece_cache: Arc<Mutex<VerifiedPieceCache>>,
+}
+
+#[derive(Default)]
+struct VerifiedPieceCache {
+    entries: HashMap<usize, Arc<Vec<u8>>>,
+    order: VecDeque<usize>,
+    bytes: usize,
+}
+
+impl VerifiedPieceCache {
+    fn get(&self, index: usize) -> Option<Arc<Vec<u8>>> {
+        self.entries.get(&index).cloned()
+    }
+
+    fn insert(&mut self, index: usize, piece: Vec<u8>) -> Arc<Vec<u8>> {
+        if let Some(existing) = self.entries.get(&index) {
+            return existing.clone();
+        }
+        let piece = Arc::new(piece);
+        if piece.len() > MAX_VERIFIED_PIECE_CACHE_BYTES {
+            return piece;
+        }
+        while self.bytes.saturating_add(piece.len()) > MAX_VERIFIED_PIECE_CACHE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.len());
+            }
+        }
+        self.bytes += piece.len();
+        self.order.push_back(index);
+        self.entries.insert(index, piece.clone());
+        piece
+    }
 }
 
 #[derive(Clone)]
@@ -113,6 +149,7 @@ impl P2pSourceRegistry {
                 source,
                 manifest,
                 provider,
+                piece_cache: Arc::new(Mutex::new(VerifiedPieceCache::default())),
             },
         );
         Ok(id)
@@ -128,7 +165,9 @@ impl P2pSourceRegistry {
             .ok_or_else(|| ProxyError::Request("P2P source ID not found".to_string()))?;
         let manifest = entry.manifest.clone();
         let provider = entry.provider.clone();
+        let cache = entry.piece_cache.clone();
         drop(entries);
+        let provider = cached_verified_provider(manifest.clone(), provider, cache);
         manifest.read_verified_range(start, end, &provider)
     }
 
@@ -143,7 +182,9 @@ impl P2pSourceRegistry {
         let source_digest = entry.source.sha256.clone();
         let manifest = entry.manifest.clone();
         let provider = entry.provider.clone();
+        let cache = entry.piece_cache.clone();
         drop(entries);
+        let provider = cached_verified_provider(manifest.clone(), provider, cache);
 
         let mut hasher = Sha256::new();
         for index in 0..manifest.piece_sha256.len() {
@@ -175,6 +216,29 @@ impl P2pSourceRegistry {
             .and_then(|mut entries| entries.remove(&id))
             .is_some()
     }
+}
+
+fn cached_verified_provider(
+    manifest: P2pPieceManifest,
+    provider: P2pPieceProvider,
+    cache: Arc<Mutex<VerifiedPieceCache>>,
+) -> P2pPieceProvider {
+    Arc::new(move |index| {
+        if let Some(piece) = cache
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
+            .get(index)
+        {
+            return Ok(piece.as_ref().clone());
+        }
+        let piece = provider(index)?;
+        manifest.verify_piece(index, &piece)?;
+        let piece = cache
+            .lock()
+            .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
+            .insert(index, piece);
+        Ok(piece.as_ref().clone())
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -544,5 +608,25 @@ mod tests {
         assert!(parse_authorized_manifest_json(&serde_json::to_vec(&base).unwrap()).is_err());
         assert!(parse_authorized_manifest_json(&vec![b'x'; MAX_MANIFEST_JSON_BYTES + 1]).is_err());
         assert!(parse_authorized_manifest_json(b"").is_err());
+    }
+
+    #[test]
+    fn repeated_ranges_reuse_verified_piece_cache() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let source =
+            AuthorizedP2pSource::new("asset", 4, &sha256_hex(b"data"), "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = calls.clone();
+        let provider: P2pPieceProvider = Arc::new(move |_| {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        assert_eq!(registry.read_range(id, 0, 1).unwrap(), b"da");
+        assert_eq!(registry.read_range(id, 2, 3).unwrap(), b"ta");
+        assert!(registry.verify_complete(id).is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
