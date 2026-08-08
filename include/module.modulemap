@@ -1,0 +1,4 @@
+module MediaProxyCache {
+    header "media_proxy_cache.h"
+    export *
+}

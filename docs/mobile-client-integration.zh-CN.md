@@ -144,7 +144,8 @@ refreshSource(identity, reason) -> new Source
 
 ## iOS Adapter
 
-将 Rust 静态库和 C 头文件打包为 XCFramework，再通过 Swift API 封装 C ABI。
+构建脚本会把 Rust 静态库、C 头文件和 module map 打包为
+`MediaProxyCache.xcframework`；生产级 Swift 封装仍需实现。
 
 建议接口形态：
 
@@ -266,4 +267,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、构建/发布脚本以及所有权封装模板。尚未提供生产可用的 JNI/AAR、XCFramework 或 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台包已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供生产可用的 JNI/AAR、Swift 或 N-API/HAR Adapter，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

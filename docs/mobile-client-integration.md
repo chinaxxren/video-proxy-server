@@ -145,7 +145,8 @@ The callback must not expose the signed URL through logs or error messages.
 
 ## iOS Adapter
 
-Package the Rust static libraries and C header as an XCFramework, then wrap the C ABI with a Swift API.
+The build script packages the Rust static libraries, C header, and module map as
+`MediaProxyCache.xcframework`. A production Swift wrapper is still required.
 
 Recommended shape:
 
@@ -267,4 +268,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts and ownership-wrapper templates. It does not yet provide production JNI/AAR, XCFramework, or N-API/HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform packages have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide production JNI/AAR, Swift, or N-API/HAR adapters, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

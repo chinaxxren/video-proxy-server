@@ -19,6 +19,7 @@ fi
 cd "$ROOT_DIR"
 mkdir -p "$OUT_DIR/include"
 cp include/media_proxy_cache.h "$OUT_DIR/include/"
+cp include/module.modulemap "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
 verify_p2p_symbols() {
@@ -80,10 +81,27 @@ build_target() {
   fi
 }
 
+build_ios_xcframework() {
+  local simulator_dir="$OUT_DIR/ios-sim/universal"
+  local framework="$OUT_DIR/ios/MediaProxyCache.xcframework"
+  mkdir -p "$simulator_dir"
+  xcrun lipo -create \
+    "$OUT_DIR/ios-sim/aarch64-apple-ios-sim/libproxy_server.a" \
+    "$OUT_DIR/ios-sim/x86_64-apple-ios/libproxy_server.a" \
+    -output "$simulator_dir/libproxy_server.a"
+  rm -rf "$framework"
+  xcodebuild -create-xcframework \
+    -library "$OUT_DIR/ios/aarch64-apple-ios/libproxy_server.a" \
+    -headers "$OUT_DIR/include" \
+    -library "$simulator_dir/libproxy_server.a" \
+    -headers "$OUT_DIR/include" \
+    -output "$framework"
+}
+
 case "${PLATFORM:-all}" in
   macos) build_target macos aarch64-apple-darwin; build_target macos x86_64-apple-darwin ;;
   windows) build_target windows x86_64-pc-windows-gnu ;;
-  ios) build_target ios aarch64-apple-ios staticlib; build_target ios-sim aarch64-apple-ios-sim staticlib; build_target ios-sim x86_64-apple-ios staticlib ;;
+  ios) build_target ios aarch64-apple-ios staticlib; build_target ios-sim aarch64-apple-ios-sim staticlib; build_target ios-sim x86_64-apple-ios staticlib; build_ios_xcframework ;;
   android) build_target android aarch64-linux-android cdylib; build_target android armv7-linux-androideabi cdylib; build_target android x86_64-linux-android cdylib ;;
   harmony) build_target harmony aarch64-unknown-linux-ohos cdylib; build_target harmony armv7-unknown-linux-ohos cdylib ;;
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;
