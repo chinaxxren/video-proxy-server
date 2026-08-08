@@ -21,6 +21,7 @@
 - 使用内置 WebPKI 根证书的纯 Rust TLS，保证移动端构建一致性
 - 仅监听 localhost 的 HTTP/1.1 服务（支持 HTTP 和 HTTPS 上游）
 - 面向移动端 Adapter 的 C ABI 生命周期入口（`include/media_proxy_cache.h`）
+- 默认关闭、带合规授权门的可选 P2P 字节提供接口
 
 ## 环境要求
 
@@ -34,6 +35,19 @@
 cargo build --locked
 cargo test --locked
 ```
+
+### 可选 P2P 接口
+
+使用以下命令构建和测试可选模块：
+
+```bash
+cargo test --locked --features p2p
+```
+
+该 feature 不是 BitTorrent 客户端，不接受 magnet，不实现 DHT、公共 tracker 或自动
+peer discovery。Host 必须明确确认内容授权，并提供稳定 content ID、总长度、完整内容
+SHA-256 和逐片 SHA-256 清单。Core 会先验证每个分片，再返回其中的字节。项目没有合法
+P2P 来源时应保持该 feature 关闭。
 
 ### 依赖安全
 

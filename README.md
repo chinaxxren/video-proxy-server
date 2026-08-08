@@ -21,6 +21,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - Pure-Rust TLS with bundled WebPKI roots for consistent mobile builds
 - Localhost-only HTTP/1.1 listener (HTTP and HTTPS origins are supported)
 - C ABI lifecycle entry points for mobile adapters (`include/media_proxy_cache.h`)
+- Optional compliance-gated P2P byte-provider boundary (disabled by default)
 
 ## Requirements
 
@@ -34,6 +35,21 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 cargo build --locked
 cargo test --locked
 ```
+
+### Optional P2P boundary
+
+Build and test the optional module with:
+
+```bash
+cargo test --locked --features p2p
+```
+
+This feature is not a BitTorrent client. It does not accept magnet links and
+does not implement DHT, public trackers, or peer discovery. The Host must make
+an explicit authorization decision and provide a stable content ID, total
+length, full-content SHA-256, and a per-piece SHA-256 manifest. Core verifies
+every supplied piece before returning bytes. Keep the feature disabled when the
+application has no authorized P2P source.
 
 ### Dependency security
 
