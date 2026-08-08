@@ -103,7 +103,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let p2p_piece = directory.path().join("manifest").join("0.piece");
         std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
-        std::fs::write(&p2p_piece, b"p2p!").unwrap();
+        std::fs::write(&p2p_piece, b"p2p").unwrap();
         let deleted = Arc::new(Notify::new());
         let manager = StorageManager::new(
             DeleteTrackingStorage {
@@ -128,6 +128,39 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), deleted.notified())
             .await
             .expect("cleanup did not count external P2P bytes");
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_evict_http_entries_when_p2p_alone_exceeds_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let p2p_piece = directory.path().join("manifest").join("0.piece");
+        std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
+        std::fs::write(&p2p_piece, b"p2p-too-large").unwrap();
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 4,
+                max_file_count: 100,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: vec![directory.path().to_path_buf()],
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"http"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), deleted.notified())
+                .await
+                .is_err()
+        );
     }
 
     struct CoordinatedStorage {
@@ -468,8 +501,13 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     let total = *total_size.read().await;
                     let combined_total = total.saturating_add(external_size);
 
-                    if combined_total <= config.max_cache_size
-                        && entries.len() <= config.max_file_count
+                    // P2P owns eviction of its files. If it alone exceeds the
+                    // byte budget, do not destroy every HTTP entry trying to
+                    // correct a condition this manager cannot fix.
+                    if (external_size >= config.max_cache_size
+                        && entries.len() <= config.max_file_count)
+                        || (combined_total <= config.max_cache_size
+                            && entries.len() <= config.max_file_count)
                     {
                         continue;
                     }
