@@ -184,14 +184,26 @@ Compile Rust shared libraries, expose JNI bindings, and package Kotlin APIs and 
 Recommended shape:
 
 ```kotlin
-val cache = MediaProxyCache.create(context, configuration)
+val cache = MediaProxyCache.create(configuration)
 val endpoint = cache.start()
 val playbackUri = cache.makePlaybackUri(source, identity)
 val player = ExoPlayer.Builder(context).build()
 player.setMediaItem(MediaItem.fromUri(playbackUri))
 ```
 
-Android work items:
+Android package contents:
+
+- `media-proxy-cache.aar` with Kotlin API and consumer ProGuard rules;
+- Rust Core and JNI bridge libraries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`;
+- an opaque numeric JNI handle registry that rejects unknown and released handles.
+
+Add the AAR to the application, create `MediaProxyCacheConfiguration` with an
+app-owned cache directory and upstream host allowlist, and call `start()` off the
+main thread. The instance is one-shot: after `stop()` it must be closed and
+recreated. Process death destroys the in-memory instance; create a new instance
+using the same cache directory when the playback service is restored.
+
+Remaining Android validation work:
 
 - package one `.so` per supported ABI;
 - keep JNI handles opaque and validate every native handle;
@@ -277,4 +289,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also builds an iOS XCFramework with a Swift ownership wrapper. It does not yet provide production JNI/AAR or N-API/HAR packages, and the opaque request registry/source-refresh callback contract is still missing. The iOS artifact has structural build validation, not AVPlayer device validation. Treat this document as the acceptance contract for the remaining mobile SDK work.
+The repository now exposes a C ABI with create/start/stop/destroy, an iOS XCFramework/Swift wrapper, and an Android JNI/AAR package. It does not yet provide an N-API/HAR package, and the opaque request registry/source-refresh callback contract is still missing. The iOS and Android artifacts have structural CI validation, not real-player device validation. Treat this document as the acceptance contract for the remaining mobile SDK work.

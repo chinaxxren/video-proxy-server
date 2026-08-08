@@ -42,13 +42,23 @@ jobs:
       - name: Install Android NDK
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-35" \
+            "ndk;29.0.14206865" \
+            "cmake;3.22.1"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - name: Build Android libraries
         run: |
-          export NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
+          export NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
           export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
@@ -59,10 +69,25 @@ jobs:
           export AR_armv7_linux_androideabi="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export AR_x86_64_linux_android="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+      - name: Build and test Android AAR
+        run: ./scripts/build-android-aar.sh dist/mobile dist/android-sdk
+      - name: Verify Android AAR contents
+        run: |
+          unzip -l dist/android-sdk/media-proxy-cache.aar > aar-contents.txt
+          for entry in \
+            classes.jar \
+            jni/arm64-v8a/libproxy_server.so \
+            jni/arm64-v8a/libmedia_proxy_cache_jni.so \
+            jni/armeabi-v7a/libproxy_server.so \
+            jni/armeabi-v7a/libmedia_proxy_cache_jni.so \
+            jni/x86_64/libproxy_server.so \
+            jni/x86_64/libmedia_proxy_cache_jni.so; do
+            grep -Fq "$entry" aar-contents.txt || { echo "Missing AAR entry: $entry" >&2; exit 1; }
+          done
       - name: Archive Android artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz -C dist/mobile android include
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android.sha256
+          cp dist/android-sdk/media-proxy-cache.aar media-proxy-cache-${GITHUB_REF_NAME}-android.aar
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android.aar > media-proxy-cache-${GITHUB_REF_NAME}-android.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: media-proxy-cache-${{ github.ref_name }}-android

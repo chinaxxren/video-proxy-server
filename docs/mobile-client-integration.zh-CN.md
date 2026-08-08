@@ -182,14 +182,25 @@ iOS 剩余验证工作：
 建议接口形态：
 
 ```kotlin
-val cache = MediaProxyCache.create(context, configuration)
+val cache = MediaProxyCache.create(configuration)
 val endpoint = cache.start()
 val playbackUri = cache.makePlaybackUri(source, identity)
 val player = ExoPlayer.Builder(context).build()
 player.setMediaItem(MediaItem.fromUri(playbackUri))
 ```
 
-Android 工作项：
+Android 产物内容：
+
+- 带 Kotlin API 和 consumer ProGuard 规则的 `media-proxy-cache.aar`；
+- `arm64-v8a`、`armeabi-v7a` 和 `x86_64` 的 Rust Core 与 JNI bridge；
+- 使用不透明数字 ID 的 JNI 句柄注册表，会拒绝未知或已释放的句柄。
+
+将 AAR 加入应用，使用应用管理的缓存目录和上游域名白名单创建
+`MediaProxyCacheConfiguration`，并在非主线程调用 `start()`。实例是一次性的：
+调用 `stop()` 后必须关闭并重新创建。进程终止会销毁内存实例；播放服务恢复时，
+使用同一缓存目录重新创建实例。
+
+Android 剩余验证工作：
 
 - 为每个支持的 ABI 打包一个 `.so`；
 - JNI handle 保持不透明，并验证每一个原生 handle；
@@ -275,4 +286,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入，以及带 Swift 所有权封装的 iOS XCFramework。尚未提供生产可用的 JNI/AAR 或 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。iOS 产物仅完成构建结构验证，尚未完成 AVPlayer 真机验证。本文档是剩余移动 SDK 工作的验收合同。
+当前仓库已经提供 create/start/stop/destroy C ABI、iOS XCFramework/Swift 封装和 Android JNI/AAR。尚未提供 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。iOS 与 Android 产物仅完成 CI 构建结构验证，尚未完成真实播放器真机验证。本文档是剩余移动 SDK 工作的验收合同。

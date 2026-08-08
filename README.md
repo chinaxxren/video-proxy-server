@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle and iOS XCFramework/Swift adapter packaging are available; production JNI/AAR and N-API/HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. iOS XCFramework/Swift and Android JNI/AAR packaging are available; the N-API/HAR adapter is still pending. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -135,7 +135,8 @@ include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
 server with a host-owned cache directory, start it on a fixed port or port `0`,
 and release it with `stop`/`destroy`. This is a preview ABI. Build and release
 packaging scripts are provided. iOS releases include an XCFramework and Swift
-ownership wrapper; JNI and N-API wrappers still require integration.
+ownership wrapper. Android releases include a Kotlin API, validated JNI bridge,
+and AAR. The HarmonyOS N-API wrapper still requires integration.
 
 Real upstream access must use `proxy_server_create_with_hosts` and pass the
 comma-separated host allowlist. The simpler `proxy_server_create` intentionally
@@ -159,14 +160,19 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 ```
 
 It requires the corresponding Rust targets and copies the C header beside each
-platform's native artifacts. Android Kotlin packaging should consume the
-generated `.so` files through an Android library module.
+platform's native artifacts. Build the Android AAR after generating its `.so`
+files:
 
-Adapter ownership templates are under `platform/android`, `platform/ios`, and
-`platform/harmony`. The iOS release additionally contains
+```bash
+PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+./scripts/build-android-aar.sh dist/mobile dist/android-sdk
+```
+
+Adapter ownership templates are under `platform/ios` and `platform/harmony`.
+The iOS release additionally contains
 `MediaProxyCacheCore.xcframework`, its Clang module map, and
-`Sources/MediaProxyCache.swift`. Android and HarmonyOS still need JNI and N-API
-bridges.
+`Sources/MediaProxyCache.swift`. The Android module is under `android/` and
+produces `media-proxy-cache.aar`. HarmonyOS still needs its N-API bridge.
 
 The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
 targets; Windows uses the GNU x86_64 target by default and requires a MinGW
@@ -309,7 +315,8 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- No Android JNI/AAR or HarmonyOS N-API/HAR adapter
+- No HarmonyOS N-API/HAR adapter
+- The Android AAR has CI build and content validation, but not yet Media3 device validation
 - The iOS XCFramework has CI and local structural validation, but not yet AVPlayer device validation
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
