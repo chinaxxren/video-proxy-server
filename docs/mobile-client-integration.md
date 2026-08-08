@@ -214,6 +214,9 @@ Remaining Android validation work:
 - avoid blocking Binder, main, or player threads with FFI calls;
 - add R8/ProGuard keep rules for JNI entry points when required.
 
+The repository's Android CI runs these checks with NDK 29 and Java 17. It does
+not claim Media3 emulator or physical-device validation.
+
 ## HarmonyOS Adapter
 
 Compile the Rust shared library for the HarmonyOS toolchain, expose a stable C ABI through N-API, and package the ArkTS API and native library in a HAR.
@@ -227,7 +230,14 @@ const playbackUrl = await cache.makePlaybackUrl(source, identity)
 await avPlayer.setUrl(playbackUrl)
 ```
 
-HarmonyOS work items:
+The repository now includes `harmony/Index.ets`, a N-API bridge, and
+`scripts/build-harmony-har.sh`. Set `OHOS_NDK_HOME` to an OHOS native SDK and
+run the script after building the ARM64 Rust library. The resulting archive
+contains the ArkTS API, header, Rust library, and N-API library. N-API methods
+must be called off the ArkTS main thread; the bridge rejects unknown numeric IDs
+and frees copied strings before returning.
+
+Remaining HarmonyOS validation work:
 
 - validate the Rust target and native build chain against the supported HarmonyOS SDK version;
 - package ARM64 first and expand only from the product device matrix;
@@ -289,4 +299,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, an iOS XCFramework/Swift wrapper, and an Android JNI/AAR package. It does not yet provide an N-API/HAR package, and the opaque request registry/source-refresh callback contract is still missing. The iOS and Android artifacts have structural CI validation, not real-player device validation. Treat this document as the acceptance contract for the remaining mobile SDK work.
+The repository now exposes a C ABI with create/start/stop/destroy, iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR packaging. Opaque request registration/source refresh callbacks are still missing, and no platform has real-player device validation yet. Treat this document as the acceptance contract for the remaining mobile SDK work.

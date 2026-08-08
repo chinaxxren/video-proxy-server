@@ -4,7 +4,7 @@
 
 一个使用 Rust 实现的 HTTP 媒体代理缓存。服务监听 `127.0.0.1`，从明确允许的上游域名流式读取媒体，并在磁盘上持久化真实完成的字节区间。
 
-> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。iOS XCFramework/Swift 和 Android JNI/AAR 打包已经提供，N-API/HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
+> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。iOS XCFramework/Swift、Android JNI/AAR 和鸿蒙 N-API/HAR 打包已经提供，但三端真实播放器真机验证仍未完成。localhost 调用方认证明确不在本项目当前范围内。
 
 ## 功能
 
@@ -111,7 +111,7 @@ PLATFORM=android ./scripts/build-mobile.sh dist/mobile
 Adapter 的所有权接口模板位于 `platform/ios` 和 `platform/harmony`。iOS Release
 还包含 `MediaProxyCacheCore.xcframework`、Clang
 module map 和 `Sources/MediaProxyCache.swift`。Android 模块位于 `android/`，生成
-`media-proxy-cache.aar`。鸿蒙仍需 N-API 桥接。
+`media-proxy-cache.aar`。鸿蒙打包位于 `harmony/`，配置 OHOS NDK 后可生成 HAR 兼容归档。
 
 同一个 Core 也支持桌面端构建。macOS 会构建 Apple Silicon 和 Intel 目标；Windows
 默认使用 `x86_64-pc-windows-gnu`，构建机需要安装 MinGW linker。桌面程序可以直接
@@ -246,8 +246,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 
 ## 已知限制
 
-- 尚无 HarmonyOS N-API/HAR Adapter
-- Android AAR 已通过 CI 构建与内容校验，但尚未完成 Media3 真机验证
+- iOS、Android 和鸿蒙真实播放器真机验证仍未完成
 - iOS XCFramework 已通过 CI 和本地结构校验，但尚未完成 AVPlayer 真机验证
 - Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放

@@ -124,10 +124,16 @@ jobs:
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang"
           export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/armv7-unknown-linux-ohos-clang"
           PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
+      - name: Build HarmonyOS HAR adapter
+        run: OHOS_NDK_HOME="$OHOS_NDK_HOME" ./scripts/build-harmony-har.sh dist/mobile dist/harmony-sdk
+      - name: Verify HarmonyOS HAR contents
+        run: |
+          tar -tzf dist/harmony-sdk/media-proxy-cache-harmony.har.tar.gz | sort
+          test -f dist/harmony-sdk/native/libmedia_proxy_cache_napi.so
       - name: Archive HarmonyOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz -C dist/mobile harmony include
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony.sha256
+          cp dist/harmony-sdk/media-proxy-cache-harmony.har.tar.gz media-proxy-cache-${GITHUB_REF_NAME}-harmony.har.tar.gz
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony.har.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: media-proxy-cache-${{ github.ref_name }}-harmony

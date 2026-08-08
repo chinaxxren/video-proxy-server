@@ -211,6 +211,8 @@ Android 剩余验证工作：
 - FFI 调用不能阻塞 Binder、主线程或播放器线程；
 - 需要时添加 JNI 入口的 R8/ProGuard keep 规则。
 
+Android CI 使用 NDK 29 和 Java 17 执行这些检查，不代表已经完成 Media3 模拟器或真机验证。
+
 ## 鸿蒙 Adapter
 
 使用鸿蒙工具链编译 Rust 动态库，通过 N-API 暴露稳定 C ABI，并将 ArkTS API 和原生库打包为 HAR。
@@ -224,7 +226,12 @@ const playbackUrl = await cache.makePlaybackUrl(source, identity)
 await avPlayer.setUrl(playbackUrl)
 ```
 
-鸿蒙工作项：
+仓库现在包含 `harmony/Index.ets`、N-API bridge 和 `scripts/build-harmony-har.sh`。
+设置 `OHOS_NDK_HOME` 指向鸿蒙 Native SDK，并先构建 ARM64 Rust 动态库，再运行脚本。
+生成的归档包含 ArkTS API、头文件、Rust 动态库和 N-API 动态库。N-API 方法必须在
+ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前释放复制的字符串。
+
+鸿蒙剩余验证工作：
 
 - 根据支持的鸿蒙 SDK 版本验证 Rust target 和原生构建链；
 - 优先打包 ARM64，仅依据产品设备矩阵扩展；
@@ -286,4 +293,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、iOS XCFramework/Swift 封装和 Android JNI/AAR。尚未提供 N-API/HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。iOS 与 Android 产物仅完成 CI 构建结构验证，尚未完成真实播放器真机验证。本文档是剩余移动 SDK 工作的验收合同。
+当前仓库已经提供 create/start/stop/destroy C ABI、iOS XCFramework/Swift、Android JNI/AAR 和鸿蒙 N-API/HAR 打包。不透明请求注册和来源刷新回调合同仍未实现，三端均尚未完成真实播放器真机验证。本文档是剩余移动 SDK 工作的验收合同。

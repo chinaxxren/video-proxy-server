@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. iOS XCFramework/Swift and Android JNI/AAR packaging are available; the N-API/HAR adapter is still pending. Localhost caller authentication is intentionally outside this project's current scope.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR packaging are available; real-player device validation is still pending. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -172,7 +172,8 @@ Adapter ownership templates are under `platform/ios` and `platform/harmony`.
 The iOS release additionally contains
 `MediaProxyCacheCore.xcframework`, its Clang module map, and
 `Sources/MediaProxyCache.swift`. The Android module is under `android/` and
-produces `media-proxy-cache.aar`. HarmonyOS still needs its N-API bridge.
+produces `media-proxy-cache.aar`. HarmonyOS packaging is under `harmony/` and
+produces a HAR-compatible archive when an OHOS NDK is configured.
 
 The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
 targets; Windows uses the GNU x86_64 target by default and requires a MinGW
@@ -315,7 +316,7 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- No HarmonyOS N-API/HAR adapter
+- Real-player validation is still pending on iOS, Android, and HarmonyOS
 - The Android AAR has CI build and content validation, but not yet Media3 device validation
 - The iOS XCFramework has CI and local structural validation, but not yet AVPlayer device validation
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
