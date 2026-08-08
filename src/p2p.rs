@@ -9,6 +9,7 @@ use crate::utils::error::{ProxyError, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -65,6 +66,7 @@ struct RegisteredP2pSource {
     provider: P2pPieceProvider,
     piece_cache: Arc<Mutex<VerifiedPieceCache>>,
     piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
+    disk_dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -106,6 +108,7 @@ impl VerifiedPieceCache {
 pub struct P2pSourceRegistry {
     next_id: Arc<AtomicU64>,
     entries: Arc<RwLock<HashMap<u64, RegisteredP2pSource>>>,
+    cache_root: Option<Arc<PathBuf>>,
 }
 
 impl Default for P2pSourceRegistry {
@@ -113,11 +116,19 @@ impl Default for P2pSourceRegistry {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),
             entries: Arc::new(RwLock::new(HashMap::new())),
+            cache_root: None,
         }
     }
 }
 
 impl P2pSourceRegistry {
+    pub fn with_cache_dir(cache_root: PathBuf) -> Self {
+        Self {
+            cache_root: Some(Arc::new(cache_root)),
+            ..Self::default()
+        }
+    }
+
     pub fn register(
         &self,
         source: AuthorizedP2pSource,
@@ -144,6 +155,10 @@ impl P2pSourceRegistry {
                 (value != 0).then_some(value.wrapping_add(1).max(1))
             })
             .map_err(|_| ProxyError::Request("P2P source ID exhausted".to_string()))?;
+        let disk_dir = self
+            .cache_root
+            .as_ref()
+            .map(|root| root.join(&source.sha256));
         entries.insert(
             id,
             RegisteredP2pSource {
@@ -152,6 +167,7 @@ impl P2pSourceRegistry {
                 provider,
                 piece_cache: Arc::new(Mutex::new(VerifiedPieceCache::default())),
                 piece_locks: Arc::new(Mutex::new(HashMap::new())),
+                disk_dir,
             },
         );
         Ok(id)
@@ -169,8 +185,10 @@ impl P2pSourceRegistry {
         let provider = entry.provider.clone();
         let cache = entry.piece_cache.clone();
         let piece_locks = entry.piece_locks.clone();
+        let disk_dir = entry.disk_dir.clone();
         drop(entries);
-        let provider = cached_verified_provider(manifest.clone(), provider, cache, piece_locks);
+        let provider =
+            cached_verified_provider(manifest.clone(), provider, cache, piece_locks, disk_dir);
         manifest.read_verified_range(start, end, &provider)
     }
 
@@ -187,8 +205,10 @@ impl P2pSourceRegistry {
         let provider = entry.provider.clone();
         let cache = entry.piece_cache.clone();
         let piece_locks = entry.piece_locks.clone();
+        let disk_dir = entry.disk_dir.clone();
         drop(entries);
-        let provider = cached_verified_provider(manifest.clone(), provider, cache, piece_locks);
+        let provider =
+            cached_verified_provider(manifest.clone(), provider, cache, piece_locks, disk_dir);
 
         let mut hasher = Sha256::new();
         for index in 0..manifest.piece_sha256.len() {
@@ -235,6 +255,7 @@ fn cached_verified_provider(
     provider: P2pPieceProvider,
     cache: Arc<Mutex<VerifiedPieceCache>>,
     piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
+    disk_dir: Option<PathBuf>,
 ) -> P2pPieceProvider {
     Arc::new(move |index| {
         if let Some(piece) = cache
@@ -260,14 +281,52 @@ fn cached_verified_provider(
         {
             return Ok(piece.as_ref().clone());
         }
+        if let Some(directory) = &disk_dir {
+            if let Some(piece) = read_verified_disk_piece(directory, index, &manifest)? {
+                let piece = cache
+                    .lock()
+                    .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
+                    .insert(index, piece);
+                return Ok(piece.as_ref().clone());
+            }
+        }
         let piece = provider(index)?;
         manifest.verify_piece(index, &piece)?;
+        if let Some(directory) = &disk_dir {
+            write_verified_disk_piece(directory, index, &piece)?;
+        }
         let piece = cache
             .lock()
             .map_err(|_| ProxyError::Storage("P2P piece cache unavailable".to_string()))?
             .insert(index, piece);
         Ok(piece.as_ref().clone())
     })
+}
+
+fn read_verified_disk_piece(
+    directory: &Path,
+    index: usize,
+    manifest: &P2pPieceManifest,
+) -> Result<Option<Vec<u8>>> {
+    let path = directory.join(format!("{index}.piece"));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ProxyError::Storage(error.to_string())),
+    };
+    if manifest.verify_piece(index, &bytes).is_err() {
+        let _ = std::fs::remove_file(path);
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn write_verified_disk_piece(directory: &Path, index: usize, bytes: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(|error| ProxyError::Storage(error.to_string()))?;
+    let final_path = directory.join(format!("{index}.piece"));
+    let temporary = directory.join(format!(".{index}.piece.tmp"));
+    std::fs::write(&temporary, bytes).map_err(|error| ProxyError::Storage(error.to_string()))?;
+    std::fs::rename(&temporary, &final_path).map_err(|error| ProxyError::Storage(error.to_string()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -696,5 +755,63 @@ mod tests {
             assert_eq!(worker.join().unwrap(), b"data");
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn verified_piece_cache_survives_registry_restart() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256_hex(b"data");
+        let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![digest.clone()]).unwrap();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let counter = first_calls.clone();
+        let first_provider: P2pPieceProvider = Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let id = registry
+            .register(source.clone(), manifest.clone(), first_provider)
+            .unwrap();
+        assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        drop(registry);
+
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let counter = second_calls.clone();
+        let second_provider: P2pPieceProvider = Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let id = registry
+            .register(source, manifest, second_provider)
+            .unwrap();
+        assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn corrupt_disk_piece_is_deleted_and_refetched() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256_hex(b"data");
+        let content_dir = directory.path().join(&digest);
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("0.piece"), b"evil").unwrap();
+        let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![digest]).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let provider: P2pPieceProvider = Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let id = registry.register(source, manifest, provider).unwrap();
+        assert_eq!(registry.read_range(id, 0, 3).unwrap(), b"data");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(content_dir.join("0.piece")).unwrap(), b"data");
     }
 }

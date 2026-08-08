@@ -61,7 +61,10 @@ Authorization references stay inside Core and are never returned by HTTP.
 The callback and context may run on Core worker threads and must remain valid
 until `proxy_p2p_source_remove` or `proxy_server_destroy`. A piece is accepted
 only after its SHA-256 matches the manifest. Calls are single-flight per piece;
-verified pieces use a bounded 16 MiB per-source memory cache.
+verified pieces use a bounded 16 MiB per-source memory cache. Verified pieces
+are also persisted below `<cache-directory>/p2p` and can be reused after a Core
+restart. Core revalidates every disk-cached piece before serving it; corrupt
+entries are deleted and requested from the Host again.
 
 ## Playback
 
