@@ -91,7 +91,10 @@ fn create_handle(
         ..Default::default()
     };
     #[cfg(feature = "p2p")]
-    let p2p_sources = crate::p2p::P2pSourceRegistry::with_cache_dir(config.cache_dir.join("p2p"));
+    let p2p_sources = crate::p2p::P2pSourceRegistry::with_cache_limit(
+        config.cache_dir.join("p2p"),
+        config.max_cache_bytes,
+    );
     Box::into_raw(Box::new(ProxyServerHandle {
         config: Mutex::new(Some(config)),
         server: Arc::new(Mutex::new(None)),

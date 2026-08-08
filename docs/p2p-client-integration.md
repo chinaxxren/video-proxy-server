@@ -65,6 +65,8 @@ verified pieces use a bounded 16 MiB per-source memory cache. Verified pieces
 are also persisted below `<cache-directory>/p2p` and can be reused after a Core
 restart. Core revalidates every disk-cached piece before serving it; corrupt
 entries are deleted and requested from the Host again.
+The P2P disk cache uses the Host's `max_cache_bytes` limit and evicts the least
+recently modified verified pieces when that limit is exceeded.
 
 ## Playback
 

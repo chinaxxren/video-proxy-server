@@ -20,6 +20,7 @@ const MAX_P2P_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_P2P_SOURCES: usize = 1024;
 const MAX_MANIFEST_JSON_BYTES: usize = 1024 * 1024;
 const MAX_VERIFIED_PIECE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_DISK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
 pub type P2pPieceProvider = Arc<dyn Fn(usize) -> Result<Vec<u8>> + Send + Sync>;
 
@@ -67,6 +68,13 @@ struct RegisteredP2pSource {
     piece_cache: Arc<Mutex<VerifiedPieceCache>>,
     piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
     disk_dir: Option<PathBuf>,
+    disk_cache: Option<Arc<P2pDiskCache>>,
+}
+
+struct P2pDiskCache {
+    root: PathBuf,
+    max_bytes: u64,
+    maintenance: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -108,7 +116,7 @@ impl VerifiedPieceCache {
 pub struct P2pSourceRegistry {
     next_id: Arc<AtomicU64>,
     entries: Arc<RwLock<HashMap<u64, RegisteredP2pSource>>>,
-    cache_root: Option<Arc<PathBuf>>,
+    disk_cache: Option<Arc<P2pDiskCache>>,
 }
 
 impl Default for P2pSourceRegistry {
@@ -116,15 +124,23 @@ impl Default for P2pSourceRegistry {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),
             entries: Arc::new(RwLock::new(HashMap::new())),
-            cache_root: None,
+            disk_cache: None,
         }
     }
 }
 
 impl P2pSourceRegistry {
     pub fn with_cache_dir(cache_root: PathBuf) -> Self {
+        Self::with_cache_limit(cache_root, DEFAULT_DISK_CACHE_BYTES)
+    }
+
+    pub fn with_cache_limit(cache_root: PathBuf, max_bytes: u64) -> Self {
         Self {
-            cache_root: Some(Arc::new(cache_root)),
+            disk_cache: Some(Arc::new(P2pDiskCache {
+                root: cache_root,
+                max_bytes,
+                maintenance: Mutex::new(()),
+            })),
             ..Self::default()
         }
     }
@@ -156,9 +172,9 @@ impl P2pSourceRegistry {
             })
             .map_err(|_| ProxyError::Request("P2P source ID exhausted".to_string()))?;
         let disk_dir = self
-            .cache_root
+            .disk_cache
             .as_ref()
-            .map(|root| root.join(&source.sha256));
+            .map(|cache| cache.root.join(&source.sha256));
         entries.insert(
             id,
             RegisteredP2pSource {
@@ -168,6 +184,7 @@ impl P2pSourceRegistry {
                 piece_cache: Arc::new(Mutex::new(VerifiedPieceCache::default())),
                 piece_locks: Arc::new(Mutex::new(HashMap::new())),
                 disk_dir,
+                disk_cache: self.disk_cache.clone(),
             },
         );
         Ok(id)
@@ -186,9 +203,16 @@ impl P2pSourceRegistry {
         let cache = entry.piece_cache.clone();
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
+        let disk_cache = entry.disk_cache.clone();
         drop(entries);
-        let provider =
-            cached_verified_provider(manifest.clone(), provider, cache, piece_locks, disk_dir);
+        let provider = cached_verified_provider(
+            manifest.clone(),
+            provider,
+            cache,
+            piece_locks,
+            disk_dir,
+            disk_cache,
+        );
         manifest.read_verified_range(start, end, &provider)
     }
 
@@ -206,9 +230,16 @@ impl P2pSourceRegistry {
         let cache = entry.piece_cache.clone();
         let piece_locks = entry.piece_locks.clone();
         let disk_dir = entry.disk_dir.clone();
+        let disk_cache = entry.disk_cache.clone();
         drop(entries);
-        let provider =
-            cached_verified_provider(manifest.clone(), provider, cache, piece_locks, disk_dir);
+        let provider = cached_verified_provider(
+            manifest.clone(),
+            provider,
+            cache,
+            piece_locks,
+            disk_dir,
+            disk_cache,
+        );
 
         let mut hasher = Sha256::new();
         for index in 0..manifest.piece_sha256.len() {
@@ -256,6 +287,7 @@ fn cached_verified_provider(
     cache: Arc<Mutex<VerifiedPieceCache>>,
     piece_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
     disk_dir: Option<PathBuf>,
+    disk_cache: Option<Arc<P2pDiskCache>>,
 ) -> P2pPieceProvider {
     Arc::new(move |index| {
         if let Some(piece) = cache
@@ -293,7 +325,12 @@ fn cached_verified_provider(
         let piece = provider(index)?;
         manifest.verify_piece(index, &piece)?;
         if let Some(directory) = &disk_dir {
-            write_verified_disk_piece(directory, index, &piece)?;
+            if disk_cache.as_ref().is_none_or(|cache| cache.max_bytes > 0) {
+                write_verified_disk_piece(directory, index, &piece)?;
+            }
+        }
+        if let Some(cache) = &disk_cache {
+            enforce_disk_cache_limit(cache)?;
         }
         let piece = cache
             .lock()
@@ -301,6 +338,53 @@ fn cached_verified_provider(
             .insert(index, piece);
         Ok(piece.as_ref().clone())
     })
+}
+
+fn enforce_disk_cache_limit(cache: &P2pDiskCache) -> Result<()> {
+    let _guard = cache
+        .maintenance
+        .lock()
+        .map_err(|_| ProxyError::Storage("P2P disk cache unavailable".to_string()))?;
+    let roots = match std::fs::read_dir(&cache.root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(ProxyError::Storage(error.to_string())),
+    };
+    let mut files = Vec::new();
+    let mut total = 0u64;
+    for root in roots.flatten() {
+        if !root.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(root.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("piece") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            total = total.saturating_add(metadata.len());
+            files.push((
+                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                metadata.len(),
+                path,
+            ));
+        }
+    }
+    files.sort_unstable_by_key(|(modified, _, _)| *modified);
+    for (_, size, path) in files {
+        if total <= cache.max_bytes {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+    Ok(())
 }
 
 fn read_verified_disk_piece(
@@ -848,5 +932,25 @@ mod tests {
             b"data"
         );
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn disk_cache_limit_evicts_oldest_verified_pieces() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("0.piece"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(second.join("0.piece"), b"new").unwrap();
+        let cache = P2pDiskCache {
+            root: directory.path().to_path_buf(),
+            max_bytes: 3,
+            maintenance: Mutex::new(()),
+        };
+        enforce_disk_cache_limit(&cache).unwrap();
+        assert!(!first.join("0.piece").exists());
+        assert_eq!(std::fs::read(second.join("0.piece")).unwrap(), b"new");
     }
 }
