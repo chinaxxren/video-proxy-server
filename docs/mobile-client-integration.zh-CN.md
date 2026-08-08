@@ -299,10 +299,14 @@ ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前�
 或分析事件中暴露 signed URL。相同 identity 和 URL 重复注册会复用原 ID，刷新 URL 不会改变
 缓存身份。
 
+使用 `proxy_source_set_refresh_callback` 注册自动刷新回调。回调可能在 Core 的阻塞工作线程
+执行，并返回临时的 NUL 结尾 UTF-8 URL。Core 会立即复制和校验，对同一 source ID 的并发
+刷新进行合并，并对失败请求最多重试一次。
+
 ## 当前仓库差距
 
 当前仓库已经提供 create/start/stop/destroy C ABI，以及
 `proxy_source_register`、`proxy_source_refresh`、`proxy_source_remove`。这些 API
 将 signed URL 保留在 Core 内部，只返回不透明 ID。平台产物包括 iOS XCFramework/Swift、
-Android JNI/AAR 和鸿蒙 N-API/HAR。HTTP `/media/<id>` 路由及 HLS 子资源重写已经完成，
-刷新回调调度和三端真实播放器真机验证仍未完成。本文档是剩余移动 SDK 工作的验收合同。
+Android JNI/AAR 和鸿蒙 N-API/HAR。HTTP `/media/<id>` 路由、HLS 子资源重写和刷新回调调度
+已经完成，三端真实播放器真机验证仍未完成。本文档是剩余移动 SDK 工作的验收合同。

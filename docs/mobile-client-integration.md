@@ -306,11 +306,16 @@ resources use the same opaque route. Refresh an expired URL with
 identity. Re-registering the same identity and URL reuses its ID. Never expose signed URLs in player
 URLs, logs, or analytics.
 
+Register `proxy_source_set_refresh_callback` for automatic expiry handling. The
+callback may run on a Core blocking-worker thread and must return a temporary
+NUL-terminated UTF-8 URL. Core copies and validates it immediately, coalesces
+concurrent refreshes per source ID, and retries the failed request once.
+
 ## Current Repository Gap
 
 The repository now exposes a C ABI with create/start/stop/destroy plus
 `proxy_source_register`, `proxy_source_refresh`, and `proxy_source_remove`. These
 APIs keep signed URLs inside Core and return only opaque IDs. The platform
 packages are iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR.
-The HTTP `/media/<id>` routing and HLS child-resource rewriting are implemented.
-Refresh callback dispatch and real-player device validation remain outstanding.
+The HTTP `/media/<id>` routing, HLS child-resource rewriting, and refresh callback
+dispatch are implemented. Real-player device validation remains outstanding.
