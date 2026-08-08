@@ -1195,6 +1195,39 @@ mod tests {
     }
 
     #[test]
+    fn removing_one_shared_registration_preserves_cache_for_an_active_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let digest = sha256_hex(b"data");
+        let source = AuthorizedP2pSource::new("asset", 4, &digest, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![digest]).unwrap();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let provider_gate = gate.clone();
+        let provider: P2pPieceProvider = Arc::new(move |_| {
+            let (lock, ready) = &*provider_gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let first = registry
+            .register(source.clone(), manifest.clone(), provider.clone())
+            .unwrap();
+        let second = registry.register(source, manifest, provider).unwrap();
+        let reader_registry = registry.clone();
+        let reader = std::thread::spawn(move || reader_registry.read_range(second, 0, 3).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(registry.remove(first));
+        assert!(registry.source_info(second).is_some());
+        let (lock, ready) = &*gate;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+        assert_eq!(reader.join().unwrap(), b"data");
+        assert!(registry.remove(second));
+    }
+
+    #[test]
     fn corrupt_disk_piece_is_deleted_and_refetched() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let directory = tempfile::tempdir().unwrap();
