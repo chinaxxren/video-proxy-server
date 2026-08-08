@@ -229,4 +229,20 @@ mod tests {
         assert!(checked_playlist_length(usize::MAX, 1).is_err());
         assert!(checked_playlist_length(MAX_PLAYLIST_BYTES, 1).is_err());
     }
+
+    #[test]
+    fn rewritten_hls_sources_are_opaque_and_cover_uri_attributes() {
+        let policy = Arc::new(NetworkPolicy::allow_hosts(["media.example"]));
+        let handler =
+            DefaultHlsHandler::new(std::env::temp_dir(), policy, SourceRegistry::default());
+        let signed = "https://media.example/live/seg.ts?token=secret";
+        let encoded = crate::utils::percent_encoding::encode_component(signed);
+        let input = format!(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"/proxy/{encoded}\"\n/proxy/{encoded}\n"
+        );
+        let output = handler.register_rewritten_sources(&input).unwrap();
+        assert!(!output.contains("secret"));
+        assert_eq!(output.matches("/media/").count(), 2);
+        assert!(!output.contains("/proxy/"));
+    }
 }
