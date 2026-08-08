@@ -106,6 +106,9 @@ fn resolve_media_route<B>(req: Request<B>, registry: &SourceRegistry) -> Result<
         }
     }
     builder = builder.header("X-Original-Url", source.url);
+    builder = builder
+        .header("X-Cache-Asset-Id", source.identity)
+        .header("X-Cache-Asset-Revision", "1");
     let body = req.into_body();
     builder
         .body(body)
@@ -226,6 +229,11 @@ mod tests {
         assert_eq!(
             resolved.headers().get("X-Original-Url").unwrap(),
             "https://media.example/a.mp4?token=secret"
+        );
+        assert_eq!(resolved.headers().get("X-Cache-Asset-Id").unwrap(), "asset");
+        assert_eq!(
+            resolved.headers().get("X-Cache-Asset-Revision").unwrap(),
+            "1"
         );
     }
 
