@@ -4,7 +4,9 @@
 //! the returned handle remains valid until `proxy_server_destroy` is called.
 
 use crate::server::{ProxyConfig, ProxyServer};
-use std::ffi::{c_char, c_void, CStr};
+#[cfg(feature = "p2p")]
+use std::ffi::c_void;
+use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -203,6 +205,8 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     };
     let (tx, rx) = mpsc::sync_channel(1);
     let published = handle.server.clone();
+    #[cfg(feature = "p2p")]
+    let p2p_registry = handle.p2p_sources.clone();
     let thread = std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -215,7 +219,13 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             }
         };
         let result = runtime.block_on(async {
+            #[cfg(not(feature = "p2p"))]
             let server = Arc::new(ProxyServer::with_config(config));
+            #[cfg(feature = "p2p")]
+            let server = Arc::new(ProxyServer::with_config_and_p2p_registry(
+                config,
+                p2p_registry,
+            ));
             if let Ok(mut value) = published.lock() {
                 *value = Some(server.clone());
             }
@@ -375,6 +385,9 @@ mod tests {
             );
             assert_ne!(id, 0);
             assert_eq!((*handle).p2p_sources.read_range(id, 0, 3).unwrap(), b"data");
+            assert_ne!(proxy_server_start(handle), 0);
+            let server = (*handle).server.lock().unwrap().clone().unwrap();
+            assert_eq!(server.p2p_registry().read_range(id, 0, 3).unwrap(), b"data");
             assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             assert_eq!(proxy_p2p_source_remove(handle, id), 0);
             proxy_server_destroy(handle);

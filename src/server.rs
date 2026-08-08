@@ -99,6 +99,8 @@ pub struct ProxyServer {
     request_header_timeout: Duration,
     max_request_headers: usize,
     background_tasks: Arc<BackgroundTasks>,
+    #[cfg(feature = "p2p")]
+    p2p_registry: crate::p2p::P2pSourceRegistry,
 }
 
 impl ProxyServer {
@@ -126,7 +128,28 @@ impl ProxyServer {
         })
     }
 
+    #[cfg(not(feature = "p2p"))]
     pub fn with_config(config: ProxyConfig) -> Self {
+        Self::build(config)
+    }
+
+    #[cfg(feature = "p2p")]
+    pub fn with_config(config: ProxyConfig) -> Self {
+        Self::with_config_and_p2p_registry(config, crate::p2p::P2pSourceRegistry::default())
+    }
+
+    #[cfg(feature = "p2p")]
+    pub fn with_config_and_p2p_registry(
+        config: ProxyConfig,
+        p2p_registry: crate::p2p::P2pSourceRegistry,
+    ) -> Self {
+        Self::build(config, p2p_registry)
+    }
+
+    fn build(
+        config: ProxyConfig,
+        #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
+    ) -> Self {
         let policy = Arc::new(NetworkPolicy::allow_hosts(&config.allowed_hosts));
         let cache_dir = config.cache_dir.clone();
 
@@ -165,7 +188,14 @@ impl ProxyServer {
             request_header_timeout: config.request_header_timeout,
             max_request_headers: config.max_request_headers,
             background_tasks,
+            #[cfg(feature = "p2p")]
+            p2p_registry,
         }
+    }
+
+    #[cfg(feature = "p2p")]
+    pub fn p2p_registry(&self) -> crate::p2p::P2pSourceRegistry {
+        self.p2p_registry.clone()
     }
 
     /// 发送优雅停止信号。`start()` 会完成所有进行中的请求后关闭监听器。
