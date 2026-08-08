@@ -76,8 +76,8 @@ Core 初始化时也会执行一次 P2P 淘汰，确保前一个进程留下的�
 若未显式 remove，而只是销毁并重新创建 Core，则保留已验证分片用于重启恢复。
 Adapter 可在播放前调用 `proxy_p2p_source_verify_complete` 校验全部分片和完整内容摘要。
 成功返回 `1`，Provider 或完整性校验失败返回 `0`；该操作可能会获取整个资源。
-如果完整摘要不匹配，Core 会永久使该 source ID 失效，后续 Range 请求会失败；Host 必须
-重新注册新的授权 source。
+如果完整摘要不匹配，Core 会永久使共享该 manifest 缓存身份的全部已注册 source 失效，
+后续 Range 请求会失败；Host 必须注册修正后的授权 source。
 
 ## 播放
 

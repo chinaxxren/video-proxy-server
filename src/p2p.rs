@@ -314,6 +314,7 @@ impl P2pSourceRegistry {
         let disk_dir = entry.disk_dir.clone();
         let disk_cache = entry.disk_cache.clone();
         let invalid = entry.invalid.clone();
+        let invalid_directory = disk_dir.clone();
         let _lease = entry.lifecycle.acquire()?;
         drop(entries);
         let provider = cached_verified_provider(
@@ -334,6 +335,15 @@ impl P2pSourceRegistry {
         let actual = bytes_to_hex(&hasher.finalize());
         if actual != source_digest {
             invalid.store(true, Ordering::Release);
+            if let Some(directory) = invalid_directory {
+                if let Ok(entries) = self.entries.read() {
+                    for other in entries.values() {
+                        if other.disk_dir.as_ref() == Some(&directory) {
+                            other.invalid.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
             return Err(ProxyError::Request(
                 "P2P complete content integrity check failed".to_string(),
             ));
@@ -1010,13 +1020,18 @@ mod tests {
 
     #[test]
     fn rejects_manifest_whose_pieces_do_not_match_whole_digest() {
+        let directory = tempfile::tempdir().unwrap();
         let source = AuthorizedP2pSource::new("asset", 4, DIGEST, "license", true).unwrap();
         let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
         let provider: P2pPieceProvider = Arc::new(|_| Ok(b"data".to_vec()));
-        let registry = P2pSourceRegistry::default();
-        let id = registry.register(source, manifest, provider).unwrap();
-        assert!(registry.verify_complete(id).is_err());
-        assert!(registry.read_range(id, 0, 3).is_err());
+        let registry = P2pSourceRegistry::with_cache_dir(directory.path().to_path_buf());
+        let first = registry
+            .register(source.clone(), manifest.clone(), provider.clone())
+            .unwrap();
+        let second = registry.register(source, manifest, provider).unwrap();
+        assert!(registry.verify_complete(first).is_err());
+        assert!(registry.read_range(first, 0, 3).is_err());
+        assert!(registry.read_range(second, 0, 3).is_err());
     }
 
     #[test]
