@@ -200,4 +200,24 @@ mod tests {
             .register("hls", "https://media.example/overflow.ts")
             .is_err());
     }
+
+    #[test]
+    fn concurrent_reuse_returns_one_id() {
+        let registry = SourceRegistry::default();
+        let mut workers = Vec::new();
+        for _ in 0..32 {
+            let registry = registry.clone();
+            workers.push(std::thread::spawn(move || {
+                registry
+                    .register_or_reuse("hls", "https://media.example/live/seg.ts")
+                    .unwrap()
+            }));
+        }
+        let ids: Vec<u64> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(ids.len(), 32);
+    }
 }
