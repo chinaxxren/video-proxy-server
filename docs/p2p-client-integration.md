@@ -19,6 +19,14 @@ cargo test --locked --features p2p
 Define `MEDIA_PROXY_CACHE_ENABLE_P2P` when compiling native Adapter code that
 includes `include/media_proxy_cache.h`.
 
+Mobile packaging remains P2P-free by default. Build a clearly labeled optional
+package with:
+
+```bash
+P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
+P2P_ENABLED=1 ./scripts/package-mobile.sh
+```
+
 ## Authorization Manifest
 
 Pass UTF-8 JSON to `proxy_p2p_source_register`:

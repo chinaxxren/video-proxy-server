@@ -4,6 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-${ROOT_DIR}/dist/mobile}"
 PROFILE="${PROFILE:-release}"
+P2P_ENABLED="${P2P_ENABLED:-0}"
+
+if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
+  echo "P2P_ENABLED must be 0 or 1" >&2
+  exit 2
+fi
+
+CARGO_FEATURE_ARGS=()
+if [[ "$P2P_ENABLED" == "1" ]]; then
+  CARGO_FEATURE_ARGS=(--features p2p)
+fi
 
 cd "$ROOT_DIR"
 mkdir -p "$OUT_DIR/include"
@@ -16,9 +27,9 @@ build_target() {
     return 1
   }
   if [[ -n "$crate_type" ]]; then
-    cargo rustc --locked --$PROFILE --target "$target" --lib -- --crate-type="$crate_type"
+    cargo rustc --locked --$PROFILE --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}" -- --crate-type="$crate_type"
   else
-    cargo build --locked --$PROFILE --target "$target" --lib
+    cargo build --locked --$PROFILE --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}"
   fi
   mkdir -p "$OUT_DIR/$platform/$target"
   local copied=0
@@ -49,5 +60,7 @@ case "${PLATFORM:-all}" in
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;
   *) echo "Usage: PLATFORM={macos|windows|ios|android|harmony|all} $0 [output-dir]" >&2; exit 2 ;;
 esac
+
+printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
 echo "Mobile artifacts written to $OUT_DIR"

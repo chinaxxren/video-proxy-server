@@ -18,6 +18,13 @@ cargo test --locked --features p2p
 原生 Adapter 引用 `include/media_proxy_cache.h` 时，需要定义
 `MEDIA_PROXY_CACHE_ENABLE_P2P`。
 
+移动端打包默认不包含 P2P。使用以下命令生成带明确 `-p2p` 标记的可选包：
+
+```bash
+P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
+P2P_ENABLED=1 ./scripts/package-mobile.sh
+```
+
 ## 授权清单
 
 向 `proxy_p2p_source_register` 传入 UTF-8 JSON：
