@@ -200,12 +200,16 @@ impl P2pSourceRegistry {
 
     pub fn with_cache_limit(cache_root: PathBuf, max_bytes: u64) -> Self {
         cleanup_stale_disk_temps(&cache_root);
+        let disk_cache = Arc::new(P2pDiskCache {
+            root: cache_root,
+            max_bytes,
+            maintenance: Mutex::new(DiskCacheState::default()),
+        });
+        // A previous process may have exited while over budget. Best-effort
+        // cleanup here keeps an idle restarted Core from retaining that excess.
+        let _ = enforce_disk_cache_limit(&disk_cache, None);
         Self {
-            disk_cache: Some(Arc::new(P2pDiskCache {
-                root: cache_root,
-                max_bytes,
-                maintenance: Mutex::new(DiskCacheState::default()),
-            })),
+            disk_cache: Some(disk_cache),
             ..Self::default()
         }
     }
@@ -1262,6 +1266,22 @@ mod tests {
         let new_path = second.join("0.piece");
         std::fs::write(&new_path, b"new").unwrap();
         enforce_disk_cache_limit(&cache, Some(&new_path)).unwrap();
+        assert!(!first.join("0.piece").exists());
+        assert_eq!(std::fs::read(second.join("0.piece")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn disk_cache_limit_is_enforced_when_registry_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("0.piece"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(second.join("0.piece"), b"new").unwrap();
+
+        let _registry = P2pSourceRegistry::with_cache_limit(directory.path().to_path_buf(), 3);
         assert!(!first.join("0.piece").exists());
         assert_eq!(std::fs::read(second.join("0.piece")).unwrap(), b"new");
     }
