@@ -4,6 +4,7 @@
 //! may provide bytes only after creating a validated descriptor that proves the
 //! application made an explicit authorization decision.
 
+use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
 
 const SHA256_HEX_LENGTH: usize = 64;
@@ -15,6 +16,65 @@ pub struct AuthorizedP2pSource {
     content_id: String,
     content_length: u64,
     sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P2pPieceManifest {
+    content_length: u64,
+    piece_length: u64,
+    piece_sha256: Vec<String>,
+}
+
+impl P2pPieceManifest {
+    pub fn new(content_length: u64, piece_length: u64, piece_sha256: Vec<String>) -> Result<Self> {
+        if content_length == 0 || piece_length == 0 {
+            return Err(ProxyError::Request(
+                "P2P piece lengths must be positive".to_string(),
+            ));
+        }
+        let count = content_length
+            .checked_add(piece_length - 1)
+            .ok_or_else(|| ProxyError::Request("P2P piece count overflow".to_string()))?
+            / piece_length;
+        if usize::try_from(count).ok() != Some(piece_sha256.len()) {
+            return Err(ProxyError::Request(
+                "P2P piece digest count does not match content length".to_string(),
+            ));
+        }
+        let piece_sha256 = piece_sha256
+            .into_iter()
+            .map(|digest| validate_digest(&digest))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            content_length,
+            piece_length,
+            piece_sha256,
+        })
+    }
+
+    pub fn verify_piece(&self, index: usize, bytes: &[u8]) -> Result<()> {
+        let digest = self
+            .piece_sha256
+            .get(index)
+            .ok_or_else(|| ProxyError::Request("P2P piece index is out of bounds".to_string()))?;
+        let start = (index as u64)
+            .checked_mul(self.piece_length)
+            .ok_or_else(|| ProxyError::Request("P2P piece offset overflow".to_string()))?;
+        let expected_length = self
+            .piece_length
+            .min(self.content_length.saturating_sub(start));
+        if bytes.len() as u64 != expected_length {
+            return Err(ProxyError::Request(
+                "P2P piece length does not match manifest".to_string(),
+            ));
+        }
+        if sha256_hex(bytes) != *digest {
+            return Err(ProxyError::Request(
+                "P2P piece integrity check failed".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl AuthorizedP2pSource {
@@ -46,17 +106,11 @@ impl AuthorizedP2pSource {
                 "P2P content length must be positive".to_string(),
             ));
         }
-        let sha256 = sha256.trim();
-        if sha256.len() != SHA256_HEX_LENGTH || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(ProxyError::Request(
-                "P2P SHA-256 digest is invalid".to_string(),
-            ));
-        }
+        let sha256 = validate_digest(sha256)?;
         Ok(Self {
             content_id,
             content_length,
-            sha256: sha256.to_ascii_lowercase(),
+            sha256,
         })
     }
 
@@ -71,6 +125,16 @@ impl AuthorizedP2pSource {
     pub fn sha256(&self) -> &str {
         &self.sha256
     }
+}
+
+fn validate_digest(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.len() != SHA256_HEX_LENGTH || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ProxyError::Request(
+            "P2P SHA-256 digest is invalid".to_string(),
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
 }
 
 fn validate_text(value: &str, max_length: usize, label: &str) -> Result<String> {
@@ -108,5 +172,25 @@ mod tests {
         );
         assert!(AuthorizedP2pSource::new("asset", 0, DIGEST, "license", true).is_err());
         assert!(AuthorizedP2pSource::new("asset", 1, "bad", "license", true).is_err());
+    }
+
+    #[test]
+    fn verifies_each_piece_and_short_final_piece() {
+        let first = sha256_hex(b"abcd");
+        let second = sha256_hex(b"ef");
+        let manifest = P2pPieceManifest::new(6, 4, vec![first, second]).unwrap();
+        assert!(manifest.verify_piece(0, b"abcd").is_ok());
+        assert!(manifest.verify_piece(1, b"ef").is_ok());
+        assert!(manifest.verify_piece(1, b"efgh").is_err());
+        assert!(manifest.verify_piece(2, b"").is_err());
+        assert!(manifest.verify_piece(0, b"abce").is_err());
+    }
+
+    #[test]
+    fn rejects_inconsistent_piece_manifests() {
+        assert!(P2pPieceManifest::new(0, 4, vec![]).is_err());
+        assert!(P2pPieceManifest::new(8, 0, vec![]).is_err());
+        assert!(P2pPieceManifest::new(8, 4, vec![DIGEST.to_string()]).is_err());
+        assert!(P2pPieceManifest::new(4, 4, vec!["bad".to_string()]).is_err());
     }
 }
