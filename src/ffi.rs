@@ -371,6 +371,8 @@ mod tests {
             let invalid = [0xff_u8, 0];
             assert!(proxy_server_create(0, invalid.as_ptr().cast()).is_null());
             assert_eq!(proxy_server_start(ptr::null_mut()), 0);
+            #[cfg(feature = "p2p")]
+            assert_eq!(proxy_p2p_source_verify_complete(ptr::null_mut(), 1), 0);
             proxy_server_stop(ptr::null_mut());
             proxy_server_destroy(ptr::null_mut());
         }
@@ -465,6 +467,7 @@ mod tests {
             assert!(invalid_range.starts_with("HTTP/1.1 416"));
             assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             assert_eq!(proxy_p2p_source_remove(handle, id), 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 0);
             let removed = raw_http(
                 port,
                 &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
