@@ -1,0 +1,95 @@
+name: mobile-native
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Build iOS libraries
+        run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
+      - name: Archive iOS artifacts
+        run: |
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz -C dist/mobile ios ios-sim include
+          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-proxy-cache-${{ github.ref_name }}-ios
+          path: media-proxy-cache-${{ github.ref_name }}-ios.*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: media-proxy-cache-${{ github.ref_name }}-ios.*
+
+  android:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager "platform-tools" "platforms;android-34" "ndk;26.3.11579264"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Build Android libraries
+        run: |
+          export NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
+          PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+      - name: Archive Android artifacts
+        run: |
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz -C dist/mobile android include
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-proxy-cache-${{ github.ref_name }}-android
+          path: media-proxy-cache-${{ github.ref_name }}-android.*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: media-proxy-cache-${{ github.ref_name }}-android.*
+
+  harmony:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-ohos,armv7-unknown-linux-ohos
+      - name: Check OHOS NDK toolchain
+        env:
+          OHOS_NDK_HOME: ${{ vars.OHOS_NDK_HOME }}
+        run: |
+          test -n "$OHOS_NDK_HOME" || { echo "Configure repository variable OHOS_NDK_HOME to an OHOS NDK installation" >&2; exit 1; }
+          test -x "$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang" || { echo "Missing OHOS clang linker under $OHOS_NDK_HOME/native/llvm/bin" >&2; exit 1; }
+      - name: Build HarmonyOS libraries
+        env:
+          OHOS_NDK_HOME: ${{ vars.OHOS_NDK_HOME }}
+        run: |
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang"
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/armv7-unknown-linux-ohos-clang"
+          PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
+      - name: Archive HarmonyOS artifacts
+        run: |
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz -C dist/mobile harmony include
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-proxy-cache-${{ github.ref_name }}-harmony
+          path: media-proxy-cache-${{ github.ref_name }}-harmony.*
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: media-proxy-cache-${{ github.ref_name }}-harmony.*

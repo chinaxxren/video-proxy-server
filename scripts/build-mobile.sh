@@ -39,7 +39,7 @@ build_target() {
 case "${PLATFORM:-all}" in
   macos) build_target macos aarch64-apple-darwin; build_target macos x86_64-apple-darwin ;;
   windows) build_target windows x86_64-pc-windows-gnu ;;
-  ios) build_target ios aarch64-apple-ios; build_target ios-sim aarch64-apple-ios-sim ;;
+  ios) build_target ios aarch64-apple-ios; build_target ios-sim aarch64-apple-ios-sim; build_target ios-sim x86_64-apple-ios ;;
   android) build_target android aarch64-linux-android; build_target android armv7-linux-androideabi; build_target android x86_64-linux-android ;;
   harmony) build_target harmony aarch64-unknown-linux-ohos ;;
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;

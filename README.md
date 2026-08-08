@@ -172,6 +172,12 @@ a GitHub Release. Each archive includes a matching `.sha256` file; verify a
 download on macOS/Linux with `shasum -a 256 -c <archive>.sha256` or on Windows
 with `Get-FileHash <archive> -Algorithm SHA256`.
 
+The separate `.github/workflows/mobile.yml` workflow builds iOS and Android
+native libraries on GitHub-hosted runners and publishes them as Release assets
+for tagged pushes. The HarmonyOS job requires a repository variable named
+`OHOS_NDK_HOME` pointing to an installed OHOS NDK; it fails explicitly when the
+toolchain is not configured.
+
 On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
 release dylib and exercises the complete create/start/stop/destroy lifecycle.
 
