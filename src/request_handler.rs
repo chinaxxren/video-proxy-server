@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+#[cfg(feature = "p2p")]
+const P2P_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
@@ -128,18 +131,36 @@ impl RequestHandler {
                 return None;
             }
             let chunk_end = end.min(current.saturating_add(8 * 1024 * 1024 - 1));
-            let task_registry = registry.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                task_registry.read_range(id, current, chunk_end)
-            })
-            .await
-            .map_err(|_| ProxyError::Storage("P2P provider task failed".to_string()))
-            .and_then(|result| result)
-            .map(bytes::Bytes::from);
+            let result = read_p2p_chunk(
+                registry.clone(),
+                id,
+                current,
+                chunk_end,
+                P2P_PROVIDER_TIMEOUT,
+            )
+            .await;
             Some((result, (registry, id, chunk_end.saturating_add(1), end)))
         });
         builder.body(stream_body(stream)).map_err(ProxyError::from)
     }
+}
+
+#[cfg(feature = "p2p")]
+async fn read_p2p_chunk(
+    registry: crate::p2p::P2pSourceRegistry,
+    id: u64,
+    start: u64,
+    end: u64,
+    timeout: std::time::Duration,
+) -> Result<bytes::Bytes> {
+    tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || registry.read_range(id, start, end)),
+    )
+    .await
+    .map_err(|_| ProxyError::Network("P2P provider timed out".to_string()))?
+    .map_err(|_| ProxyError::Storage("P2P provider task failed".to_string()))?
+    .map(bytes::Bytes::from)
 }
 
 /// 客户端没发 `Range` 时把 206 改写成 200。
@@ -325,5 +346,27 @@ mod tests {
             "media"
         );
         assert!(semaphore.try_acquire_owned().is_ok());
+    }
+
+    #[cfg(feature = "p2p")]
+    #[tokio::test]
+    async fn blocking_p2p_provider_is_bounded_by_timeout() {
+        use crate::p2p::{
+            AuthorizedP2pSource, P2pPieceManifest, P2pPieceProvider, P2pSourceRegistry,
+        };
+        use crate::utils::digest::sha256_hex;
+        let source =
+            AuthorizedP2pSource::new("asset", 4, &sha256_hex(b"data"), "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        let error = read_p2p_chunk(registry, id, 0, 3, std::time::Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProxyError::Network(_)));
     }
 }
