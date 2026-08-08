@@ -6,6 +6,7 @@
 
 use crate::utils::digest::sha256_hex;
 use crate::utils::error::{ProxyError, Result};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -90,6 +91,34 @@ impl P2pSourceRegistry {
         let provider = entry.provider.clone();
         drop(entries);
         manifest.read_verified_range(start, end, &provider)
+    }
+
+    pub fn verify_complete(&self, id: u64) -> Result<()> {
+        let entries = self
+            .entries
+            .read()
+            .map_err(|_| ProxyError::Storage("P2P registry unavailable".to_string()))?;
+        let entry = entries
+            .get(&id)
+            .ok_or_else(|| ProxyError::Request("P2P source ID not found".to_string()))?;
+        let source_digest = entry.source.sha256.clone();
+        let manifest = entry.manifest.clone();
+        let provider = entry.provider.clone();
+        drop(entries);
+
+        let mut hasher = Sha256::new();
+        for index in 0..manifest.piece_sha256.len() {
+            let piece = provider(index)?;
+            manifest.verify_piece(index, &piece)?;
+            hasher.update(&piece);
+        }
+        let actual = bytes_to_hex(&hasher.finalize());
+        if actual != source_digest {
+            return Err(ProxyError::Request(
+                "P2P complete content integrity check failed".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn content_length(&self, id: u64) -> Option<u64> {
@@ -276,6 +305,16 @@ fn validate_digest(value: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn validate_text(value: &str, max_length: usize, label: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty()
@@ -391,5 +430,45 @@ mod tests {
         assert!(P2pSourceRegistry::default()
             .register(source, manifest, provider)
             .is_err());
+    }
+
+    #[test]
+    fn verifies_complete_content_digest_after_piece_checks() {
+        let content = b"abcdefghij";
+        let source = AuthorizedP2pSource::new(
+            "asset",
+            content.len() as u64,
+            &sha256_hex(content),
+            "license",
+            true,
+        )
+        .unwrap();
+        let pieces = [b"abcd".to_vec(), b"efgh".to_vec(), b"ij".to_vec()];
+        let manifest = P2pPieceManifest::new(
+            content.len() as u64,
+            4,
+            pieces.iter().map(|piece| sha256_hex(piece)).collect(),
+        )
+        .unwrap();
+        let provider_pieces = pieces.clone();
+        let provider: P2pPieceProvider = Arc::new(move |index| {
+            provider_pieces
+                .get(index)
+                .cloned()
+                .ok_or_else(|| ProxyError::Request("missing piece".to_string()))
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        assert!(registry.verify_complete(id).is_ok());
+    }
+
+    #[test]
+    fn rejects_manifest_whose_pieces_do_not_match_whole_digest() {
+        let source = AuthorizedP2pSource::new("asset", 4, DIGEST, "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| Ok(b"data".to_vec()));
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        assert!(registry.verify_complete(id).is_err());
     }
 }
