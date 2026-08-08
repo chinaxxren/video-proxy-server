@@ -473,4 +473,35 @@ mod tests {
             proxy_server_destroy(handle);
         }
     }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn ffi_complete_verification_rejects_corrupt_host_bytes() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let pieces = vec![b"evil".to_vec()];
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "content_id": "asset",
+            "content_length": 4,
+            "content_sha256": crate::utils::digest::sha256_hex(b"data"),
+            "piece_length": 4,
+            "piece_sha256": [crate::utils::digest::sha256_hex(b"data")],
+            "authorization_reference": "license",
+            "explicitly_authorized": true
+        }))
+        .unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            let id = proxy_p2p_source_register(
+                handle,
+                manifest.as_ptr(),
+                manifest.len(),
+                Some(p2p_piece_callback),
+                (&pieces as *const Vec<Vec<u8>>).cast_mut().cast(),
+            );
+            assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 0);
+            proxy_server_destroy(handle);
+        }
+    }
 }
