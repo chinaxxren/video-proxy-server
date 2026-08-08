@@ -27,6 +27,8 @@ P2P_ENABLED=1 ./scripts/package-mobile.sh
 
 启用 P2P 的原生构建会校验 register、完整校验和 remove 三个 ABI 导出符号；任何符号
 缺失都会使构建失败。
+打包时还要求 `build-features.txt` 与 `P2P_ENABLED` 完全一致，防止默认库被错误标记为
+可选 P2P Release，反向混用也会被拒绝。
 
 在 GitHub Actions 中手动运行 `mobile-native`，并将 `include_p2p` 设为 true。Tag 自动
 发布始终构建默认核心包；可选产物名称会包含 `-p2p`。

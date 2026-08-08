@@ -10,6 +10,13 @@ if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   exit 2
 fi
 test -d "$INPUT_DIR" || { echo "Missing artifact directory: $INPUT_DIR" >&2; exit 1; }
+FEATURE_MARKER="$INPUT_DIR/build-features.txt"
+test -f "$FEATURE_MARKER" || { echo "Missing build feature marker: $FEATURE_MARKER" >&2; exit 1; }
+EXPECTED_FEATURE="p2p_enabled=$P2P_ENABLED"
+if ! grep -Fqx "$EXPECTED_FEATURE" "$FEATURE_MARKER"; then
+  echo "Build feature marker does not match requested package: expected $EXPECTED_FEATURE" >&2
+  exit 1
+fi
 mkdir -p "$OUTPUT_DIR"
 P2P_SUFFIX=""
 if [[ "$P2P_ENABLED" == "1" ]]; then
