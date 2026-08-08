@@ -213,7 +213,10 @@ pub unsafe extern "C" fn proxy_source_register(
     let (Some(identity), Some(url)) = (read_string(identity), read_string(url)) else {
         return 0;
     };
-    handle.sources.register(&identity, &url).unwrap_or(0)
+    handle
+        .sources
+        .register_or_reuse(&identity, &url)
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -321,6 +324,10 @@ mod tests {
             assert!(!handle.is_null());
             let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
             assert_ne!(id, 0);
+            assert_eq!(
+                proxy_source_register(handle, identity.as_ptr(), source.as_ptr()),
+                id
+            );
             assert!(!id.to_string().contains("secret"));
             assert_eq!(proxy_source_refresh(handle, id, rotated.as_ptr()), 1);
             assert_eq!(proxy_source_refresh(handle, 999, rotated.as_ptr()), 0);
