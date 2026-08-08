@@ -301,6 +301,13 @@ mod tests {
         URL.get_or_init(|| CString::new("https://media.example/refreshed.mp4?token=new").unwrap())
             .as_ptr()
     }
+
+    unsafe extern "C" fn null_refresh_callback(
+        _context: *mut c_void,
+        _source_id: u64,
+    ) -> *const c_char {
+        ptr::null()
+    }
     use std::io::{Read, Write};
 
     #[test]
@@ -411,7 +418,28 @@ mod tests {
                 1
             );
             assert!((*handle).sources.refresh_from_provider(id).is_err());
+            assert_eq!(
+                proxy_source_set_refresh_callback(
+                    handle,
+                    Some(null_refresh_callback),
+                    ptr::null_mut(),
+                ),
+                1
+            );
+            assert!((*handle).sources.refresh_from_provider(id).is_err());
+            assert_eq!(
+                (*handle).sources.resolve(id).unwrap().url,
+                "https://media.example/refreshed.mp4?token=new"
+            );
             proxy_server_destroy(handle);
+            assert_eq!(
+                proxy_source_set_refresh_callback(
+                    ptr::null_mut(),
+                    Some(test_refresh_callback),
+                    ptr::null_mut(),
+                ),
+                0
+            );
         }
     }
 
