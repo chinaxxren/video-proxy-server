@@ -79,11 +79,15 @@ piece manifest, so different piece layouts for identical content cannot collide.
 
 `proxy_p2p_source_remove` first prevents new reads and then waits for callbacks
 that already started. After it returns, the Host may release the callback
-context. A callback must not re-enter `proxy_p2p_source_remove` or
-`proxy_server_destroy`, because those operations wait for that callback.
+context. A callback must not re-enter P2P Core functions or
+`proxy_server_destroy`, because those operations may wait for that callback.
 Removing the last registration that references a manifest also purges that
 manifest's persistent piece directory. Dropping and recreating Core without an
 explicit remove preserves verified pieces for restart recovery.
+
+Adapters may call `proxy_p2p_source_verify_complete` before playback to verify
+all pieces and the complete content digest. It returns `1` on success and `0`
+on any provider or integrity failure; the operation may fetch the entire asset.
 
 ## Playback
 

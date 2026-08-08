@@ -70,10 +70,12 @@ Core 初始化时也会执行一次 P2P 淘汰，确保前一个进程留下的�
 版本化缓存身份同时包含整文件摘要和分片清单，因此相同内容的不同分片布局不会冲突。
 
 `proxy_p2p_source_remove` 会先阻止新读取，再等待已经开始的回调结束；返回后 Host 才可
-释放 callback context。回调内部不得重入调用 `proxy_p2p_source_remove` 或
-`proxy_server_destroy`，因为这些操作需要等待当前回调结束。
+释放 callback context。回调内部不得重入调用 P2P Core 函数或
+`proxy_server_destroy`，因为这些操作可能需要等待当前回调结束。
 移除引用某个 manifest 的最后一个注册时，也会清理该 manifest 的持久化分片目录。
 若未显式 remove，而只是销毁并重新创建 Core，则保留已验证分片用于重启恢复。
+Adapter 可在播放前调用 `proxy_p2p_source_verify_complete` 校验全部分片和完整内容摘要。
+成功返回 `1`，Provider 或完整性校验失败返回 `0`；该操作可能会获取整个资源。
 
 ## 播放
 

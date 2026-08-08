@@ -29,7 +29,7 @@ typedef size_t (*ProxyP2pPieceCallback)(
 );
 // The callback is called first with buffer=NULL/capacity=0 to query length,
 // then again to fill the Host-owned bytes into Core's buffer.
-// It must not call proxy_p2p_source_remove or proxy_server_destroy reentrantly.
+// It must not call P2P Core functions or proxy_server_destroy reentrantly.
 uint64_t proxy_p2p_source_register(
     ProxyServerHandle *handle,
     const uint8_t *manifest_json,
@@ -37,6 +37,7 @@ uint64_t proxy_p2p_source_register(
     ProxyP2pPieceCallback callback,
     void *context
 );
+uint8_t proxy_p2p_source_verify_complete(ProxyServerHandle *handle, uint64_t source_id);
 uint8_t proxy_p2p_source_remove(ProxyServerHandle *handle, uint64_t source_id);
 #endif
 

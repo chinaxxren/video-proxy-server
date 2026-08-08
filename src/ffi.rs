@@ -187,6 +187,27 @@ pub unsafe extern "C" fn proxy_p2p_source_remove(
         .unwrap_or(0)
 }
 
+/// Verifies every authorized piece and the complete content digest.
+///
+/// Returns 1 only when the Host callback supplies the complete authorized
+/// content; returns 0 for an invalid source ID or any integrity/provider error.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function. The
+/// registered callback and context must remain valid until this call returns.
+#[cfg(feature = "p2p")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_p2p_source_verify_complete(
+    handle: *mut ProxyServerHandle,
+    source_id: u64,
+) -> u8 {
+    handle
+        .as_ref()
+        .map(|handle| u8::from(handle.p2p_sources.verify_complete(source_id).is_ok()))
+        .unwrap_or(0)
+}
+
 /// Starts the server and waits until its socket is bound. Returns the bound port,
 /// or 0 on failure/already-started. A port of 0 requests OS allocation.
 ///
@@ -400,6 +421,8 @@ mod tests {
                 (&pieces as *const Vec<Vec<u8>>).cast_mut().cast(),
             );
             assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 1);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, u64::MAX), 0);
             assert_eq!((*handle).p2p_sources.read_range(id, 0, 3).unwrap(), b"data");
             let port = proxy_server_start(handle);
             assert_ne!(port, 0);
