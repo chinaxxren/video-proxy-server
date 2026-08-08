@@ -44,8 +44,8 @@ impl RequestHandler {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
-        let req = resolve_media_route(req, &self.source_registry)?;
-        let data_request = DataRequest::new(&req)?;
+        let (req, source_id) = resolve_media_route(req, &self.source_registry)?;
+        let data_request = DataRequest::with_source_id(&req, source_id)?;
 
         let response = match (is_head, data_request.get_type()) {
             (true, crate::data_request::RequestType::M3u8) => {
@@ -83,10 +83,13 @@ impl RequestHandler {
 
 /// Resolve the opaque `/media/<id>` route without exposing the signed source URL
 /// in the client-visible URI. Legacy `/proxy` and header routes remain supported.
-fn resolve_media_route<B>(req: Request<B>, registry: &SourceRegistry) -> Result<Request<B>> {
+fn resolve_media_route<B>(
+    req: Request<B>,
+    registry: &SourceRegistry,
+) -> Result<(Request<B>, Option<u64>)> {
     let path = req.uri().path();
     let Some(raw_id) = path.strip_prefix("/media/") else {
-        return Ok(req);
+        return Ok((req, None));
     };
     if raw_id.is_empty() || raw_id.contains('/') || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(ProxyError::Request("媒体来源 ID 无效".to_string()));
@@ -113,9 +116,10 @@ fn resolve_media_route<B>(req: Request<B>, registry: &SourceRegistry) -> Result<
         .header("X-Cache-Asset-Id", source.identity)
         .header("X-Cache-Asset-Revision", "1");
     let body = req.into_body();
-    builder
+    let request = builder
         .body(body)
-        .map_err(|_| ProxyError::Request("请求构造失败".to_string()))
+        .map_err(|_| ProxyError::Request("请求构造失败".to_string()))?;
+    Ok((request, Some(id)))
 }
 
 /// 客户端没发 `Range` 时把 206 改写成 200。
@@ -227,7 +231,8 @@ mod tests {
             .uri(format!("/media/{id}"))
             .body(())
             .unwrap();
-        let resolved = resolve_media_route(request, &registry).unwrap();
+        let (resolved, source_id) = resolve_media_route(request, &registry).unwrap();
+        assert_eq!(source_id, Some(id));
         assert_eq!(resolved.uri().path(), format!("/media/{id}"));
         assert_eq!(
             resolved.headers().get("X-Original-Url").unwrap(),
@@ -261,7 +266,8 @@ mod tests {
             .header("X-Cache-Asset-Revision", "999")
             .body(())
             .unwrap();
-        let resolved = resolve_media_route(request, &registry).unwrap();
+        let (resolved, source_id) = resolve_media_route(request, &registry).unwrap();
+        assert_eq!(source_id, Some(id));
         assert_eq!(
             resolved.headers().get("X-Cache-Asset-Id").unwrap(),
             "trusted-asset"

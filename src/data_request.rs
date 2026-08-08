@@ -39,10 +39,15 @@ pub struct DataRequest {
     client_sent_range: bool,
     pub headers: HeaderMap,
     pub request_type: RequestType,
+    source_id: Option<u64>,
 }
 
 impl DataRequest {
     pub fn new<B>(req: &Request<B>) -> Result<Self> {
+        Self::with_source_id(req, None)
+    }
+
+    pub(crate) fn with_source_id<B>(req: &Request<B>, source_id: Option<u64>) -> Result<Self> {
         let url = if let Some(original_url) = req.headers().get("X-Original-Url") {
             original_url.to_str()?.to_string()
         } else {
@@ -113,6 +118,7 @@ impl DataRequest {
             client_sent_range,
             headers: req.headers().clone(),
             request_type,
+            source_id,
         })
     }
 
@@ -200,6 +206,10 @@ impl DataRequest {
 
     pub fn get_type(&self) -> &RequestType {
         &self.request_type
+    }
+
+    pub fn source_id(&self) -> Option<u64> {
+        self.source_id
     }
 }
 
