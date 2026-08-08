@@ -41,7 +41,7 @@ Expected architecture targets:
 - iOS device: `aarch64-apple-ios`
 - iOS Simulator: `aarch64-apple-ios-sim` and, if required, `x86_64-apple-ios`
 - Android: `arm64-v8a`, with `armeabi-v7a` and `x86_64` only when product support requires them
-- HarmonyOS: ARM64 first; additional ABIs depend on the target device matrix and SDK toolchain
+- HarmonyOS: `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`
 
 ## Proposed Host API
 
