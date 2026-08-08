@@ -11,7 +11,7 @@ pub type Result<T> = std::result::Result<T, ProxyError>;
 pub enum ProxyError {
     Cache(String),
     Network(String),
-    UpstreamAuthorizationExpired,
+    UpstreamAuthorizationExpired(Option<u64>),
     InvalidRange(String),
     Request(String),
     Storage(String),
@@ -25,7 +25,9 @@ impl fmt::Display for ProxyError {
         match self {
             ProxyError::Cache(msg) => write!(f, "Cache error: {}", msg),
             ProxyError::Network(msg) => write!(f, "Network error: {}", msg),
-            ProxyError::UpstreamAuthorizationExpired => write!(f, "Upstream authorization expired"),
+            ProxyError::UpstreamAuthorizationExpired(_) => {
+                write!(f, "Upstream authorization expired")
+            }
             ProxyError::InvalidRange(msg) => write!(f, "Invalid range error: {}", msg),
             ProxyError::Request(msg) => write!(f, "Request error: {}", msg),
             ProxyError::Storage(msg) => write!(f, "Storage error: {}", msg),
@@ -52,7 +54,7 @@ impl ProxyError {
             ProxyError::InvalidRange(_) => hyper::StatusCode::RANGE_NOT_SATISFIABLE,
             ProxyError::Request(_) => hyper::StatusCode::BAD_REQUEST,
             ProxyError::Network(_) => hyper::StatusCode::BAD_GATEWAY,
-            ProxyError::UpstreamAuthorizationExpired => hyper::StatusCode::BAD_GATEWAY,
+            ProxyError::UpstreamAuthorizationExpired(_) => hyper::StatusCode::BAD_GATEWAY,
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => {
                 hyper::StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -70,9 +72,18 @@ impl ProxyError {
             ProxyError::Request(_) => "Bad request",
             ProxyError::Network(_)
             | ProxyError::Parse(_)
-            | ProxyError::UpstreamAuthorizationExpired => "Upstream error",
+            | ProxyError::UpstreamAuthorizationExpired(_) => "Upstream error",
             ProxyError::Cache(_) | ProxyError::Storage(_) | ProxyError::IO(_) => "Internal error",
             ProxyError::MethodNotAllowed => "Method not allowed",
+        }
+    }
+
+    pub fn with_source_id(self, source_id: Option<u64>) -> Self {
+        match self {
+            ProxyError::UpstreamAuthorizationExpired(None) => {
+                ProxyError::UpstreamAuthorizationExpired(source_id)
+            }
+            error => error,
         }
     }
 }
@@ -144,7 +155,7 @@ mod tests {
                 "Upstream error",
             ),
             (
-                ProxyError::UpstreamAuthorizationExpired,
+                ProxyError::UpstreamAuthorizationExpired(None),
                 502,
                 "Upstream error",
             ),
@@ -177,5 +188,19 @@ mod tests {
             assert!(!error.public_message().contains("secret"));
             assert!(!error.public_message().contains("private"));
         }
+    }
+
+    #[test]
+    fn authorization_error_attaches_source_context_once() {
+        let error = ProxyError::UpstreamAuthorizationExpired(None).with_source_id(Some(42));
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamAuthorizationExpired(Some(42))
+        ));
+        let error = error.with_source_id(Some(99));
+        assert!(matches!(
+            error,
+            ProxyError::UpstreamAuthorizationExpired(Some(42))
+        ));
     }
 }

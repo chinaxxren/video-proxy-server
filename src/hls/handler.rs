@@ -84,7 +84,7 @@ impl DefaultHlsHandler {
             response.status(),
             hyper::StatusCode::UNAUTHORIZED | hyper::StatusCode::FORBIDDEN
         ) {
-            return Err(ProxyError::UpstreamAuthorizationExpired);
+            return Err(ProxyError::UpstreamAuthorizationExpired(None));
         }
         if !response.status().is_success() {
             return Err(ProxyError::Network(format!(

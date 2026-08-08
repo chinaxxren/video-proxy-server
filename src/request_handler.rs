@@ -49,7 +49,11 @@ impl RequestHandler {
 
         let response = match (is_head, data_request.get_type()) {
             (true, crate::data_request::RequestType::M3u8) => {
-                let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
+                let content = self
+                    .hls_handler
+                    .handle_m3u8(data_request.get_url())
+                    .await
+                    .map_err(|error| error.with_source_id(data_request.source_id()))?;
                 Response::builder()
                     .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
                     .header(CACHE_CONTROL, "no-cache")
@@ -60,7 +64,11 @@ impl RequestHandler {
             (true, _) => self.source_manager.process_head(&data_request).await,
             (false, crate::data_request::RequestType::M3u8) => {
                 // 处理 m3u8 请求
-                let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
+                let content = self
+                    .hls_handler
+                    .handle_m3u8(data_request.get_url())
+                    .await
+                    .map_err(|error| error.with_source_id(data_request.source_id()))?;
                 // 必须带 Content-Type：缺了它 hyper 不会补，播放器普遍会拒绝
                 // 一个没有类型的播放列表，或按 text/plain 处理而不去解析。
                 Response::builder()
@@ -71,7 +79,8 @@ impl RequestHandler {
             }
             // 非播放列表一律走字节范围缓存管线（HLS 分片也在内）。
             (false, _) => self.source_manager.process_request(&data_request).await,
-        }?;
+        }
+        .map_err(|error| error.with_source_id(data_request.source_id()))?;
 
         let response = full_content_if_no_range_requested(response, &data_request);
 

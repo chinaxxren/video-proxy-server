@@ -314,7 +314,7 @@ impl NetSource {
             )));
         }
         if status == hyper::StatusCode::UNAUTHORIZED || status == hyper::StatusCode::FORBIDDEN {
-            return Err(ProxyError::UpstreamAuthorizationExpired);
+            return Err(ProxyError::UpstreamAuthorizationExpired(None));
         }
         if !status.is_success() {
             return Err(ProxyError::Request(format!(
