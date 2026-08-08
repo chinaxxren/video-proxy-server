@@ -25,6 +25,10 @@ default = []
 # 避免它被悄悄编进不该开的产物里。
 allow-private-upstream = []
 
+# Optional, protocol-neutral P2P integration boundary. Disabled by default.
+# This does not enable magnet links, DHT, public trackers, or peer discovery.
+p2p = []
+
 # feature 按实际用到的收窄，不用 "full"。
 #
 # `tokio = ["full"]` 会带上 process、signal、io-std 等本项目完全不碰的模块，

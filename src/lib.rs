@@ -5,6 +5,8 @@ pub mod ffi;
 pub mod handlers;
 pub mod hls;
 pub mod http_types;
+#[cfg(feature = "p2p")]
+pub mod p2p;
 pub mod request_handler;
 pub mod server;
 pub mod storage;
