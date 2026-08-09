@@ -21,6 +21,106 @@ pub struct MagnetRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TorrentMetadata {
+    pub info_hash: [u8; 20],
+    pub name: String,
+    pub total_length: u64,
+    pub piece_length: u32,
+    pub piece_sha1: Vec<[u8; 20]>,
+}
+
+pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
+    if input.is_empty() || input.len() > 4 * 1024 * 1024 {
+        return Err(ProxyError::Parse("invalid torrent metadata size".into()));
+    }
+    let mut parser = BencodeParser {
+        input,
+        offset: 0,
+        depth: 0,
+    };
+    if parser.input.get(parser.offset) != Some(&b'd') {
+        return Err(ProxyError::Parse(
+            "torrent metadata must be a dictionary".into(),
+        ));
+    }
+    parser.offset += 1;
+    let mut info_value = None;
+    let mut info_span = None;
+    while parser.input.get(parser.offset) != Some(&b'e') {
+        let BValue::Bytes(key) = parser.bytes()? else {
+            unreachable!()
+        };
+        let start = parser.offset;
+        let value = parser.value()?;
+        if key == b"info" {
+            if info_value.is_some() {
+                return Err(ProxyError::Parse(
+                    "duplicate torrent info dictionary".into(),
+                ));
+            }
+            info_span = Some((start, parser.offset));
+            info_value = Some(value);
+        }
+    }
+    parser.offset += 1;
+    if parser.offset != input.len() {
+        return Err(ProxyError::Parse(
+            "torrent metadata has trailing bytes".into(),
+        ));
+    }
+    let BValue::Dict(info) =
+        info_value.ok_or_else(|| ProxyError::Parse("torrent metadata is missing info".into()))?
+    else {
+        return Err(ProxyError::Parse("torrent info is not a dictionary".into()));
+    };
+    let name = match info.get(b"name" as &[u8]) {
+        Some(BValue::Bytes(value)) => String::from_utf8(value.clone())
+            .map_err(|_| ProxyError::Parse("torrent name is not UTF-8".into()))?,
+        _ => return Err(ProxyError::Parse("torrent name is missing".into())),
+    };
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return Err(ProxyError::Parse("torrent name is unsafe".into()));
+    }
+    let total_length = info
+        .get(b"length" as &[u8])
+        .and_then(BValue::integer)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ProxyError::Parse("single-file torrent length is invalid".into()))?;
+    let piece_length = info
+        .get(b"piece length" as &[u8])
+        .and_then(BValue::integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0 && *value <= 8 * 1024 * 1024)
+        .ok_or_else(|| ProxyError::Parse("torrent piece length is invalid".into()))?;
+    let pieces = match info.get(b"pieces" as &[u8]) {
+        Some(BValue::Bytes(value)) if !value.is_empty() && value.len() % 20 == 0 => value,
+        _ => return Err(ProxyError::Parse("torrent pieces are invalid".into())),
+    };
+    if pieces.len() / 20 > 1_000_000 {
+        return Err(ProxyError::Parse("torrent has too many pieces".into()));
+    }
+    let expected_count = total_length.div_ceil(piece_length as u64) as usize;
+    if pieces.len() / 20 != expected_count {
+        return Err(ProxyError::Parse(
+            "torrent piece count does not match length".into(),
+        ));
+    }
+    let piece_sha1 = pieces
+        .chunks_exact(20)
+        .map(|chunk| <[u8; 20]>::try_from(chunk).unwrap())
+        .collect();
+    let (start, end) = info_span.unwrap();
+    let info_hash: [u8; 20] = Sha1::digest(&input[start..end]).into();
+    Ok(TorrentMetadata {
+        info_hash,
+        name,
+        total_length,
+        piece_length,
+        piece_sha1,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackerResponse {
     pub interval_secs: u64,
     pub min_interval_secs: Option<u64>,
@@ -1260,6 +1360,18 @@ mod tests {
         let request =
             parse_magnet_uri("magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         assert_eq!(request.info_hash, [0; 20]);
+    }
+
+    #[test]
+    fn parses_single_file_torrent_metadata() {
+        let mut torrent = b"d4:infod6:lengthi3e4:name4:test12:piece lengthi3e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[7; 20]);
+        torrent.extend_from_slice(b"ee");
+        let metadata = parse_torrent_metadata(&torrent).unwrap();
+        assert_eq!(metadata.name, "test");
+        assert_eq!(metadata.total_length, 3);
+        assert_eq!(metadata.piece_sha1, vec![[7; 20]]);
+        assert!(parse_torrent_metadata(b"d4:info3:bade").is_err());
     }
 
     #[test]
