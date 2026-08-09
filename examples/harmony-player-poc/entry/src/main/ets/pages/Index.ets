@@ -22,20 +22,37 @@ struct Index {
   }
 
   async aboutToDisappear(): Promise<void> {
-    try {
-      await this.releasePlayer();
-    } finally {
-      this.cache?.stop();
-      this.cache?.close();
-      this.cache = undefined;
-    }
+    await this.releasePlayer();
+    this.shutdownCache();
   }
 
   private async releasePlayer(): Promise<void> {
     const active = this.player;
     this.player = undefined;
     if (active !== undefined) {
-      await active.release();
+      try {
+        await active.release();
+      } catch (reason) {
+        this.status = (reason as Error).message;
+      }
+    }
+  }
+
+  private shutdownCache(): void {
+    const active = this.cache;
+    this.cache = undefined;
+    if (active === undefined) {
+      return;
+    }
+    try {
+      active.stop();
+    } catch (reason) {
+      this.status = (reason as Error).message;
+    }
+    try {
+      active.close();
+    } catch (reason) {
+      this.status = (reason as Error).message;
     }
   }
 
@@ -49,40 +66,45 @@ struct Index {
       this.status = 'Origin URL has no hostname';
       return;
     }
-    await this.releasePlayer();
-    this.cache?.stop();
-    this.cache?.close();
-    this.cache = MediaProxyCache.create(0, this.cacheDirectory, [origin.hostname]);
-    const port = this.cache.start();
-    const player = await media.createAVPlayer();
-    this.player = player;
-    if (this.surfaceId.length === 0) {
-      this.status = 'Video surface is not ready';
+    try {
       await this.releasePlayer();
-      return;
+      this.shutdownCache();
+      this.cache = MediaProxyCache.create(0, this.cacheDirectory, [origin.hostname]);
+      const port = this.cache.start();
+      const player = await media.createAVPlayer();
+      this.player = player;
+      if (this.surfaceId.length === 0) {
+        this.status = 'Video surface is not ready';
+        await this.releasePlayer();
+        return;
+      }
+      player.surfaceId = this.surfaceId;
+      player.on('stateChange', (state: string) => {
+        this.status = state;
+      });
+      player.on('timeUpdate', (time: number) => {
+        this.playbackPosition = time;
+      });
+      player.on('durationUpdate', (value: number) => {
+        this.duration = value;
+      });
+      player.on('error', (error) => {
+        this.status = `Error ${error.code}: ${error.message}`;
+      });
+      const source = media.createMediaSourceWithUrl(`http://127.0.0.1:${port}/media`, {
+        'X-Original-Url': this.sourceUrl.trim(),
+        'X-Cache-User-Id': 'harmony-poc-user',
+        'X-Cache-Asset-Id': 'aa-video',
+        'X-Cache-Asset-Revision': '1'
+      });
+      await player.setMediaSource(source);
+      await player.prepare();
+      await player.play();
+    } catch (reason) {
+      await this.releasePlayer();
+      this.shutdownCache();
+      this.status = (reason as Error).message;
     }
-    player.surfaceId = this.surfaceId;
-    player.on('stateChange', (state: string) => {
-      this.status = state;
-    });
-    player.on('timeUpdate', (time: number) => {
-      this.playbackPosition = time;
-    });
-    player.on('durationUpdate', (value: number) => {
-      this.duration = value;
-    });
-    player.on('error', (error) => {
-      this.status = `Error ${error.code}: ${error.message}`;
-    });
-    const source = media.createMediaSourceWithUrl(`http://127.0.0.1:${port}/media`, {
-      'X-Original-Url': this.sourceUrl.trim(),
-      'X-Cache-User-Id': 'harmony-poc-user',
-      'X-Cache-Asset-Id': 'aa-video',
-      'X-Cache-Asset-Revision': '1'
-    });
-    player.setMediaSource(source);
-    await player.prepare();
-    await player.play();
   }
 
   private play(): void {
