@@ -31,6 +31,7 @@ p2p = []
 # Magnet parsing and future BitTorrent networking are separately gated.
 # Parsing alone performs no tracker, DHT, peer, upload, or seeding activity.
 p2p-network = ["dep:sha1"]
+p2p-upload = ["p2p-network"]
 android-jni = ["dep:jni"]
 harmony-napi = ["dep:napi", "dep:napi-derive"]
 

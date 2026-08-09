@@ -41,6 +41,75 @@ pub struct TorrentPieceStore {
     directory: std::path::PathBuf,
 }
 
+#[cfg(feature = "p2p-upload")]
+#[derive(Clone, Debug)]
+pub struct UploadSession {
+    authorized: bool,
+    max_bytes: u64,
+    uploaded: u64,
+}
+
+#[cfg(feature = "p2p-upload")]
+impl UploadSession {
+    pub fn new(authorized: bool, max_bytes: u64) -> Result<Self> {
+        if max_bytes == 0 {
+            return Err(ProxyError::Request("upload quota must be positive".into()));
+        }
+        Ok(Self {
+            authorized,
+            max_bytes,
+            uploaded: 0,
+        })
+    }
+
+    pub fn serve_block(
+        &mut self,
+        metadata: &TorrentMetadata,
+        store: &TorrentPieceStore,
+        index: u32,
+        begin: u32,
+        length: u32,
+    ) -> Result<Vec<u8>> {
+        if !self.authorized {
+            return Err(ProxyError::Request(
+                "torrent upload is not authorized".into(),
+            ));
+        }
+        validate_block_request(begin, length)?;
+        let piece_length = torrent_piece_length(metadata, index)?;
+        let end = begin
+            .checked_add(length)
+            .ok_or_else(|| ProxyError::Request("upload block range overflow".into()))?;
+        if end > piece_length {
+            return Err(ProxyError::Request("upload block exceeds piece".into()));
+        }
+        let next_total = self
+            .uploaded
+            .checked_add(length as u64)
+            .ok_or_else(|| ProxyError::Request("upload quota overflow".into()))?;
+        if next_total > self.max_bytes {
+            return Err(ProxyError::Request("upload quota exceeded".into()));
+        }
+        let hash = metadata
+            .piece_sha1
+            .get(index as usize)
+            .ok_or_else(|| ProxyError::Request("upload piece index out of range".into()))?;
+        let piece = store
+            .load(index, hash)?
+            .ok_or_else(|| ProxyError::Request("upload piece is unavailable".into()))?;
+        let block = piece
+            .get(begin as usize..end as usize)
+            .ok_or_else(|| ProxyError::Request("upload block range is invalid".into()))?
+            .to_vec();
+        self.uploaded = next_total;
+        Ok(block)
+    }
+
+    pub fn uploaded_bytes(&self) -> u64 {
+        self.uploaded
+    }
+}
+
 impl TorrentPieceStore {
     pub fn new(root: &std::path::Path, info_hash: &[u8; 20]) -> Result<Self> {
         if !root.is_absolute() {
@@ -1934,6 +2003,37 @@ mod tests {
         assert_eq!(store.completed(&[hash]).unwrap(), vec![0]);
         std::fs::write(store.directory.join("0.piece"), b"broken").unwrap();
         assert!(store.load(0, &hash).unwrap().is_none());
+    }
+
+    #[cfg(feature = "p2p-upload")]
+    #[test]
+    fn upload_session_requires_authorization_and_enforces_quota() {
+        let root = tempfile::tempdir().unwrap();
+        let hash: [u8; 20] = Sha1::digest(b"piece").into();
+        let store = TorrentPieceStore::new(root.path(), &[1; 20]).unwrap();
+        store.store(0, b"piece", &hash).unwrap();
+        let metadata = TorrentMetadata {
+            info_hash: [1; 20],
+            name: "x".into(),
+            total_length: 5,
+            piece_length: 5,
+            piece_sha1: vec![hash],
+            files: vec![TorrentFile {
+                path: vec!["x".into()],
+                length: 5,
+            }],
+        };
+        assert!(UploadSession::new(false, 10)
+            .unwrap()
+            .serve_block(&metadata, &store, 0, 0, 1)
+            .is_err());
+        let mut upload = UploadSession::new(true, 3).unwrap();
+        assert_eq!(
+            upload.serve_block(&metadata, &store, 0, 1, 2).unwrap(),
+            b"ie"
+        );
+        assert!(upload.serve_block(&metadata, &store, 0, 0, 2).is_err());
+        assert_eq!(upload.uploaded_bytes(), 2);
     }
 
     #[test]
