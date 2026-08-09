@@ -58,6 +58,16 @@ export class MediaProxyCache {
     return JSON.parse(nativeTorrentStatusJson(this.nativeHandle, torrentId)) as TorrentStatus
   }
 
+  pauseTorrent(torrentId: string): boolean {
+    if (!/^\d+$/.test(torrentId)) throw new Error('invalid torrent ID')
+    return nativeSetTorrentPaused(this.nativeHandle, torrentId, true)
+  }
+
+  resumeTorrent(torrentId: string): boolean {
+    if (!/^\d+$/.test(torrentId)) throw new Error('invalid torrent ID')
+    return nativeSetTorrentPaused(this.nativeHandle, torrentId, false)
+  }
+
   stop(): void { nativeStop(this.nativeHandle); this.boundPort = 0 }
   close(): void { nativeDestroy(this.nativeHandle); this.boundPort = 0 }
 }
@@ -70,3 +80,4 @@ declare function nativeAddAuthorizedTorrent(handle: bigint, magnetUri: string): 
 declare function nativeRemoveTorrent(handle: bigint, torrentId: string, deleteFiles: boolean): boolean
 declare function nativeTorrentFilesJson(handle: bigint, torrentId: string): string
 declare function nativeTorrentStatusJson(handle: bigint, torrentId: string): string
+declare function nativeSetTorrentPaused(handle: bigint, torrentId: string, paused: boolean): boolean

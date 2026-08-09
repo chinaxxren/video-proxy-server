@@ -34,9 +34,10 @@ and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
    should run away from the UI thread while metadata is resolved.
 3. Call `torrentFiles` to select a file ID. `torrentStatus` reports progress.
 4. Play `http://127.0.0.1:<port>/torrent/<torrentId>/<fileId>`.
-5. Call `removeTorrent(id, false)` to forget the session while preserving data,
+5. Use `pauseTorrent` and `resumeTorrent` to control network downloading.
+6. Call `removeTorrent(id, false)` to forget the session while preserving data,
    or pass `true` to delete downloaded files.
-6. Stop and close the proxy. Closing cancels the librqbit session.
+7. Stop and close the proxy. Closing cancels the librqbit session.
 
 The HTTP endpoint supports `GET`, `HEAD`, open-ended ranges, bounded ranges,
 and suffix ranges. Reads are streamed in chunks of at most 8 MiB and each chunk

@@ -143,6 +143,21 @@ public final class MediaProxyCache: @unchecked Sendable {
         try torrentJSON(torrentID: torrentID, query: proxy_torrent_status_json, as: TorrentStatus.self)
     }
 
+    public func pauseTorrent(_ torrentID: Int64) -> Bool {
+        setTorrentPaused(torrentID, paused: true)
+    }
+
+    public func resumeTorrent(_ torrentID: Int64) -> Bool {
+        setTorrentPaused(torrentID, paused: false)
+    }
+
+    private func setTorrentPaused(_ torrentID: Int64, paused: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, torrentID >= 0 else { return false }
+        return proxy_torrent_set_paused(handle, torrentID, paused ? 1 : 0) == 1
+    }
+
     private func torrentJSON<T: Decodable>(
         torrentID: Int64,
         query: (OpaquePointer?, Int64, UnsafeMutablePointer<UInt8>?, Int) -> Int,

@@ -11,7 +11,7 @@ use crate::ffi::{
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
     proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
-    proxy_torrent_status_json,
+    proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
@@ -337,6 +337,26 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeTorrent
 ) -> jstring {
     env.with_env(|env| torrent_json_to_jstring(env, handle, torrent_id, proxy_torrent_status_json))
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeSetTorrentPaused<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    torrent_id: jlong,
+    paused: jboolean,
+) -> jboolean {
+    env.with_env(|_| -> jni::errors::Result<jboolean> {
+        Ok(with_handle(handle, |handle| unsafe {
+            proxy_torrent_set_paused(handle, torrent_id, u8::from(paused)) != 0
+        })
+        .unwrap_or(false))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[cfg(test)]

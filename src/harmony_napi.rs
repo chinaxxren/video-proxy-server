@@ -11,7 +11,7 @@ use crate::ffi::{
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
     proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
-    proxy_torrent_status_json,
+    proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use crate::harmony_config::HarmonyConfiguration;
 use napi::{Error, Result, Status};
@@ -81,6 +81,16 @@ fn remove_torrent(handle: *mut ProxyServerHandle, torrent_id: i64, delete_files:
 
 #[cfg(not(feature = "p2p-librqbit"))]
 fn remove_torrent(_handle: *mut ProxyServerHandle, _torrent_id: i64, _delete_files: bool) -> bool {
+    false
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn set_torrent_paused(handle: *mut ProxyServerHandle, torrent_id: i64, paused: bool) -> bool {
+    unsafe { proxy_torrent_set_paused(handle, torrent_id, u8::from(paused)) != 0 }
+}
+
+#[cfg(not(feature = "p2p-librqbit"))]
+fn set_torrent_paused(_handle: *mut ProxyServerHandle, _torrent_id: i64, _paused: bool) -> bool {
     false
 }
 
@@ -285,6 +295,25 @@ impl MediaProxyCache {
     #[napi]
     pub fn torrent_status_json(&self, torrent_id: String) -> Result<String> {
         self.torrent_json(&torrent_id, proxy_torrent_status_json)
+    }
+
+    #[napi]
+    pub fn set_torrent_paused(&self, torrent_id: String, paused: bool) -> Result<bool> {
+        let torrent_id = torrent_id
+            .parse::<i64>()
+            .ok()
+            .filter(|torrent_id| *torrent_id >= 0)
+            .ok_or_else(|| Error::new(Status::InvalidArg, "invalid torrent ID"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(set_torrent_paused(
+            handle as *mut ProxyServerHandle,
+            torrent_id,
+            paused,
+        ))
     }
 
     #[cfg(feature = "p2p-librqbit")]

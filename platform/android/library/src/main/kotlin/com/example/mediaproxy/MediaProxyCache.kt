@@ -132,6 +132,18 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         )
     }
 
+    @Synchronized fun pauseTorrent(torrentId: Long): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(torrentId >= 0L)
+        return nativeSetTorrentPaused(handle, torrentId, true)
+    }
+
+    @Synchronized fun resumeTorrent(torrentId: Long): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(torrentId >= 0L)
+        return nativeSetTorrentPaused(handle, torrentId, false)
+    }
+
     @Synchronized override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -158,4 +170,5 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     ): Boolean
     private external fun nativeTorrentFilesJson(handle: Long, torrentId: Long): String?
     private external fun nativeTorrentStatusJson(handle: Long, torrentId: Long): String?
+    private external fun nativeSetTorrentPaused(handle: Long, torrentId: Long, paused: Boolean): Boolean
 }

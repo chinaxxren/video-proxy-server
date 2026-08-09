@@ -11,6 +11,7 @@ interface NativeMediaProxyCache {
   removeTorrent(torrentId: string, deleteFiles: boolean): boolean;
   torrentFilesJson(torrentId: string): string;
   torrentStatusJson(torrentId: string): string;
+  setTorrentPaused(torrentId: string, paused: boolean): boolean;
 }
 
 export interface TorrentFile {
@@ -119,5 +120,15 @@ export class MediaProxyCache {
   torrentStatus(torrentId: string): TorrentStatus {
     if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
     return JSON.parse(this.core.torrentStatusJson(torrentId)) as TorrentStatus;
+  }
+
+  pauseTorrent(torrentId: string): boolean {
+    if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
+    return this.core.setTorrentPaused(torrentId, true);
+  }
+
+  resumeTorrent(torrentId: string): boolean {
+    if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
+    return this.core.setTorrentPaused(torrentId, false);
   }
 }

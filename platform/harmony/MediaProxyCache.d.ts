@@ -18,4 +18,6 @@ export declare class MediaProxyCache {
   torrentPlaybackUrl(torrentId: string, fileId: number): string;
   torrentFiles(torrentId: string): TorrentFile[];
   torrentStatus(torrentId: string): TorrentStatus;
+  pauseTorrent(torrentId: string): boolean;
+  resumeTorrent(torrentId: string): boolean;
 }

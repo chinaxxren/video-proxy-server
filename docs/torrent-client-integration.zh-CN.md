@@ -30,8 +30,9 @@ LIBRQBIT_ENABLED=1 PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
 2. 调用 `addAuthorizedTorrent(magnetUri)`。解析元数据可能阻塞，应离开 UI 线程执行。
 3. 调用 `torrentFiles` 选择文件 ID，使用 `torrentStatus` 查询下载进度。
 4. 播放 `http://127.0.0.1:<端口>/torrent/<torrentId>/<fileId>`。
-5. `removeTorrent(id, false)` 仅移除会话并保留数据；传 `true` 会删除下载文件。
-6. 停止并关闭代理，关闭时会取消 librqbit 会话。
+5. 使用 `pauseTorrent` 和 `resumeTorrent` 控制网络下载。
+6. `removeTorrent(id, false)` 仅移除会话并保留数据；传 `true` 会删除下载文件。
+7. 停止并关闭代理，关闭时会取消 librqbit 会话。
 
 HTTP 端点支持 `GET`、`HEAD`、开放 Range、有限 Range 和后缀 Range。每次最多流式
 读取 8 MiB，每个分块的超时时间为 30 秒。

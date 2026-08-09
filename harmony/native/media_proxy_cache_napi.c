@@ -155,6 +155,25 @@ static napi_value torrent_files_json(napi_env env, napi_callback_info info) {
 static napi_value torrent_status_json(napi_env env, napi_callback_info info) {
     return query_torrent_json(env, info, proxy_torrent_status_json);
 }
+
+static napi_value set_torrent_paused(napi_env env, napi_callback_info info) {
+    size_t argc = 3; napi_value argv[3]; napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 3) return result_bool(env, false);
+    bool lossless, paused; uint64_t id;
+    napi_get_value_bigint_uint64(env, argv[0], &id, &lossless);
+    char *torrent_text = string_argument(env, argv[1]);
+    napi_get_value_bool(env, argv[2], &paused);
+    if (torrent_text == NULL) return result_bool(env, false);
+    char *end = NULL; long long torrent_id = strtoll(torrent_text, &end, 10);
+    bool valid = torrent_text[0] != '\0' && end != NULL && *end == '\0' && torrent_id >= 0;
+    free(torrent_text);
+    if (!valid) return result_bool(env, false);
+    pthread_mutex_lock(&entries_lock);
+    Entry *entry = lookup(id);
+    bool changed = entry != NULL && proxy_torrent_set_paused(entry->handle, (int64_t)torrent_id, paused) == 1;
+    pthread_mutex_unlock(&entries_lock);
+    return result_bool(env, changed);
+}
 #endif
 
 static napi_value init(napi_env env, napi_value exports) {
@@ -168,6 +187,7 @@ static napi_value init(napi_env env, napi_value exports) {
         {"nativeRemoveTorrent", NULL, remove_torrent, NULL, NULL, NULL, napi_default, NULL},
         {"nativeTorrentFilesJson", NULL, torrent_files_json, NULL, NULL, NULL, napi_default, NULL},
         {"nativeTorrentStatusJson", NULL, torrent_status_json, NULL, NULL, NULL, napi_default, NULL},
+        {"nativeSetTorrentPaused", NULL, set_torrent_paused, NULL, NULL, NULL, napi_default, NULL},
 #endif
     };
     napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props); return exports;
