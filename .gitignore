@@ -38,3 +38,8 @@ Thumbs.db
 /dist/android-player-poc/
 /examples/android-player-poc/.gradle/
 /examples/android-player-poc/app/build/
+/examples/harmony-player-poc/.hvigor/
+/examples/harmony-player-poc/oh_modules/
+/examples/harmony-player-poc/entry/build/
+/examples/harmony-player-poc/entry/oh_modules/
+/examples/harmony-player-poc/entry/BuildProfile.ets

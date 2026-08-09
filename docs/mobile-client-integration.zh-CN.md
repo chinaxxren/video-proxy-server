@@ -236,6 +236,15 @@ await avPlayer.setUrl(playbackUrl)
 构建 `MediaProxyCache.har`，并校验声明文件和原生库条目。当前已使用 DevEco Hvigor 6.24.3
 和 OHOS ELF stub 验证结构；Rust OHOS 原生库仍需 CI 实际验证。
 
+### 鸿蒙 AVPlayer POC
+
+`examples/harmony-player-poc` 中的应用使用 Host 沙箱缓存目录启动 N-API Adapter，
+通过 `XComponent` Surface 渲染视频，并向 `AVPlayer` 传入源站地址和稳定缓存身份请求头。
+暂存真实 OHOS 原生库后可运行 `scripts/build-harmony-player-poc.sh`。该工程已在 macOS
+使用 DevEco Hvigor 6.24.3 和 OpenHarmony API 24 通过 ArkTS 类型检查并组装 unsigned
+HAP。验证时没有连接鸿蒙设备或模拟器，暂存 ELF 也是结构验证 stub，因此原生库加载、
+播放、Range、Seek、HLS 和缓存行为仍属于真机验收项。
+
 ## 安全要求
 
 - 仅绑定 `127.0.0.1`，不能绑定全部网络接口。
@@ -310,4 +319,4 @@ URL 查询参数重新启动时命中同一缓存，源站没有新增请求。�
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供已验证的 AAR、生产级 Swift 或 HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装模板、原生 XCFramework 生成以及通过类型检查的鸿蒙 AVPlayer POC。尚未提供已验证的 AAR、生产级 Swift 或经过真机验证的 HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

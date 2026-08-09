@@ -241,6 +241,18 @@ ArkTS type checking, builds `MediaProxyCache.har`, and verifies its declaration
 and native library entries. The structure has been validated with DevEco Hvigor
 6.24.3 and OHOS ELF stubs; the Rust OHOS libraries still require CI validation.
 
+### HarmonyOS AVPlayer POC
+
+The application in `examples/harmony-player-poc` starts the N-API adapter with a
+Host sandbox cache directory, renders video through an `XComponent` surface, and
+passes the source and stable cache identity headers to `AVPlayer`. Run
+`scripts/build-harmony-player-poc.sh` after staging real OHOS native libraries.
+On macOS it has passed ArkTS type checking and unsigned HAP assembly with DevEco
+Hvigor 6.24.3 and OpenHarmony API 24. No HarmonyOS device or emulator was
+connected during this validation, and the staged ELF files were structural
+stubs, so native loading, playback, Range, seek, HLS, and cache behavior remain
+real-device acceptance items.
+
 ## Security Requirements
 
 - Bind only to `127.0.0.1`; do not bind to all interfaces.
@@ -321,4 +333,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide validated AAR, production Swift, or HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership-wrapper templates, native XCFramework generation, and a type-checked HarmonyOS AVPlayer POC. It does not yet provide validated AAR, production Swift, or real-device-validated HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

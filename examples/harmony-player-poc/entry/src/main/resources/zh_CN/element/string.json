@@ -1,0 +1,13 @@
+{
+  "string": [
+    { "name": "app_name", "value": "媒体代理缓存" },
+    { "name": "module_description", "value": "AVPlayer 代理缓存测试" },
+    { "name": "ability_description", "value": "AVPlayer 代理缓存测试" },
+    { "name": "source_label", "value": "源站地址" },
+    { "name": "play", "value": "播放" },
+    { "name": "pause", "value": "暂停" },
+    { "name": "seek", "value": "快进 10 秒" },
+    { "name": "stop", "value": "停止" },
+    { "name": "idle", "value": "请输入支持 Range 的 HTTP 或 HLS 地址" }
+  ]
+}
