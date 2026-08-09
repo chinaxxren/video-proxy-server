@@ -8,6 +8,7 @@ use crate::utils::network_policy::NetworkPolicy;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
+use sha1::{Digest as Sha1Digest, Sha1};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
@@ -690,6 +691,30 @@ impl PeerConnection {
             .await
             .map_err(|_| ProxyError::Network("peer block request timed out".into()))?
     }
+
+    pub async fn download_piece(
+        &mut self,
+        index: u32,
+        piece_length: u32,
+        expected_sha1: &[u8; 20],
+    ) -> Result<Vec<u8>> {
+        if piece_length == 0 || piece_length > 8 * 1024 * 1024 {
+            return Err(ProxyError::Request(
+                "invalid BitTorrent piece length".into(),
+            ));
+        }
+        let mut piece = Vec::with_capacity(piece_length as usize);
+        let mut begin = 0u32;
+        while begin < piece_length {
+            let length = (piece_length - begin).min(MAX_REQUEST_BLOCK_BYTES);
+            piece.extend_from_slice(&self.download_block(index, begin, length).await?);
+            begin = begin
+                .checked_add(length)
+                .ok_or_else(|| ProxyError::Request("piece offset overflow".into()))?;
+        }
+        verify_piece_sha1(&piece, expected_sha1)?;
+        Ok(piece)
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -698,6 +723,16 @@ const MAX_REQUEST_BLOCK_BYTES: u32 = 16 * 1024;
 fn validate_block_request(begin: u32, length: u32) -> Result<()> {
     if length == 0 || length > MAX_REQUEST_BLOCK_BYTES || begin.checked_add(length).is_none() {
         return Err(ProxyError::Request("invalid peer block request".into()));
+    }
+    Ok(())
+}
+
+fn verify_piece_sha1(piece: &[u8], expected: &[u8; 20]) -> Result<()> {
+    let digest = Sha1::digest(piece);
+    if digest.as_slice() != expected {
+        return Err(ProxyError::Request(
+            "BitTorrent piece SHA-1 mismatch".into(),
+        ));
     }
     Ok(())
 }
@@ -1354,5 +1389,12 @@ mod tests {
         assert!(validate_block_request(0, 0).is_err());
         assert!(validate_block_request(0, 16 * 1024 + 1).is_err());
         assert!(validate_block_request(u32::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn verifies_bittorrent_piece_sha1() {
+        let expected: [u8; 20] = Sha1::digest(b"abc").into();
+        assert!(verify_piece_sha1(b"abc", &expected).is_ok());
+        assert!(verify_piece_sha1(b"abd", &expected).is_err());
     }
 }

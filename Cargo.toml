@@ -30,7 +30,7 @@ allow-private-upstream = []
 p2p = []
 # Magnet parsing and future BitTorrent networking are separately gated.
 # Parsing alone performs no tracker, DHT, peer, upload, or seeding activity.
-p2p-network = []
+p2p-network = ["dep:sha1"]
 android-jni = ["dep:jni"]
 harmony-napi = ["dep:napi", "dep:napi-derive"]
 
@@ -61,6 +61,7 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 url = { version = "2.2", default-features = false, features = ["std"] }
 m3u8-rs = { version = "6.0.1", default-features = false, features = ["parser"] }
 sha2 = { version = "0.11", default-features = false }
+sha1 = { version = "0.10", default-features = false, optional = true }
 jni = { version = "0.22.4", default-features = false, optional = true }
 napi = { package = "napi-h", version = "2.16.1", default-features = false, features = ["napi3"], optional = true }
 napi-derive = { version = "2.16.13", default-features = false, features = ["strict"], optional = true }
