@@ -9,6 +9,23 @@ interface NativeMediaProxyCache {
   removeP2pSource(sourceId: string): boolean;
   addAuthorizedTorrent(magnetUri: string): string;
   removeTorrent(torrentId: string, deleteFiles: boolean): boolean;
+  torrentFilesJson(torrentId: string): string;
+  torrentStatusJson(torrentId: string): string;
+}
+
+export interface TorrentFile {
+  file_id: number;
+  relative_path: string;
+  length: number;
+}
+
+export interface TorrentStatus {
+  state: string;
+  total_bytes: number;
+  downloaded_bytes: number;
+  uploaded_bytes: number;
+  finished: boolean;
+  error?: string | null;
 }
 
 interface NativeFactory {
@@ -92,5 +109,15 @@ export class MediaProxyCache {
       throw new Error('Invalid torrent playback request');
     }
     return `http://127.0.0.1:${this.boundPort}/torrent/${torrentId}/${fileId}`;
+  }
+
+  torrentFiles(torrentId: string): TorrentFile[] {
+    if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
+    return JSON.parse(this.core.torrentFilesJson(torrentId)) as TorrentFile[];
+  }
+
+  torrentStatus(torrentId: string): TorrentStatus {
+    if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
+    return JSON.parse(this.core.torrentStatusJson(torrentId)) as TorrentStatus;
   }
 }

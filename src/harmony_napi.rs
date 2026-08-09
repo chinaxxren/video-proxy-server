@@ -9,7 +9,10 @@ use crate::ffi::{
     ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
-use crate::ffi::{proxy_torrent_add_authorized, proxy_torrent_remove};
+use crate::ffi::{
+    proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
+    proxy_torrent_status_json,
+};
 use crate::harmony_config::HarmonyConfiguration;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
@@ -79,6 +82,24 @@ fn remove_torrent(handle: *mut ProxyServerHandle, torrent_id: i64, delete_files:
 #[cfg(not(feature = "p2p-librqbit"))]
 fn remove_torrent(_handle: *mut ProxyServerHandle, _torrent_id: i64, _delete_files: bool) -> bool {
     false
+}
+
+#[cfg(feature = "p2p-librqbit")]
+unsafe fn query_torrent_json(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    query: unsafe extern "C" fn(*mut ProxyServerHandle, i64, *mut u8, usize) -> usize,
+) -> Option<String> {
+    let required = query(handle, torrent_id, std::ptr::null_mut(), 0);
+    if required == 0 || required > 4 * 1024 * 1024 + 1 {
+        return None;
+    }
+    let mut bytes = vec![0u8; required];
+    if query(handle, torrent_id, bytes.as_mut_ptr(), bytes.len()) != required {
+        return None;
+    }
+    bytes.pop();
+    String::from_utf8(bytes).ok()
 }
 
 #[napi]
@@ -252,6 +273,38 @@ impl MediaProxyCache {
             torrent_id,
             delete_files,
         ))
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[napi]
+    pub fn torrent_files_json(&self, torrent_id: String) -> Result<String> {
+        self.torrent_json(&torrent_id, proxy_torrent_files_json)
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[napi]
+    pub fn torrent_status_json(&self, torrent_id: String) -> Result<String> {
+        self.torrent_json(&torrent_id, proxy_torrent_status_json)
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    fn torrent_json(
+        &self,
+        torrent_id: &str,
+        query: unsafe extern "C" fn(*mut ProxyServerHandle, i64, *mut u8, usize) -> usize,
+    ) -> Result<String> {
+        let torrent_id = torrent_id
+            .parse::<i64>()
+            .ok()
+            .filter(|torrent_id| *torrent_id >= 0)
+            .ok_or_else(|| Error::new(Status::InvalidArg, "invalid torrent ID"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        unsafe { query_torrent_json(handle as *mut ProxyServerHandle, torrent_id, query) }
+            .ok_or_else(|| Error::new(Status::GenericFailure, "torrent metadata unavailable"))
     }
 
     fn close_for_drop(&self) {

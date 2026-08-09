@@ -4,6 +4,12 @@ export interface MediaProxyCacheConfiguration {
   port?: number
 }
 
+export interface TorrentFile { file_id: number; relative_path: string; length: number }
+export interface TorrentStatus {
+  state: string; total_bytes: number; downloaded_bytes: number
+  uploaded_bytes: number; finished: boolean; error?: string | null
+}
+
 export class MediaProxyCache {
   private boundPort: number = 0
   private constructor(private readonly nativeHandle: bigint) {}
@@ -42,6 +48,16 @@ export class MediaProxyCache {
     return `http://127.0.0.1:${this.boundPort}/torrent/${torrentId}/${fileId}`
   }
 
+  torrentFiles(torrentId: string): TorrentFile[] {
+    if (!/^\d+$/.test(torrentId)) throw new Error('invalid torrent ID')
+    return JSON.parse(nativeTorrentFilesJson(this.nativeHandle, torrentId)) as TorrentFile[]
+  }
+
+  torrentStatus(torrentId: string): TorrentStatus {
+    if (!/^\d+$/.test(torrentId)) throw new Error('invalid torrent ID')
+    return JSON.parse(nativeTorrentStatusJson(this.nativeHandle, torrentId)) as TorrentStatus
+  }
+
   stop(): void { nativeStop(this.nativeHandle); this.boundPort = 0 }
   close(): void { nativeDestroy(this.nativeHandle); this.boundPort = 0 }
 }
@@ -52,3 +68,5 @@ declare function nativeStop(handle: bigint): void
 declare function nativeDestroy(handle: bigint): void
 declare function nativeAddAuthorizedTorrent(handle: bigint, magnetUri: string): string
 declare function nativeRemoveTorrent(handle: bigint, torrentId: string, deleteFiles: boolean): boolean
+declare function nativeTorrentFilesJson(handle: bigint, torrentId: string): string
+declare function nativeTorrentStatusJson(handle: bigint, torrentId: string): string

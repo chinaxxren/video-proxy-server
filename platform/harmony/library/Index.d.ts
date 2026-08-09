@@ -1,3 +1,8 @@
+export interface TorrentFile { file_id: number; relative_path: string; length: number; }
+export interface TorrentStatus {
+  state: string; total_bytes: number; downloaded_bytes: number;
+  uploaded_bytes: number; finished: boolean; error?: string | null;
+}
 export declare class MediaProxyCache {
   static create(port: number, cacheDirectory: string, allowedHosts: string[]): MediaProxyCache;
   start(): number;
@@ -10,4 +15,6 @@ export declare class MediaProxyCache {
   addAuthorizedTorrent(magnetUri: string): string;
   removeTorrent(torrentId: string, deleteFiles?: boolean): boolean;
   torrentPlaybackUrl(torrentId: string, fileId: number): string;
+  torrentFiles(torrentId: string): TorrentFile[];
+  torrentStatus(torrentId: string): TorrentStatus;
 }

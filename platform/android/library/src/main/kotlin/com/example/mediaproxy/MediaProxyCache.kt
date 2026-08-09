@@ -1,6 +1,18 @@
 package com.example.mediaproxy
 
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
+
+data class TorrentFile(val fileId: Long, val relativePath: String, val length: Long)
+data class TorrentStatus(
+    val state: String,
+    val totalBytes: Long,
+    val downloadedBytes: Long,
+    val uploadedBytes: Long,
+    val finished: Boolean,
+    val error: String?,
+)
 
 /** Thin Kotlin ownership wrapper around the shared Rust JNI bridge. */
 class MediaProxyCache private constructor(private var handle: Long) : AutoCloseable {
@@ -94,6 +106,32 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         return "http://127.0.0.1:$boundPort/torrent/$torrentId/$fileId"
     }
 
+    @Synchronized
+    fun torrentFiles(torrentId: Long): List<TorrentFile> {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(torrentId >= 0L)
+        val values = JSONArray(checkNotNull(nativeTorrentFilesJson(handle, torrentId)) { "torrent files unavailable" })
+        return List(values.length()) { index ->
+            val value = values.getJSONObject(index)
+            TorrentFile(value.getLong("file_id"), value.getString("relative_path"), value.getLong("length"))
+        }
+    }
+
+    @Synchronized
+    fun torrentStatus(torrentId: Long): TorrentStatus {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(torrentId >= 0L)
+        val value = JSONObject(checkNotNull(nativeTorrentStatusJson(handle, torrentId)) { "torrent status unavailable" })
+        return TorrentStatus(
+            value.getString("state"),
+            value.getLong("total_bytes"),
+            value.getLong("downloaded_bytes"),
+            value.getLong("uploaded_bytes"),
+            value.getBoolean("finished"),
+            value.optString("error").takeUnless { value.isNull("error") },
+        )
+    }
+
     @Synchronized override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -118,4 +156,6 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         torrentId: Long,
         deleteFiles: Boolean,
     ): Boolean
+    private external fun nativeTorrentFilesJson(handle: Long, torrentId: Long): String?
+    private external fun nativeTorrentStatusJson(handle: Long, torrentId: Long): String?
 }

@@ -122,6 +122,39 @@ static napi_value remove_torrent(napi_env env, napi_callback_info info) {
     pthread_mutex_unlock(&entries_lock);
     return result_bool(env, removed);
 }
+
+typedef size_t (*torrent_json_query)(ProxyServerHandle *, int64_t, uint8_t *, size_t);
+
+static napi_value query_torrent_json(napi_env env, napi_callback_info info, torrent_json_query query) {
+    size_t argc = 2; napi_value argv[2]; napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 2) return NULL;
+    bool lossless; uint64_t id; napi_get_value_bigint_uint64(env, argv[0], &id, &lossless);
+    char *torrent_text = string_argument(env, argv[1]);
+    if (torrent_text == NULL) return NULL;
+    char *end = NULL; long long torrent_id = strtoll(torrent_text, &end, 10);
+    bool valid = torrent_text[0] != '\0' && end != NULL && *end == '\0' && torrent_id >= 0;
+    free(torrent_text);
+    if (!valid) return NULL;
+    pthread_mutex_lock(&entries_lock);
+    Entry *entry = lookup(id);
+    size_t required = entry == NULL ? 0 : query(entry->handle, (int64_t)torrent_id, NULL, 0);
+    if (required == 0 || required > 4 * 1024 * 1024 + 1) {
+        pthread_mutex_unlock(&entries_lock); return NULL;
+    }
+    uint8_t *json = malloc(required);
+    size_t written = json == NULL ? 0 : query(entry->handle, (int64_t)torrent_id, json, required);
+    pthread_mutex_unlock(&entries_lock);
+    if (written != required) { free(json); return NULL; }
+    napi_value result; napi_create_string_utf8(env, (char *)json, required - 1, &result); free(json); return result;
+}
+
+static napi_value torrent_files_json(napi_env env, napi_callback_info info) {
+    return query_torrent_json(env, info, proxy_torrent_files_json);
+}
+
+static napi_value torrent_status_json(napi_env env, napi_callback_info info) {
+    return query_torrent_json(env, info, proxy_torrent_status_json);
+}
 #endif
 
 static napi_value init(napi_env env, napi_value exports) {
@@ -133,6 +166,8 @@ static napi_value init(napi_env env, napi_value exports) {
 #ifdef MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT
         {"nativeAddAuthorizedTorrent", NULL, add_authorized_torrent, NULL, NULL, NULL, napi_default, NULL},
         {"nativeRemoveTorrent", NULL, remove_torrent, NULL, NULL, NULL, napi_default, NULL},
+        {"nativeTorrentFilesJson", NULL, torrent_files_json, NULL, NULL, NULL, napi_default, NULL},
+        {"nativeTorrentStatusJson", NULL, torrent_status_json, NULL, NULL, NULL, napi_default, NULL},
 #endif
     };
     napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props); return exports;

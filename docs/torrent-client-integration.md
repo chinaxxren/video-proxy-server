@@ -32,9 +32,7 @@ and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
 1. Create and start `MediaProxyCache`.
 2. Call `addAuthorizedTorrent(magnetUri)`. This is a blocking operation and
    should run away from the UI thread while metadata is resolved.
-3. Select a file ID from torrent metadata. The current mobile ABI exposes the
-   playback path but not the file-list/status DTO yet; that API remains the next
-   adapter milestone.
+3. Call `torrentFiles` to select a file ID. `torrentStatus` reports progress.
 4. Play `http://127.0.0.1:<port>/torrent/<torrentId>/<fileId>`.
 5. Call `removeTorrent(id, false)` to forget the session while preserving data,
    or pass `true` to delete downloaded files.
@@ -46,9 +44,9 @@ has a 30-second timeout.
 
 ## Platform APIs
 
-- Android/Kotlin: `addAuthorizedTorrent`, `removeTorrent`, `torrentPlaybackUrl`
-- iOS/Swift: `addAuthorizedTorrent`, `removeTorrent`, `torrentPlaybackURL`
-- HarmonyOS/ArkTS: `addAuthorizedTorrent`, `removeTorrent`, `torrentPlaybackUrl`
+- Android/Kotlin: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
+- iOS/Swift: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackURL`
+- HarmonyOS/ArkTS: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
 
 Torrent IDs may be zero. HarmonyOS represents IDs as decimal strings to avoid
 JavaScript integer precision loss. Calling these methods with a default native

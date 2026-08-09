@@ -9,9 +9,12 @@ use crate::ffi::{
     ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
-use crate::ffi::{proxy_torrent_add_authorized, proxy_torrent_remove};
+use crate::ffi::{
+    proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
+    proxy_torrent_status_json,
+};
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jint, jlong};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -271,6 +274,69 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveT
         .unwrap_or(false))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+unsafe fn read_torrent_json(
+    handle: *mut ProxyServerHandle,
+    torrent_id: jlong,
+    query: unsafe extern "C" fn(*mut ProxyServerHandle, i64, *mut u8, usize) -> usize,
+) -> Option<String> {
+    let required = query(handle, torrent_id, std::ptr::null_mut(), 0);
+    if required == 0 || required > 4 * 1024 * 1024 + 1 {
+        return None;
+    }
+    let mut bytes = vec![0u8; required];
+    if query(handle, torrent_id, bytes.as_mut_ptr(), bytes.len()) != required {
+        return None;
+    }
+    bytes.pop();
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn torrent_json_to_jstring<'local>(
+    env: &mut jni::Env<'local>,
+    handle: jlong,
+    torrent_id: jlong,
+    query: unsafe extern "C" fn(*mut ProxyServerHandle, i64, *mut u8, usize) -> usize,
+) -> jni::errors::Result<jstring> {
+    let json = with_handle(handle, |handle| unsafe {
+        read_torrent_json(handle, torrent_id, query)
+    })
+    .flatten();
+    match json {
+        Some(json) => Ok(env.new_string(json)?.into_raw().cast()),
+        None => Ok(std::ptr::null_mut()),
+    }
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentFilesJson<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    torrent_id: jlong,
+) -> jstring {
+    env.with_env(|env| torrent_json_to_jstring(env, handle, torrent_id, proxy_torrent_files_json))
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentStatusJson<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    torrent_id: jlong,
+) -> jstring {
+    env.with_env(|env| torrent_json_to_jstring(env, handle, torrent_id, proxy_torrent_status_json))
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[cfg(test)]

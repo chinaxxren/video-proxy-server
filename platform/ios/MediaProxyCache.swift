@@ -1,6 +1,28 @@
 import Foundation
 import MediaProxyCacheCore
 
+public struct TorrentFile: Codable, Equatable, Sendable {
+    public let fileId: Int
+    public let relativePath: String
+    public let length: UInt64
+    enum CodingKeys: String, CodingKey { case fileId = "file_id"; case relativePath = "relative_path"; case length }
+}
+
+public struct TorrentStatus: Codable, Equatable, Sendable {
+    public let state: String
+    public let totalBytes: UInt64
+    public let downloadedBytes: UInt64
+    public let uploadedBytes: UInt64
+    public let finished: Bool
+    public let error: String?
+    enum CodingKeys: String, CodingKey {
+        case state, finished, error
+        case totalBytes = "total_bytes"
+        case downloadedBytes = "downloaded_bytes"
+        case uploadedBytes = "uploaded_bytes"
+    }
+}
+
 /// Swift ownership wrapper for the shared Rust C ABI.
 public final class MediaProxyCache: @unchecked Sendable {
     private let lock = NSLock()
@@ -120,6 +142,36 @@ public final class MediaProxyCache: @unchecked Sendable {
             throw NSError(domain: "MediaProxyCache", code: 8)
         }
         return url
+    }
+
+    public func torrentFiles(torrentID: Int64) throws -> [TorrentFile] {
+        try torrentJSON(torrentID: torrentID, query: proxy_torrent_files_json, as: [TorrentFile].self)
+    }
+
+    public func torrentStatus(torrentID: Int64) throws -> TorrentStatus {
+        try torrentJSON(torrentID: torrentID, query: proxy_torrent_status_json, as: TorrentStatus.self)
+    }
+
+    private func torrentJSON<T: Decodable>(
+        torrentID: Int64,
+        query: (OpaquePointer?, Int64, UnsafeMutablePointer<UInt8>?, Int) -> Int,
+        as type: T.Type
+    ) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, torrentID >= 0 else { throw NSError(domain: "MediaProxyCache", code: 9) }
+        let required = query(handle, torrentID, nil, 0)
+        guard required > 1, required <= 4 * 1024 * 1024 + 1 else {
+            throw NSError(domain: "MediaProxyCache", code: 10)
+        }
+        var bytes = [UInt8](repeating: 0, count: required)
+        let written = bytes.withUnsafeMutableBufferPointer {
+            query(handle, torrentID, $0.baseAddress, $0.count)
+        }
+        guard written == required, bytes.removeLast() == 0 else {
+            throw NSError(domain: "MediaProxyCache", code: 11)
+        }
+        return try JSONDecoder().decode(type, from: Data(bytes))
     }
 #endif
 

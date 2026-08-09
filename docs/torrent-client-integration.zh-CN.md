@@ -28,8 +28,7 @@ LIBRQBIT_ENABLED=1 PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
 
 1. 创建并启动 `MediaProxyCache`。
 2. 调用 `addAuthorizedTorrent(magnetUri)`。解析元数据可能阻塞，应离开 UI 线程执行。
-3. 从 torrent 元数据选择文件 ID。当前移动端 ABI 已支持播放路径，但文件列表和状态 DTO
-   尚未暴露，这是下一阶段 Adapter 工作。
+3. 调用 `torrentFiles` 选择文件 ID，使用 `torrentStatus` 查询下载进度。
 4. 播放 `http://127.0.0.1:<端口>/torrent/<torrentId>/<fileId>`。
 5. `removeTorrent(id, false)` 仅移除会话并保留数据；传 `true` 会删除下载文件。
 6. 停止并关闭代理，关闭时会取消 librqbit 会话。
@@ -39,9 +38,9 @@ HTTP 端点支持 `GET`、`HEAD`、开放 Range、有限 Range 和后缀 Range�
 
 ## 三端接口
 
-- Android/Kotlin：`addAuthorizedTorrent`、`removeTorrent`、`torrentPlaybackUrl`
-- iOS/Swift：`addAuthorizedTorrent`、`removeTorrent`、`torrentPlaybackURL`
-- HarmonyOS/ArkTS：`addAuthorizedTorrent`、`removeTorrent`、`torrentPlaybackUrl`
+- Android/Kotlin：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
+- iOS/Swift：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackURL`
+- HarmonyOS/ArkTS：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
 
 torrent ID 允许为 `0`。HarmonyOS 使用十进制字符串传递 ID，避免 JavaScript 整数精度
 丢失。若默认原生包未启用 `p2p-librqbit`，调用这些接口会明确失败。

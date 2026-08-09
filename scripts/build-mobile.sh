@@ -148,7 +148,11 @@ verify_native_symbols() {
     done
   fi
   if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
-    for symbol in proxy_torrent_add_authorized proxy_torrent_remove; do
+    for symbol in \
+      proxy_torrent_add_authorized \
+      proxy_torrent_remove \
+      proxy_torrent_files_json \
+      proxy_torrent_status_json; do
       rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
         echo "Missing librqbit ABI symbol $symbol in $artifact" >&2
         return 1
@@ -180,7 +184,9 @@ verify_native_symbols() {
     if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
       for symbol in \
         Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrent \
-        Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent; do
+        Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentFilesJson \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentStatusJson; do
         rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
           echo "Missing Android librqbit JNI symbol $symbol in $artifact" >&2
           return 1
