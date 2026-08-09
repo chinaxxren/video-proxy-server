@@ -1,6 +1,8 @@
 # 忽略编译生成的文件
 /target/
 /cache/
+/dist/
+/android/
 **/*.rs.bk
 
 # 忽略环境配置文件
