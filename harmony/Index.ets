@@ -68,6 +68,13 @@ export class MediaProxyCache {
     return nativeSetTorrentPaused(this.nativeHandle, torrentId, false)
   }
 
+  setTorrentDownloadLimit(bytesPerSecond: number): boolean {
+    if (!Number.isInteger(bytesPerSecond) || bytesPerSecond < 0 || bytesPerSecond > 4294967295) {
+      throw new Error('invalid torrent download limit')
+    }
+    return nativeSetTorrentDownloadLimit(this.nativeHandle, bytesPerSecond)
+  }
+
   stop(): void { nativeStop(this.nativeHandle); this.boundPort = 0 }
   close(): void { nativeDestroy(this.nativeHandle); this.boundPort = 0 }
 }
@@ -81,3 +88,4 @@ declare function nativeRemoveTorrent(handle: bigint, torrentId: string, deleteFi
 declare function nativeTorrentFilesJson(handle: bigint, torrentId: string): string
 declare function nativeTorrentStatusJson(handle: bigint, torrentId: string): string
 declare function nativeSetTorrentPaused(handle: bigint, torrentId: string, paused: boolean): boolean
+declare function nativeSetTorrentDownloadLimit(handle: bigint, bytesPerSecond: number): boolean

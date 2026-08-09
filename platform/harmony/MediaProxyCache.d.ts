@@ -20,4 +20,5 @@ export declare class MediaProxyCache {
   torrentStatus(torrentId: string): TorrentStatus;
   pauseTorrent(torrentId: string): boolean;
   resumeTorrent(torrentId: string): boolean;
+  setTorrentDownloadLimit(bytesPerSecond: number): boolean;
 }

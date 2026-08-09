@@ -19,6 +19,11 @@ with `RqbitBackendConfig::max_torrents`. Concurrent additions are serialized,
 and Magnet URIs with the same info-hash reuse one torrent ID even when their
 tracker parameters differ.
 
+Downloads are unlimited by default. Use `setTorrentDownloadLimit` with bytes
+per second to apply a session-wide limit; pass zero to remove it. Rust hosts may
+also set `RqbitBackendConfig::download_bytes_per_second` before creating the
+backend.
+
 ## Build
 
 ```bash

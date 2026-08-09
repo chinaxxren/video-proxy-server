@@ -11,7 +11,7 @@ use crate::ffi::{
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
     proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
-    proxy_torrent_set_paused, proxy_torrent_status_json,
+    proxy_torrent_set_download_limit, proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use crate::harmony_config::HarmonyConfiguration;
 use napi::{Error, Result, Status};
@@ -314,6 +314,20 @@ impl MediaProxyCache {
             torrent_id,
             paused,
         ))
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[napi]
+    pub fn set_torrent_download_limit(&self, bytes_per_second: u32) -> Result<bool> {
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(unsafe {
+            proxy_torrent_set_download_limit(handle as *mut ProxyServerHandle, bytes_per_second)
+                != 0
+        })
     }
 
     #[cfg(feature = "p2p-librqbit")]

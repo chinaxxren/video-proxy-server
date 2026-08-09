@@ -15,6 +15,10 @@ Core 默认最多同时管理 8 个 torrent。Rust Host 可通过
 `RqbitBackendConfig::max_torrents` 修改。并发添加会串行校验；info-hash 相同但 Tracker
 参数不同的 Magnet 会复用同一个 torrent ID。
 
+下载默认不限速。调用 `setTorrentDownloadLimit` 可按字节/秒设置整个会话的限速，传 `0`
+取消限速。Rust Host 也可在创建后端前设置
+`RqbitBackendConfig::download_bytes_per_second`。
+
 ## 构建
 
 ```bash

@@ -174,6 +174,19 @@ static napi_value set_torrent_paused(napi_env env, napi_callback_info info) {
     pthread_mutex_unlock(&entries_lock);
     return result_bool(env, changed);
 }
+
+static napi_value set_torrent_download_limit(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value argv[2]; napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 2) return result_bool(env, false);
+    bool lossless; uint64_t id; uint32_t bytes_per_second;
+    napi_get_value_bigint_uint64(env, argv[0], &id, &lossless);
+    if (napi_get_value_uint32(env, argv[1], &bytes_per_second) != napi_ok) return result_bool(env, false);
+    pthread_mutex_lock(&entries_lock);
+    Entry *entry = lookup(id);
+    bool changed = entry != NULL && proxy_torrent_set_download_limit(entry->handle, bytes_per_second) == 1;
+    pthread_mutex_unlock(&entries_lock);
+    return result_bool(env, changed);
+}
 #endif
 
 static napi_value init(napi_env env, napi_value exports) {
@@ -188,6 +201,7 @@ static napi_value init(napi_env env, napi_value exports) {
         {"nativeTorrentFilesJson", NULL, torrent_files_json, NULL, NULL, NULL, napi_default, NULL},
         {"nativeTorrentStatusJson", NULL, torrent_status_json, NULL, NULL, NULL, napi_default, NULL},
         {"nativeSetTorrentPaused", NULL, set_torrent_paused, NULL, NULL, NULL, napi_default, NULL},
+        {"nativeSetTorrentDownloadLimit", NULL, set_torrent_download_limit, NULL, NULL, NULL, napi_default, NULL},
 #endif
     };
     napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props); return exports;

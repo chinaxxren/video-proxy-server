@@ -144,6 +144,13 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         return nativeSetTorrentPaused(handle, torrentId, false)
     }
 
+    /** Sets session-wide bytes/second; zero removes the limit. */
+    @Synchronized fun setTorrentDownloadLimit(bytesPerSecond: Long): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(bytesPerSecond in 0..UInt.MAX_VALUE.toLong())
+        return nativeSetTorrentDownloadLimit(handle, bytesPerSecond)
+    }
+
     @Synchronized override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -171,4 +178,5 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     private external fun nativeTorrentFilesJson(handle: Long, torrentId: Long): String?
     private external fun nativeTorrentStatusJson(handle: Long, torrentId: Long): String?
     private external fun nativeSetTorrentPaused(handle: Long, torrentId: Long, paused: Boolean): Boolean
+    private external fun nativeSetTorrentDownloadLimit(handle: Long, bytesPerSecond: Long): Boolean
 }

@@ -12,6 +12,7 @@ interface NativeMediaProxyCache {
   torrentFilesJson(torrentId: string): string;
   torrentStatusJson(torrentId: string): string;
   setTorrentPaused(torrentId: string, paused: boolean): boolean;
+  setTorrentDownloadLimit(bytesPerSecond: number): boolean;
 }
 
 export interface TorrentFile {
@@ -130,5 +131,12 @@ export class MediaProxyCache {
   resumeTorrent(torrentId: string): boolean {
     if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
     return this.core.setTorrentPaused(torrentId, false);
+  }
+
+  setTorrentDownloadLimit(bytesPerSecond: number): boolean {
+    if (!Number.isInteger(bytesPerSecond) || bytesPerSecond < 0 || bytesPerSecond > 4294967295) {
+      throw new Error('Invalid torrent download limit');
+    }
+    return this.core.setTorrentDownloadLimit(bytesPerSecond);
   }
 }

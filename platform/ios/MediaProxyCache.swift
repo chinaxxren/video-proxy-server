@@ -167,6 +167,14 @@ public final class MediaProxyCache: @unchecked Sendable {
         return proxy_torrent_set_paused(handle, torrentID, paused ? 1 : 0) == 1
     }
 
+    /// Sets session-wide bytes/second; zero removes the limit.
+    public func setTorrentDownloadLimit(bytesPerSecond: UInt32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return false }
+        return proxy_torrent_set_download_limit(handle, bytesPerSecond) == 1
+    }
+
     private func torrentJSON<T: Decodable>(
         torrentID: Int64,
         query: (OpaquePointer?, Int64, UnsafeMutablePointer<UInt8>?, Int) -> Int,
