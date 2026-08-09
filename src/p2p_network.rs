@@ -53,6 +53,96 @@ pub struct DhtGetPeersResponse {
     pub peers: Vec<std::net::SocketAddr>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DhtRoutingTable {
+    local_id: [u8; 20],
+    nodes: Vec<DhtNode>,
+    capacity: usize,
+}
+
+impl DhtRoutingTable {
+    pub fn new(local_id: [u8; 20], capacity: usize) -> Result<Self> {
+        if capacity == 0 || capacity > 4096 {
+            return Err(ProxyError::Request("invalid DHT routing capacity".into()));
+        }
+        Ok(Self {
+            local_id,
+            nodes: Vec::new(),
+            capacity,
+        })
+    }
+
+    pub fn insert(&mut self, node: DhtNode) -> bool {
+        if node.id == self.local_id || !is_public_socket(node.address) {
+            return false;
+        }
+        if let Some(existing) = self
+            .nodes
+            .iter_mut()
+            .find(|existing| existing.id == node.id)
+        {
+            existing.address = node.address;
+            return true;
+        }
+        if self.nodes.len() == self.capacity {
+            let farthest = self
+                .nodes
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, node)| xor_distance(&node.id, &self.local_id))
+                .map(|(index, _)| index)
+                .unwrap();
+            if xor_distance(&node.id, &self.local_id)
+                >= xor_distance(&self.nodes[farthest].id, &self.local_id)
+            {
+                return false;
+            }
+            self.nodes.swap_remove(farthest);
+        }
+        self.nodes.push(node);
+        true
+    }
+
+    pub fn closest(&self, target: &[u8; 20], limit: usize) -> Vec<DhtNode> {
+        let mut nodes = self.nodes.clone();
+        nodes.sort_by_key(|node| xor_distance(&node.id, target));
+        nodes.truncate(limit.min(nodes.len()));
+        nodes
+    }
+}
+
+fn xor_distance(left: &[u8; 20], right: &[u8; 20]) -> [u8; 20] {
+    let mut output = [0u8; 20];
+    for index in 0..20 {
+        output[index] = left[index] ^ right[index];
+    }
+    output
+}
+
+fn is_public_socket(address: std::net::SocketAddr) -> bool {
+    if address.port() == 0 {
+        return false;
+    }
+    match address.ip() {
+        std::net::IpAddr::V4(ip) => {
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.octets()[0] == 0)
+        }
+        std::net::IpAddr::V6(ip) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local())
+        }
+    }
+}
+
 pub fn encode_dht_get_peers(
     transaction: &[u8],
     node_id: &[u8; 20],
@@ -954,5 +1044,29 @@ mod tests {
         assert_eq!(parsed.token, b"ok");
         assert_eq!(parsed.nodes.len(), 1);
         assert_eq!(parsed.peers.len(), 1);
+    }
+
+    #[test]
+    fn routing_table_rejects_private_nodes_and_keeps_closest() {
+        let mut table = DhtRoutingTable::new([0; 20], 2).unwrap();
+        assert!(!table.insert(DhtNode {
+            id: [1; 20],
+            address: "127.0.0.1:6881".parse().unwrap()
+        }));
+        assert!(table.insert(DhtNode {
+            id: [3; 20],
+            address: "1.1.1.1:6881".parse().unwrap()
+        }));
+        assert!(table.insert(DhtNode {
+            id: [2; 20],
+            address: "8.8.8.8:6881".parse().unwrap()
+        }));
+        assert!(table.insert(DhtNode {
+            id: [1; 20],
+            address: "9.9.9.9:6881".parse().unwrap()
+        }));
+        let closest = table.closest(&[0; 20], 2);
+        assert_eq!(closest[0].id, [1; 20]);
+        assert_eq!(closest[1].id, [2; 20]);
     }
 }
