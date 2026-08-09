@@ -186,6 +186,9 @@ library project. `scripts/package-android-aar.sh` stages arm64-v8a,
 armeabi-v7a, and x86_64 libraries, builds the release AAR, and verifies
 `classes.jar` plus all three JNI libraries. This pipeline still requires its
 first Android NDK/CI execution before it is considered validated.
+JNI exposes process-local opaque tokens rather than pointer values. Unknown,
+removed, and repeatedly destroyed tokens are rejected before native memory is
+accessed, and destruction is serialized with active JNI calls.
 
 Recommended shape:
 
