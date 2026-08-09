@@ -31,3 +31,7 @@ Thumbs.db
 /platform/harmony/library/build/
 /platform/harmony/library/libs/
 /platform/harmony/library/BuildProfile.ets
+
+# Generated iOS player POC artifacts
+/dist/ios-player-poc/
+/examples/ios-player-poc/MediaProxyCachePlayerPOC.xcodeproj/

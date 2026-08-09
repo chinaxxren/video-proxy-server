@@ -258,6 +258,16 @@ await avPlayer.setUrl(playbackUrl)
 
 ## POC 验收标准
 
+### iOS 模拟器播放器 POC
+
+维护中的 AVPlayer 示例位于 `examples/ios-player-poc`。运行
+`scripts/build-ios-player-poc.sh` 可生成测试专用 XCFramework 和 Xcode 工程。按照
+示例 README 启动支持 Range 的本地源站，并设置 `MEDIA_PROXY_ORIGIN_URL`。
+
+该脚本只对 iOS 测试产物显式启用 `allow-private-upstream`。正常的
+`scripts/build-mobile.sh` 默认不会启用此 feature，并会拒绝其他平台使用测试
+开关。不得发布 POC XCFramework。
+
 每个平台 POC 应证明：
 
 - 在动态 localhost 端口启动并确定性停止；

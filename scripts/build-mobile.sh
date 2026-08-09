@@ -5,15 +5,28 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-${ROOT_DIR}/dist/mobile}"
 PROFILE="${PROFILE:-release}"
 P2P_ENABLED="${P2P_ENABLED:-0}"
+TEST_ALLOW_PRIVATE_UPSTREAM="${TEST_ALLOW_PRIVATE_UPSTREAM:-0}"
+IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-13.0}"
 
 if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   echo "P2P_ENABLED must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" != "0" && "$TEST_ALLOW_PRIVATE_UPSTREAM" != "1" ]]; then
+  echo "TEST_ALLOW_PRIVATE_UPSTREAM must be 0 or 1" >&2
   exit 2
 fi
 
 CARGO_FEATURES=()
 if [[ "$P2P_ENABLED" == "1" ]]; then
   CARGO_FEATURES+=(p2p)
+fi
+if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" == "1" ]]; then
+  [[ "${PLATFORM:-all}" == "ios" ]] || {
+    echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit iOS test builds" >&2
+    exit 2
+  }
+  CARGO_FEATURES+=(allow-private-upstream)
 fi
 if [[ "${PLATFORM:-all}" == "android" ]]; then
   CARGO_FEATURES+=(android-jni)
@@ -31,6 +44,7 @@ mkdir -p "$OUT_DIR/include"
 cp include/media_proxy_cache.h "$OUT_DIR/include/"
 cp include/module.modulemap "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
+printf 'test_allow_private_upstream=%s\n' "$TEST_ALLOW_PRIVATE_UPSTREAM" >> "$OUT_DIR/build-features.txt"
 
 verify_native_symbols() {
   local artifact="$1" platform="$2" nm_tool
@@ -85,10 +99,13 @@ build_target() {
     echo "Missing Rust target $target; install it with: rustup target add $target" >&2
     return 1
   }
+  if [[ "$platform" == "ios" || "$platform" == "ios-sim" ]]; then
+    export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+  fi
   if [[ -n "$crate_type" ]]; then
-    cargo rustc --locked --$PROFILE --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}" -- --crate-type="$crate_type"
+    cargo rustc --locked --"$PROFILE" --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}" -- --crate-type="$crate_type"
   else
-    cargo build --locked --$PROFILE --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}"
+    cargo build --locked --"$PROFILE" --target "$target" --lib "${CARGO_FEATURE_ARGS[@]}"
   fi
   mkdir -p "$OUT_DIR/$platform/$target"
   local copied=0

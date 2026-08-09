@@ -263,6 +263,17 @@ and native library entries. The structure has been validated with DevEco Hvigor
 
 ## POC Acceptance Criteria
 
+### iOS Simulator player POC
+
+The maintained AVPlayer example is in `examples/ios-player-poc`. Run
+`scripts/build-ios-player-poc.sh` to generate its test-only XCFramework and Xcode
+project. Follow the example README to start the Range-capable local origin and set
+`MEDIA_PROXY_ORIGIN_URL`.
+
+The script deliberately enables `allow-private-upstream` only for this iOS test
+artifact. `scripts/build-mobile.sh` keeps that feature disabled by default and
+rejects the test switch for other platforms. Do not publish the POC XCFramework.
+
 Each platform POC should demonstrate:
 
 - start on a dynamic localhost port and deterministic stop;
