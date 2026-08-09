@@ -311,6 +311,19 @@ pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
     })
 }
 
+pub fn parse_info_metadata(info: &[u8]) -> Result<TorrentMetadata> {
+    if info.is_empty() || info.len() > 4 * 1024 * 1024 || info.first() != Some(&b'd') {
+        return Err(ProxyError::Parse(
+            "invalid raw torrent info dictionary".into(),
+        ));
+    }
+    let mut wrapped = Vec::with_capacity(info.len() + 8);
+    wrapped.extend_from_slice(b"d4:info");
+    wrapped.extend_from_slice(info);
+    wrapped.push(b'e');
+    parse_torrent_metadata(&wrapped)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackerResponse {
     pub interval_secs: u64,
@@ -1164,6 +1177,20 @@ impl PeerConnection {
             .await
             .map_err(|_| ProxyError::Network("metadata exchange timed out".into()))?
     }
+
+    pub async fn download_torrent_metadata(
+        &mut self,
+        expected_info_hash: [u8; 20],
+    ) -> Result<TorrentMetadata> {
+        let raw_info = self.download_metadata(expected_info_hash).await?;
+        let metadata = parse_info_metadata(&raw_info)?;
+        if metadata.info_hash != expected_info_hash {
+            return Err(ProxyError::Request(
+                "downloaded torrent metadata InfoHash mismatch".into(),
+            ));
+        }
+        Ok(metadata)
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -1641,6 +1668,9 @@ mod tests {
         assert_eq!(metadata.total_length, 3);
         assert_eq!(metadata.piece_sha1, vec![[7; 20]]);
         assert!(parse_torrent_metadata(b"d4:info3:bade").is_err());
+        let info_start = b"d4:info".len();
+        let raw_info = &torrent[info_start..torrent.len() - 1];
+        assert_eq!(parse_info_metadata(raw_info).unwrap(), metadata);
     }
 
     #[test]
