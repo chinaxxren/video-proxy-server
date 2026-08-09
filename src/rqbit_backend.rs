@@ -110,8 +110,40 @@ impl RqbitBackend {
             ));
         }
         let request = crate::p2p_network::parse_magnet_uri(magnet)?;
+        self.add_authorized_source(AddTorrent::from_url(magnet), request.info_hash)
+            .await
+    }
+
+    pub async fn add_authorized_torrent_bytes(
+        &self,
+        torrent_bytes: &[u8],
+        explicitly_authorized: bool,
+    ) -> Result<usize> {
+        if !explicitly_authorized {
+            return Err(ProxyError::Request(
+                "torrent download is not authorized".into(),
+            ));
+        }
+        if torrent_bytes.is_empty() || torrent_bytes.len() > 4 * 1024 * 1024 {
+            return Err(ProxyError::Request(
+                "torrent metadata length is invalid".into(),
+            ));
+        }
+        let metadata = crate::p2p_network::parse_torrent_metadata(torrent_bytes)?;
+        self.add_authorized_source(
+            AddTorrent::from_bytes(torrent_bytes.to_vec()),
+            metadata.info_hash,
+        )
+        .await
+    }
+
+    async fn add_authorized_source(
+        &self,
+        source: AddTorrent<'_>,
+        info_hash: [u8; 20],
+    ) -> Result<usize> {
         let _add_guard = self.add_lock.lock().await;
-        if let Some(id) = self.info_hashes.read().await.get(&request.info_hash) {
+        if let Some(id) = self.info_hashes.read().await.get(&info_hash) {
             return Ok(*id);
         }
         if self.torrents.read().await.len() >= self.max_torrents {
@@ -123,7 +155,7 @@ impl RqbitBackend {
         let response = self
             .session
             .add_torrent(
-                AddTorrent::from_url(magnet),
+                source,
                 Some(AddTorrentOptions {
                     overwrite: false,
                     ..Default::default()
@@ -138,7 +170,7 @@ impl RqbitBackend {
                     ProxyError::Network(format!("initialize magnet failed: {error:#}"))
                 })?;
                 self.torrents.write().await.insert(id, handle);
-                self.info_hashes.write().await.insert(request.info_hash, id);
+                self.info_hashes.write().await.insert(info_hash, id);
                 Ok(id)
             }
             AddTorrentResponse::ListOnly(_) => Err(ProxyError::Request(
@@ -305,6 +337,14 @@ mod tests {
         assert!(backend.pause(404).await.is_err());
         assert!(backend.resume(404).await.is_err());
         assert!(backend.remove(404, false).await.is_err());
+        assert!(backend
+            .add_authorized_torrent_bytes(b"torrent", false)
+            .await
+            .is_err());
+        assert!(backend
+            .add_authorized_torrent_bytes(&[], true)
+            .await
+            .is_err());
 
         backend.shutdown();
     }

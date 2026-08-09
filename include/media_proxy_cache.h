@@ -75,6 +75,12 @@ int64_t proxy_torrent_add_authorized(
     const char *magnet_uri,
     uint8_t explicitly_authorized
 );
+int64_t proxy_torrent_add_file_authorized(
+    ProxyServerHandle *handle,
+    const uint8_t *torrent_bytes,
+    size_t length,
+    uint8_t explicitly_authorized
+);
 // delete_files=0 forgets the session but preserves downloaded files.
 uint8_t proxy_torrent_remove(
     ProxyServerHandle *handle,

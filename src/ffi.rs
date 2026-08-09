@@ -19,6 +19,11 @@ enum RqbitCommand {
         authorized: bool,
         reply: mpsc::SyncSender<Option<usize>>,
     },
+    AddTorrentBytes {
+        bytes: Vec<u8>,
+        authorized: bool,
+        reply: mpsc::SyncSender<Option<usize>>,
+    },
     Remove {
         torrent_id: usize,
         delete_files: bool,
@@ -173,6 +178,55 @@ pub unsafe extern "C" fn proxy_torrent_add_authorized(
     if commands
         .send(RqbitCommand::Add {
             magnet,
+            authorized: explicitly_authorized == 1,
+            reply,
+        })
+        .is_err()
+    {
+        return -1;
+    }
+    response
+        .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+        .ok()
+        .flatten()
+        .and_then(|id| i64::try_from(id).ok())
+        .unwrap_or(-1)
+}
+
+/// Adds explicitly authorized `.torrent` metadata bytes. Returns a
+/// non-negative torrent ID or -1 on failure.
+///
+/// # Safety
+///
+/// `handle` must be null or live. `torrent_bytes` must reference `length`
+/// readable bytes for the duration of this call.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_add_file_authorized(
+    handle: *mut ProxyServerHandle,
+    torrent_bytes: *const u8,
+    length: usize,
+    explicitly_authorized: u8,
+) -> i64 {
+    let Some(handle) = handle.as_ref() else {
+        return -1;
+    };
+    if torrent_bytes.is_null() || length == 0 || length > 4 * 1024 * 1024 {
+        return -1;
+    }
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return -1;
+    };
+    let bytes = std::slice::from_raw_parts(torrent_bytes, length).to_vec();
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::AddTorrentBytes {
+            bytes,
             authorized: explicitly_authorized == 1,
             reply,
         })
@@ -687,6 +741,31 @@ async fn run_rqbit_commands(
                     None => false,
                 };
                 let _ = reply.send(removed);
+            }
+            RqbitCommand::AddTorrentBytes {
+                bytes,
+                authorized,
+                reply,
+            } => {
+                let valid_request =
+                    authorized && crate::p2p_network::parse_torrent_metadata(&bytes).is_ok();
+                if backend.is_none() && valid_request {
+                    if let Ok(created) =
+                        crate::rqbit_backend::RqbitBackend::new(cache_directory.clone()).await
+                    {
+                        let created = Arc::new(created);
+                        server.set_rqbit_backend(created.clone()).await;
+                        backend = Some(created);
+                    }
+                }
+                let result = match &backend {
+                    Some(backend) if valid_request => backend
+                        .add_authorized_torrent_bytes(&bytes, authorized)
+                        .await
+                        .ok(),
+                    _ => None,
+                };
+                let _ = reply.send(result);
             }
             RqbitCommand::Files { torrent_id, reply } => {
                 let json = match &backend {
