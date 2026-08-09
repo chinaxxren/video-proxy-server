@@ -1,0 +1,10 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "media-proxy-cache",
+  "version": "0.3.3",
+  "description": "HarmonyOS adapter for Media Proxy Cache",
+  "main": "Index.ets",
+  "types": "Index.d.ts",
+  "dependencies": {},
+  "devDependencies": {}
+}

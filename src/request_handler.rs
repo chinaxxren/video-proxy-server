@@ -1,8 +1,9 @@
 use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
+#[cfg(feature = "p2p")]
+use crate::http_types::stream_body;
 use crate::http_types::{empty_body, full_body, AppBody};
-use crate::source_registry::SourceRegistry;
 use crate::utils::error::{ProxyError, Result};
 use http_body_util::BodyExt;
 use hyper::header::{HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE};
@@ -12,11 +13,15 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+#[cfg(feature = "p2p")]
+const P2P_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
     request_limit: Arc<Semaphore>,
-    source_registry: SourceRegistry,
+    #[cfg(feature = "p2p")]
+    p2p_registry: crate::p2p::P2pSourceRegistry,
 }
 
 impl RequestHandler {
@@ -30,13 +35,14 @@ impl RequestHandler {
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
         max_concurrent_requests: usize,
-        source_registry: SourceRegistry,
+        #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
     ) -> Self {
         Self {
             source_manager,
             hls_handler,
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
-            source_registry,
+            #[cfg(feature = "p2p")]
+            p2p_registry,
         }
     }
 
@@ -44,44 +50,16 @@ impl RequestHandler {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
-        let (req, source_id) = resolve_media_route(req, &self.source_registry)?;
-        let data_request = DataRequest::with_source_id(&req, source_id)?;
-        let response = match self.execute_request(is_head, &data_request).await {
-            Err(error) if error.expired_source_id().is_some() => {
-                let id = error.expired_source_id().unwrap();
-                let registry = self.source_registry.clone();
-                let expected_url = data_request.get_url().to_string();
-                tokio::task::spawn_blocking(move || {
-                    registry.refresh_from_provider_if_current(id, &expected_url)
-                })
-                .await
-                .map_err(|_| ProxyError::Request("来源刷新任务失败".to_string()))??;
-                let (retry_req, retry_id) = resolve_media_route(req, &self.source_registry)?;
-                let retry = DataRequest::with_source_id(&retry_req, retry_id)?;
-                self.execute_request(is_head, &retry).await?
-            }
-            result => result?,
-        };
+        #[cfg(feature = "p2p")]
+        if req.uri().path().starts_with("/p2p/") {
+            let response = self.handle_p2p(&req, is_head)?;
+            return Ok(guard_response(response, permit));
+        }
+        let data_request = DataRequest::new(&req)?;
 
-        let response = full_content_if_no_range_requested(response, &data_request);
-
-        // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
-        // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
-        Ok(guard_response(response, permit))
-    }
-
-    async fn execute_request(
-        &self,
-        is_head: bool,
-        data_request: &DataRequest,
-    ) -> Result<Response<AppBody>> {
-        match (is_head, data_request.get_type()) {
+        let response = match (is_head, data_request.get_type()) {
             (true, crate::data_request::RequestType::M3u8) => {
-                let content = self
-                    .hls_handler
-                    .handle_m3u8(data_request.get_url())
-                    .await
-                    .map_err(|error| error.with_source_id(data_request.source_id()))?;
+                let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
                 Response::builder()
                     .header(CONTENT_TYPE, "application/vnd.apple.mpegurl")
                     .header(CACHE_CONTROL, "no-cache")
@@ -89,14 +67,10 @@ impl RequestHandler {
                     .body(empty_body())
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 HEAD 响应失败: {}", e)))
             }
-            (true, _) => self.source_manager.process_head(data_request).await,
+            (true, _) => self.source_manager.process_head(&data_request).await,
             (false, crate::data_request::RequestType::M3u8) => {
                 // 处理 m3u8 请求
-                let content = self
-                    .hls_handler
-                    .handle_m3u8(data_request.get_url())
-                    .await
-                    .map_err(|error| error.with_source_id(data_request.source_id()))?;
+                let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
                 // 必须带 Content-Type：缺了它 hyper 不会补，播放器普遍会拒绝
                 // 一个没有类型的播放列表，或按 text/plain 处理而不去解析。
                 Response::builder()
@@ -106,51 +80,87 @@ impl RequestHandler {
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
             // 非播放列表一律走字节范围缓存管线（HLS 分片也在内）。
-            (false, _) => self.source_manager.process_request(data_request).await,
+            (false, _) => self.source_manager.process_request(&data_request).await,
+        }?;
+
+        let response = full_content_if_no_range_requested(response, &data_request);
+
+        // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
+        // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
+        Ok(guard_response(response, permit))
+    }
+
+    #[cfg(feature = "p2p")]
+    fn handle_p2p<B>(&self, req: &Request<B>, is_head: bool) -> Result<Response<AppBody>> {
+        use crate::utils::range::{parse_range_spec, resolve_range, OPEN_ENDED};
+        let raw_id = req.uri().path().strip_prefix("/p2p/").unwrap_or_default();
+        if raw_id.is_empty() || raw_id.contains('/') || !raw_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(ProxyError::Request("P2P source ID is invalid".to_string()));
         }
-        .map_err(|error| error.with_source_id(data_request.source_id()))
+        let id = raw_id.parse::<u64>()?;
+        let total = self
+            .p2p_registry
+            .content_length(id)
+            .ok_or_else(|| ProxyError::Request("P2P source ID not found".to_string()))?;
+        let range_header = req.headers().get(hyper::header::RANGE);
+        let (start, requested_end) = match range_header {
+            Some(value) => parse_range_spec(value.to_str()?)?.endpoints(Some(total))?,
+            None => (0, OPEN_ENDED),
+        };
+        let (start, end) = resolve_range(start, requested_end, Some(total))?;
+        let length = end - start + 1;
+        let mut builder = Response::builder()
+            .status(if range_header.is_some() {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            })
+            .header(ACCEPT_RANGES, "bytes")
+            .header(hyper::header::CONTENT_LENGTH, length);
+        if range_header.is_some() {
+            builder = builder.header(CONTENT_RANGE, format!("bytes {start}-{end}/{total}"));
+        }
+        if is_head {
+            return builder.body(empty_body()).map_err(ProxyError::from);
+        }
+        let registry = self.p2p_registry.clone();
+        let stream = futures_util::stream::unfold((registry, id, start, end), |state| async move {
+            let (registry, id, current, end) = state;
+            if current > end {
+                return None;
+            }
+            let chunk_end = end.min(current.saturating_add(8 * 1024 * 1024 - 1));
+            let result = read_p2p_chunk(
+                registry.clone(),
+                id,
+                current,
+                chunk_end,
+                P2P_PROVIDER_TIMEOUT,
+            )
+            .await;
+            Some((result, (registry, id, chunk_end.saturating_add(1), end)))
+        });
+        builder.body(stream_body(stream)).map_err(ProxyError::from)
     }
 }
 
-/// Resolve the opaque `/media/<id>` route without exposing the signed source URL
-/// in the client-visible URI. Legacy `/proxy` and header routes remain supported.
-fn resolve_media_route<B>(
-    req: Request<B>,
-    registry: &SourceRegistry,
-) -> Result<(Request<B>, Option<u64>)> {
-    let path = req.uri().path();
-    let Some(raw_id) = path.strip_prefix("/media/") else {
-        return Ok((req, None));
-    };
-    if raw_id.is_empty() || raw_id.contains('/') || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(ProxyError::Request("媒体来源 ID 无效".to_string()));
-    }
-    let id = raw_id
-        .parse::<u64>()
-        .map_err(|_| ProxyError::Request("媒体来源 ID 无效".to_string()))?;
-    let source = registry
-        .resolve(id)
-        .ok_or_else(|| ProxyError::Request("媒体来源不存在".to_string()))?;
-    let mut builder = Request::builder()
-        .method(req.method())
-        .uri(req.uri().clone());
-    for (name, value) in req.headers() {
-        if name != "X-Original-Url"
-            && name != "X-Cache-Asset-Id"
-            && name != "X-Cache-Asset-Revision"
-        {
-            builder = builder.header(name, value);
-        }
-    }
-    builder = builder.header("X-Original-Url", source.url);
-    builder = builder
-        .header("X-Cache-Asset-Id", source.identity)
-        .header("X-Cache-Asset-Revision", "1");
-    let body = req.into_body();
-    let request = builder
-        .body(body)
-        .map_err(|_| ProxyError::Request("请求构造失败".to_string()))?;
-    Ok((request, Some(id)))
+#[cfg(feature = "p2p")]
+async fn read_p2p_chunk(
+    registry: crate::p2p::P2pSourceRegistry,
+    id: u64,
+    start: u64,
+    end: u64,
+    timeout: std::time::Duration,
+) -> Result<bytes::Bytes> {
+    tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || registry.read_range(id, start, end)),
+    )
+    .await
+    .map_err(|_| ProxyError::Network("P2P provider timed out".to_string()))?
+    .map_err(|_| ProxyError::Storage("P2P provider task failed".to_string()))?
+    .map(bytes::Bytes::from)
 }
 
 /// 客户端没发 `Range` 时把 206 改写成 200。
@@ -239,7 +249,6 @@ fn validate_method(method: &Method) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source_registry::SourceRegistry;
 
     #[test]
     fn get_and_head_are_accepted() {
@@ -250,83 +259,6 @@ mod tests {
             assert!(matches!(error, ProxyError::MethodNotAllowed));
             assert_eq!(error.status_code(), hyper::StatusCode::METHOD_NOT_ALLOWED);
         }
-    }
-
-    #[test]
-    fn media_route_resolves_opaque_id_without_client_url() {
-        let registry = SourceRegistry::default();
-        let id = registry
-            .register("asset", "https://media.example/a.mp4?token=secret")
-            .unwrap();
-        let request = Request::builder()
-            .uri(format!("/media/{id}"))
-            .body(())
-            .unwrap();
-        let (resolved, source_id) = resolve_media_route(request, &registry).unwrap();
-        assert_eq!(source_id, Some(id));
-        let parsed = DataRequest::with_source_id(&resolved, source_id).unwrap();
-        assert_eq!(parsed.source_id(), Some(id));
-        assert_eq!(resolved.uri().path(), format!("/media/{id}"));
-        assert_eq!(
-            resolved.headers().get("X-Original-Url").unwrap(),
-            "https://media.example/a.mp4?token=secret"
-        );
-        assert_eq!(resolved.headers().get("X-Cache-Asset-Id").unwrap(), "asset");
-        assert_eq!(
-            resolved.headers().get("X-Cache-Asset-Revision").unwrap(),
-            "1"
-        );
-    }
-
-    #[test]
-    fn media_route_rejects_unknown_and_malformed_ids() {
-        let registry = SourceRegistry::default();
-        for path in ["/media/0", "/media/abc", "/media/1/child", "/media/"] {
-            let request = Request::builder().uri(path).body(()).unwrap();
-            assert!(resolve_media_route(request, &registry).is_err());
-        }
-    }
-
-    #[test]
-    fn legacy_route_has_no_opaque_source_context() {
-        let registry = SourceRegistry::default();
-        let request = Request::builder()
-            .uri("/proxy/placeholder")
-            .header("X-Original-Url", "https://media.example/a.mp4")
-            .body(())
-            .unwrap();
-        let (request, source_id) = resolve_media_route(request, &registry).unwrap();
-        assert_eq!(source_id, None);
-        assert_eq!(
-            DataRequest::with_source_id(&request, source_id)
-                .unwrap()
-                .source_id(),
-            None
-        );
-    }
-
-    #[test]
-    fn media_route_replaces_forged_cache_identity_headers() {
-        let registry = SourceRegistry::default();
-        let id = registry
-            .register("trusted-asset", "https://media.example/a.mp4")
-            .unwrap();
-        let request = Request::builder()
-            .uri(format!("/media/{id}"))
-            .header("X-Cache-Asset-Id", "attacker")
-            .header("X-Cache-Asset-Revision", "999")
-            .body(())
-            .unwrap();
-        let (resolved, source_id) = resolve_media_route(request, &registry).unwrap();
-        assert_eq!(source_id, Some(id));
-        assert_eq!(
-            resolved.headers().get("X-Cache-Asset-Id").unwrap(),
-            "trusted-asset"
-        );
-        assert_eq!(
-            resolved.headers().get("X-Cache-Asset-Revision").unwrap(),
-            "1"
-        );
     }
 
     /// 造一个 `DataRequest`，`range` 传 `None` 表示客户端没发 Range 头。
@@ -414,5 +346,27 @@ mod tests {
             "media"
         );
         assert!(semaphore.try_acquire_owned().is_ok());
+    }
+
+    #[cfg(feature = "p2p")]
+    #[tokio::test]
+    async fn blocking_p2p_provider_is_bounded_by_timeout() {
+        use crate::p2p::{
+            AuthorizedP2pSource, P2pPieceManifest, P2pPieceProvider, P2pSourceRegistry,
+        };
+        use crate::utils::digest::sha256_hex;
+        let source =
+            AuthorizedP2pSource::new("asset", 4, &sha256_hex(b"data"), "license", true).unwrap();
+        let manifest = P2pPieceManifest::new(4, 4, vec![sha256_hex(b"data")]).unwrap();
+        let provider: P2pPieceProvider = Arc::new(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(b"data".to_vec())
+        });
+        let registry = P2pSourceRegistry::default();
+        let id = registry.register(source, manifest, provider).unwrap();
+        let error = read_p2p_chunk(registry, id, 0, 3, std::time::Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ProxyError::Network(_)));
     }
 }

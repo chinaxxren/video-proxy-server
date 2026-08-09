@@ -36,12 +36,23 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 | Android | Shared libraries | AAR | Kotlin/JNI |
 | HarmonyOS | Shared libraries | HAR | ArkTS/N-API |
 
+Native archives include the current platform templates under `adapter/`.
+Swift directly wraps the C ABI; Kotlin is backed by the Rust `android-jni`
+feature, and the HarmonyOS declaration is backed by the Rust `harmony-napi`
+feature. Android AAR assembly is validated; runtime validation remains pending. HarmonyOS HAR assembly
+with real Rust OHOS libraries is validated, while device runtime validation is pending.
+
 Expected architecture targets:
 
 - iOS device: `aarch64-apple-ios`
-- iOS Simulator: `aarch64-apple-ios-sim` and, if required, `x86_64-apple-ios`
+- iOS Simulator: `aarch64-apple-ios-sim` and `x86_64-apple-ios`
 - Android: `arm64-v8a`, with `armeabi-v7a` and `x86_64` only when product support requires them
-- HarmonyOS: ARM64 first; additional ABIs depend on the target device matrix and SDK toolchain
+- HarmonyOS: `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`
+
+For reproducible local cross-compilation, set `ANDROID_NDK_HOME` (or
+`ANDROID_NDK_ROOT`) for Android and `OHOS_NDK_HOME` (or `OHOS_SDK_HOME`) for
+HarmonyOS. `scripts/build-mobile.sh` configures the corresponding clang and
+LLVM archive tools automatically.
 
 ## Proposed Host API
 
@@ -145,7 +156,12 @@ The callback must not expose the signed URL through logs or error messages.
 
 ## iOS Adapter
 
-Package the Rust static libraries and C header as an XCFramework, then wrap the C ABI with a Swift API.
+The build script packages the Rust static libraries, C header, and module map as
+`MediaProxyCache.xcframework`. A production Swift wrapper is still required.
+The iOS archive also includes `adapter/MediaProxyCache.swift` as an ownership
+wrapper template. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
+runs `swiftc -typecheck` against the packaged header and module map. The template
+serializes handle access so concurrent start, stop, and close calls cannot race.
 
 Recommended shape:
 
@@ -156,17 +172,7 @@ let playbackURL = try cache.makePlaybackURL(source: source, identity: identity)
 let player = AVPlayer(url: playbackURL)
 ```
 
-iOS package contents:
-
-- `MediaProxyCacheCore.xcframework` with device ARM64 and Simulator ARM64 slices;
-- `Sources/MediaProxyCache.swift`, which owns and releases the native handle;
-- an importable `MediaProxyCacheCore` Clang module in every slice.
-
-Build it with `./scripts/build-ios-xcframework.sh`. Add the XCFramework and Swift
-source file to the application target, then use the API shown above. The app must
-provide a file URL for its cache directory and an upstream host allowlist.
-
-Remaining iOS validation work:
+iOS work items:
 
 - build device and Simulator slices;
 - expose an exception-free C ABI with explicit error codes and owned buffers;
@@ -181,29 +187,28 @@ Remaining iOS validation work:
 
 Compile Rust shared libraries, expose JNI bindings, and package Kotlin APIs and native libraries in an AAR.
 
+The repository now contains the Rust `jni 0.22` bridge and an AGP `9.3.1`
+library project. `scripts/package-android-aar.sh` stages arm64-v8a,
+armeabi-v7a, and x86_64 libraries, builds the release AAR, and verifies
+`classes.jar` plus all three JNI libraries. CI uses NDK `29.0.14206865` and
+Gradle `9.7.0`; AGP 9.3.1 rejects the previously configured Gradle 9.3.1.
+The ARM64 JNI library, full three-ABI release AAR, and debug APK have been
+built with this toolchain; runtime validation remains a separate step.
+JNI exposes process-local opaque tokens rather than pointer values. Unknown,
+removed, and repeatedly destroyed tokens are rejected before native memory is
+accessed, and destruction is serialized with active JNI calls.
+
 Recommended shape:
 
 ```kotlin
-val cache = MediaProxyCache.create(configuration)
+val cache = MediaProxyCache.create(context, configuration)
 val endpoint = cache.start()
 val playbackUri = cache.makePlaybackUri(source, identity)
 val player = ExoPlayer.Builder(context).build()
 player.setMediaItem(MediaItem.fromUri(playbackUri))
 ```
 
-Android package contents:
-
-- `media-proxy-cache.aar` with Kotlin API and consumer ProGuard rules;
-- Rust Core and JNI bridge libraries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`;
-- an opaque numeric JNI handle registry that rejects unknown and released handles.
-
-Add the AAR to the application, create `MediaProxyCacheConfiguration` with an
-app-owned cache directory and upstream host allowlist, and call `start()` off the
-main thread. The instance is one-shot: after `stop()` it must be closed and
-recreated. Process death destroys the in-memory instance; create a new instance
-using the same cache directory when the playback service is restored.
-
-Remaining Android validation work:
+Android work items:
 
 - package one `.so` per supported ABI;
 - keep JNI handles opaque and validate every native handle;
@@ -213,9 +218,6 @@ Remaining Android validation work:
 - test Media3/ExoPlayer Range, seeking, HLS, foreground-service, and background playback;
 - avoid blocking Binder, main, or player threads with FFI calls;
 - add R8/ProGuard keep rules for JNI entry points when required.
-
-The repository's Android CI runs these checks with NDK 29 and Java 17. It does
-not claim Media3 emulator or physical-device validation.
 
 ## HarmonyOS Adapter
 
@@ -230,22 +232,32 @@ const playbackUrl = await cache.makePlaybackUrl(source, identity)
 await avPlayer.setUrl(playbackUrl)
 ```
 
-The repository now includes `harmony/Index.ets`, a N-API bridge, and
-`scripts/build-harmony-har.sh`. Set `OHOS_NDK_HOME` to an OHOS native SDK and
-run the script after building the ARM64 Rust library. The resulting archive
-contains the ArkTS API, header, Rust library, and N-API library. N-API methods
-must be called off the ArkTS main thread; the bridge rejects unknown numeric IDs
-and frees copied strings before returning.
-
-Remaining HarmonyOS validation work:
+HarmonyOS work items:
 
 - validate the Rust target and native build chain against the supported HarmonyOS SDK version;
-- package ARM64 first and expand only from the product device matrix;
-- keep N-API calls asynchronous and document callback threads;
+- validate the packaged ARM64 and ARMv7 libraries against the product device matrix;
+- move potentially blocking N-API lifecycle calls onto async tasks and document callback threads;
 - use a sandbox path supplied by the application context;
 - verify localhost networking and cleartext policy;
 - test AVPlayer Range, seek, HLS, background playback, and application recovery;
 - verify HAR loading and symbol visibility in both debug and release builds.
+
+`scripts/package-harmony-har.sh` stages both native ABIs, runs Hvigor with
+ArkTS type checking, builds `MediaProxyCache.har`, and verifies its declaration
+and native library entries. ARM64 and ARMv7 Rust libraries and the resulting HAR
+have been built with Rust 1.94, DevEco Hvigor 6.24.3, and OpenHarmony API 24.
+
+### HarmonyOS AVPlayer POC
+
+The application in `examples/harmony-player-poc` starts the N-API adapter with a
+Host sandbox cache directory, renders video through an `XComponent` surface, and
+passes the source and stable cache identity headers to `AVPlayer`. Run
+`scripts/build-harmony-player-poc.sh`; it cross-compiles both real OHOS native
+libraries, packages the HAR, and assembles the unsigned HAP. On macOS it has
+passed ArkTS type checking and assembly with DevEco Hvigor 6.24.3 and
+OpenHarmony API 24. No HarmonyOS device or emulator was connected during this
+validation, so native loading, playback, Range, seek, HLS, and cache behavior
+remain real-device acceptance items.
 
 ## Security Requirements
 
@@ -271,6 +283,34 @@ Remaining HarmonyOS validation work:
 
 ## POC Acceptance Criteria
 
+### iOS Simulator player POC
+
+The maintained AVPlayer example is in `examples/ios-player-poc`. Run
+`scripts/build-ios-player-poc.sh` to generate its test-only XCFramework and Xcode
+project. Follow the example README to start the Range-capable local origin and set
+`MEDIA_PROXY_ORIGIN_URL`.
+
+The script deliberately enables `allow-private-upstream` only for this test
+artifact. `scripts/build-mobile.sh` keeps that feature disabled by default and
+only accepts the explicit test switch for iOS and Android POCs. Do not publish the
+POC XCFramework.
+
+### Android Emulator player POC
+
+The Media3 1.11.0 example is in `examples/android-player-poc`. Run
+`scripts/build-android-player-poc.sh` to cross-compile the ARM64 library used by
+the available Emulator/device and assemble the test APK. Production Android
+builds still target all three supported ABIs. The example README documents how
+to launch it against the Range-capable local origin through the Emulator's
+`10.0.2.2` host alias.
+
+Verified on an ARM64 API 35 Emulator: Media3 reached `STATE_READY`, playback and
+a ten-second seek succeeded, the complete 3,434,642-byte file plus range sidecar
+were persisted, and a relaunch with a changed signed-URL query hit the same cache
+without another origin request. An attached MIUI API 31 device rejected USB APK
+installation through its device security policy, so physical-device playback is
+still pending explicit user authorization on that device.
+
 Each platform POC should demonstrate:
 
 - start on a dynamic localhost port and deterministic stop;
@@ -291,31 +331,12 @@ Each platform POC should demonstrate:
 
 1. Complete the remaining Core host contracts: opaque request registration and source-refresh callback. Start/stop, dynamic port, and Host cache-directory injection are already available through the C ABI.
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
-3. Build the Android JNI/AAR POC and validate Media3 on real devices.
+3. Validate the packaged Android AAR with Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
 5. Build the iOS XCFramework/Swift adapter and validate AVPlayer.
 6. Build the HarmonyOS HAR/N-API adapter and validate AVPlayer.
 7. Run the cross-platform acceptance matrix before declaring the SDK production-ready.
 
-## Opaque playback flow
-
-Register the signed URL with `proxy_source_register`, then construct
-`http://127.0.0.1:<bound-port>/media/<id>` from the returned ID. HLS child
-resources use the same opaque route. Refresh an expired URL with
-`proxy_source_refresh` using the same ID; refreshing does not change cache
-identity. Re-registering the same identity and URL reuses its ID. Never expose signed URLs in player
-URLs, logs, or analytics.
-
-Register `proxy_source_set_refresh_callback` for automatic expiry handling. The
-callback may run on a Core blocking-worker thread and must return a temporary
-NUL-terminated UTF-8 URL. Core copies and validates it immediately, coalesces
-concurrent refreshes per source ID, and retries the failed request once.
-
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy plus
-`proxy_source_register`, `proxy_source_refresh`, and `proxy_source_remove`. These
-APIs keep signed URLs inside Core and return only opaque IDs. The platform
-packages are iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR.
-The HTTP `/media/<id>` routing, HLS child-resource rewriting, and refresh callback
-dispatch are implemented. Real-player device validation remains outstanding.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership-wrapper templates, native XCFramework generation, and a type-checked HarmonyOS AVPlayer POC. It does not yet provide validated AAR, production Swift, or real-device-validated HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

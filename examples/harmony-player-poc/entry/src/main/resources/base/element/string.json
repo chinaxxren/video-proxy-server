@@ -1,0 +1,13 @@
+{
+  "string": [
+    { "name": "app_name", "value": "Media Proxy Cache" },
+    { "name": "module_description", "value": "AVPlayer proxy cache test" },
+    { "name": "ability_description", "value": "AVPlayer proxy cache test" },
+    { "name": "source_label", "value": "Origin URL" },
+    { "name": "play", "value": "Play" },
+    { "name": "pause", "value": "Pause" },
+    { "name": "seek", "value": "Seek +10s" },
+    { "name": "stop", "value": "Stop" },
+    { "name": "idle", "value": "Enter a Range-capable HTTP or HLS URL" }
+  ]
+}

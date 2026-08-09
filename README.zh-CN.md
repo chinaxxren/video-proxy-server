@@ -4,7 +4,7 @@
 
 一个使用 Rust 实现的 HTTP 媒体代理缓存。服务监听 `127.0.0.1`，从明确允许的上游域名流式读取媒体，并在磁盘上持久化真实完成的字节区间。
 
-> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。iOS XCFramework/Swift、Android JNI/AAR 和鸿蒙 N-API/HAR 打包已经提供，但三端真实播放器真机验证仍未完成。localhost 调用方认证明确不在本项目当前范围内。
+> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI 生命周期接口、Android JNI Bridge、HarmonyOS N-API Bridge 和 iOS 原生 XCFramework 打包已经提供，生产可用的 AAR、Swift 和 HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
 
 ## 功能
 
@@ -17,11 +17,11 @@
 - HLS 播放列表重写和分片代理
 - 基于容量和文件数量的缓存清理，并真实删除磁盘文件
 - 不受 signed URL 变化影响的稳定缓存身份
-- 原生 Adapter 使用的不透明来源注册和 signed URL 刷新基础接口
 - 上游域名白名单和私网地址拦截
 - 使用内置 WebPKI 根证书的纯 Rust TLS，保证移动端构建一致性
 - 仅监听 localhost 的 HTTP/1.1 服务（支持 HTTP 和 HTTPS 上游）
 - 面向移动端 Adapter 的 C ABI 生命周期入口（`include/media_proxy_cache.h`）
+- 默认关闭、带合规授权门的可选 P2P 字节提供接口
 
 ## 环境要求
 
@@ -35,6 +35,22 @@
 cargo build --locked
 cargo test --locked
 ```
+
+### 可选 P2P 接口
+
+使用以下命令构建和测试可选模块：
+
+```bash
+cargo test --locked --features p2p
+```
+
+该 feature 不是 BitTorrent 客户端，不接受 magnet，不实现 DHT、公共 tracker 或自动
+peer discovery。Host 必须明确确认内容授权，并提供稳定 content ID、总长度、完整内容
+SHA-256 和逐片 SHA-256 清单。Core 会先验证每个分片，再返回其中的字节。项目没有合法
+P2P 来源时应保持该 feature 关闭。
+
+清单、C 回调、生命周期、播放 URL 和验收合同参见
+[可选 P2P 客户端接入](docs/p2p-client-integration.zh-CN.md)。
 
 ### 依赖安全
 
@@ -77,9 +93,7 @@ MediaSource 解码，以及重复请求首分片时的缓存命中。
 该 crate 现在同时构建 `staticlib` 和 `cdylib` 产物。移动端 Adapter 可包含
 [`include/media_proxy_cache.h`](include/media_proxy_cache.h)，传入由 Host 管理的缓存目录，
 在固定端口或端口 `0` 上启动服务，并通过 `stop`/`destroy` 释放资源。这仍是预览 ABI。
-项目已提供构建和 Releases 打包脚本。iOS Release 包含 XCFramework 和 Swift
-所有权封装；Android Release 包含 Kotlin API、带句柄校验的 JNI bridge 和 AAR；
-鸿蒙 N-API 封装仍需继续实现。
+项目已提供构建和 Releases 打包脚本，平台专用的 JNI、Swift 和 N-API 封装仍需由宿主工程完成接入。
 
 访问真实上游必须调用 `proxy_server_create_with_hosts` 并传入逗号分隔的域名白名单。
 简化版 `proxy_server_create` 会有意使用拒绝全部上游的策略。
@@ -94,25 +108,12 @@ PLATFORM=macos ./scripts/build-mobile.sh dist/desktop
 PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
 ```
 
-在已安装 Xcode 的 macOS 上构建可直接导入的 iOS SDK：
+脚本要求先安装对应的 Rust target，并把 C 头文件复制到各平台产物目录。Android
+Kotlin 工程应将生成的 `.so` 放入 Android Library 模块使用。
 
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-./scripts/build-ios-xcframework.sh
-```
-
-脚本要求先安装对应的 Rust target，并把 C 头文件复制到各平台产物目录。生成 Android
-`.so` 后可继续构建 AAR：
-
-```bash
-PLATFORM=android ./scripts/build-mobile.sh dist/mobile
-./scripts/build-android-aar.sh dist/mobile dist/android-sdk
-```
-
-Adapter 的所有权接口模板位于 `platform/ios` 和 `platform/harmony`。iOS Release
-还包含 `MediaProxyCacheCore.xcframework`、Clang
-module map 和 `Sources/MediaProxyCache.swift`。Android 模块位于 `android/`，生成
-`media-proxy-cache.aar`。鸿蒙打包位于 `harmony/`，配置 OHOS NDK 后可生成 HAR 兼容归档。
+三端 Adapter 的所有权接口模板位于 `platform/android`、`platform/ios` 和
+`platform/harmony`。这些文件目前是 API 合同，宿主工程仍需链接原生库并提供对应的
+JNI、Swift module map 或 N-API 桥接实现。
 
 同一个 Core 也支持桌面端构建。macOS 会构建 Apple Silicon 和 Intel 目标；Windows
 默认使用 `x86_64-pc-windows-gnu`，构建机需要安装 MinGW linker。桌面程序可以直接
@@ -126,8 +127,10 @@ macOS/Linux 可运行 `shasum -a 256 -c <归档>.sha256` 校验，Windows 可运
 
 独立的 `.github/workflows/mobile.yml` 会在 GitHub runner 上构建 iOS 和 Android
 原生库，并在 tag 推送时作为 Release 资产发布。鸿蒙构建默认不启用；需要设置仓库变量
-`ENABLE_HARMONY_BUILD=true`，并通过 Secret `OHOS_NDK_URL` 提供可下载的 OHOS NDK
-压缩包。未配置时鸿蒙任务会跳过。
+`ENABLE_HARMONY_BUILD=true`，通过 Secret `OHOS_NDK_URL` 提供可下载的 OHOS NDK，
+并通过 `OHOS_HVIGOR_URL` 提供包含可执行 `hvigorw` 的工具归档。还必须将两个不可变归档
+各自的 SHA-256 配置为 `OHOS_NDK_SHA256` 和 `OHOS_HVIGOR_SHA256` Secret。未启用时
+鸿蒙任务会跳过；缺少 URL 或摘要时会在解压工具前失败。
 
 在 macOS 上运行 `./scripts/test-ffi-macos.sh`，会构建一个链接 Release dylib 的小型
 C 程序，并真实执行 create/start/stop/destroy 完整生命周期。
@@ -247,8 +250,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 
 ## 已知限制
 
-- iOS、Android 和鸿蒙真实播放器真机验证仍未完成
-- iOS XCFramework 已通过 CI 和本地结构校验，但尚未完成 AVPlayer 真机验证
+- 尚无生产验证的三 ABI Android AAR、生产级 iOS Swift 或 HarmonyOS HAR 包；ARM64 Android Media3 与 iOS 模拟器播放器 POC 已验证
 - Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖

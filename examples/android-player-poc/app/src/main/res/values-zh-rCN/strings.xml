@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">代理播放器</string>
+    <string name="title">媒体代理缓存</string>
+    <string name="video_player">代理视频播放器</string>
+    <string name="status_starting">状态  正在启动</string>
+    <string name="status_missing_origin">状态  请传入 origin_url 启动参数</string>
+    <string name="status_invalid_origin">状态  源站 URL 无效</string>
+    <string name="status_buffering">状态  正在缓冲</string>
+    <string name="status_playing">状态  正在播放，代理端口 %1$d</string>
+    <string name="status_ended">状态  播放结束</string>
+    <string name="status_failed">状态  失败：%1$s</string>
+    <string name="position">进度  %1$02d:%2$02d</string>
+    <string name="cache_size">缓存  %1$s</string>
+    <string name="seek_forward">向前 10 秒</string>
+</resources>

@@ -36,12 +36,20 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 | Android | 动态库 | AAR | Kotlin/JNI |
 | 鸿蒙 | 动态库 | HAR | ArkTS/N-API |
 
+原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 由 Rust
+`android-jni` feature 提供实现，鸿蒙声明由 Rust `harmony-napi` feature 提供实现。
+Android AAR 已完成组装验证，但运行时验证仍待完成。鸿蒙 HAR 已使用真实 Rust OHOS 库完成组装验证，设备运行时验证仍待完成。
+
 建议支持的架构：
 
 - iOS 真机：`aarch64-apple-ios`
-- iOS 模拟器：`aarch64-apple-ios-sim`，需要时支持 `x86_64-apple-ios`
+- iOS 模拟器：`aarch64-apple-ios-sim` 和 `x86_64-apple-ios`
 - Android：优先 `arm64-v8a`；仅在产品需要时增加 `armeabi-v7a` 和 `x86_64`
-- 鸿蒙：优先 ARM64；其他 ABI 由目标设备矩阵和 SDK 工具链决定
+- 鸿蒙：`aarch64-unknown-linux-ohos` 和 `armv7-unknown-linux-ohos`
+
+为了可复现地进行本机构建，Android 设置 `ANDROID_NDK_HOME`（或
+`ANDROID_NDK_ROOT`），鸿蒙设置 `OHOS_NDK_HOME`（或 `OHOS_SDK_HOME`）。
+`scripts/build-mobile.sh` 会自动配置对应的 clang 和 LLVM 归档工具。
 
 ## 建议 Host API
 
@@ -144,7 +152,12 @@ refreshSource(identity, reason) -> new Source
 
 ## iOS Adapter
 
-将 Rust 静态库和 C 头文件打包为 XCFramework，再通过 Swift API 封装 C ABI。
+构建脚本会把 Rust 静态库、C 头文件和 module map 打包为
+`MediaProxyCache.xcframework`；生产级 Swift 封装仍需实现。
+iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装模板。
+模板通过 `MediaProxyCacheCore` 导入 C ABI；每次 iOS 构建都会针对打包的头文件和
+module map 执行 `swiftc -typecheck`。模板会串行化 handle 访问，避免并发调用 start、
+stop 和 close 产生竞态。
 
 建议接口形态：
 
@@ -155,16 +168,7 @@ let playbackURL = try cache.makePlaybackURL(source: source, identity: identity)
 let player = AVPlayer(url: playbackURL)
 ```
 
-iOS 产物内容：
-
-- 同时包含 ARM64 真机与 ARM64 模拟器 slice 的 `MediaProxyCacheCore.xcframework`；
-- 负责持有和释放原生句柄的 `Sources/MediaProxyCache.swift`；
-- 每个 slice 都带可直接 `import MediaProxyCacheCore` 的 Clang module。
-
-执行 `./scripts/build-ios-xcframework.sh` 构建。将 XCFramework 和 Swift 源文件加入
-应用 target 后，即可使用上面的接口。应用必须提供文件类型的缓存目录 URL 和上游域名白名单。
-
-iOS 剩余验证工作：
+iOS 工作项：
 
 - 构建真机和模拟器 slices；
 - 提供不会跨边界抛异常的 C ABI、明确错误码和内存所有权；
@@ -179,28 +183,25 @@ iOS 剩余验证工作：
 
 编译 Rust 动态库，暴露 JNI 接口，并将 Kotlin API 与原生库打包为 AAR。
 
+仓库现在包含基于 Rust `jni 0.22` 的 Bridge 和 AGP `9.3.1` library 工程。
+`scripts/package-android-aar.sh` 会暂存 arm64-v8a、armeabi-v7a 和 x86_64 动态库，
+构建 Release AAR，并校验 `classes.jar` 与三个 JNI 库。CI 使用 NDK
+`29.0.14206865` 和 Gradle `9.7.0`；AGP 9.3.1 会拒绝之前配置的 Gradle 9.3.1。
+ARM64 JNI 库、完整三 ABI Release AAR 和 Debug APK 已通过该工具链构建，仍需进行运行时验证。
+JNI 暴露进程内不透明 token，而不是原生指针值。未知、已移除和重复销毁的 token 会在
+访问原生内存前被拒绝，销毁操作也会与活动 JNI 调用串行化。
+
 建议接口形态：
 
 ```kotlin
-val cache = MediaProxyCache.create(configuration)
+val cache = MediaProxyCache.create(context, configuration)
 val endpoint = cache.start()
 val playbackUri = cache.makePlaybackUri(source, identity)
 val player = ExoPlayer.Builder(context).build()
 player.setMediaItem(MediaItem.fromUri(playbackUri))
 ```
 
-Android 产物内容：
-
-- 带 Kotlin API 和 consumer ProGuard 规则的 `media-proxy-cache.aar`；
-- `arm64-v8a`、`armeabi-v7a` 和 `x86_64` 的 Rust Core 与 JNI bridge；
-- 使用不透明数字 ID 的 JNI 句柄注册表，会拒绝未知或已释放的句柄。
-
-将 AAR 加入应用，使用应用管理的缓存目录和上游域名白名单创建
-`MediaProxyCacheConfiguration`，并在非主线程调用 `start()`。实例是一次性的：
-调用 `stop()` 后必须关闭并重新创建。进程终止会销毁内存实例；播放服务恢复时，
-使用同一缓存目录重新创建实例。
-
-Android 剩余验证工作：
+Android 工作项：
 
 - 为每个支持的 ABI 打包一个 `.so`；
 - JNI handle 保持不透明，并验证每一个原生 handle；
@@ -210,8 +211,6 @@ Android 剩余验证工作：
 - 测试 Media3/ExoPlayer 的 Range、Seek、HLS、前台 Service 和后台播放；
 - FFI 调用不能阻塞 Binder、主线程或播放器线程；
 - 需要时添加 JNI 入口的 R8/ProGuard keep 规则。
-
-Android CI 使用 NDK 29 和 Java 17 执行这些检查，不代表已经完成 Media3 模拟器或真机验证。
 
 ## 鸿蒙 Adapter
 
@@ -226,20 +225,28 @@ const playbackUrl = await cache.makePlaybackUrl(source, identity)
 await avPlayer.setUrl(playbackUrl)
 ```
 
-仓库现在包含 `harmony/Index.ets`、N-API bridge 和 `scripts/build-harmony-har.sh`。
-设置 `OHOS_NDK_HOME` 指向鸿蒙 Native SDK，并先构建 ARM64 Rust 动态库，再运行脚本。
-生成的归档包含 ArkTS API、头文件、Rust 动态库和 N-API 动态库。N-API 方法必须在
-ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前释放复制的字符串。
-
-鸿蒙剩余验证工作：
+鸿蒙工作项：
 
 - 根据支持的鸿蒙 SDK 版本验证 Rust target 和原生构建链；
-- 优先打包 ARM64，仅依据产品设备矩阵扩展；
-- N-API 调用保持异步，并明确回调线程；
+- 根据产品设备矩阵验证打包的 ARM64 和 ARMv7 库；
+- 将可能阻塞的 N-API 生命周期调用迁移到异步任务，并明确回调线程；
 - 使用应用 Context 提供的沙箱路径；
 - 验证 localhost 网络访问和 cleartext 策略；
 - 测试 AVPlayer 的 Range、Seek、HLS、后台播放和应用恢复；
 - 验证 debug/release 构建中的 HAR 加载与符号可见性。
+
+`scripts/package-harmony-har.sh` 会暂存两个原生 ABI，启用 ArkTS type check 运行 Hvigor，
+构建 `MediaProxyCache.har`，并校验声明文件和原生库条目。ARM64、ARMv7 Rust 库及最终
+HAR 已使用 Rust 1.94、DevEco Hvigor 6.24.3 和 OpenHarmony API 24 完成构建验证。
+
+### 鸿蒙 AVPlayer POC
+
+`examples/harmony-player-poc` 中的应用使用 Host 沙箱缓存目录启动 N-API Adapter，
+通过 `XComponent` Surface 渲染视频，并向 `AVPlayer` 传入源站地址和稳定缓存身份请求头。
+运行 `scripts/build-harmony-player-poc.sh` 会交叉编译两套真实 OHOS 原生库、打包 HAR
+并组装 unsigned HAP。该工程已在 macOS 使用 DevEco Hvigor 6.24.3 和 OpenHarmony
+API 24 通过 ArkTS 类型检查及组装。验证时没有连接鸿蒙设备或模拟器，因此原生库加载、
+播放、Range、Seek、HLS 和缓存行为仍属于真机验收项。
 
 ## 安全要求
 
@@ -265,6 +272,28 @@ ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前�
 
 ## POC 验收标准
 
+### iOS 模拟器播放器 POC
+
+维护中的 AVPlayer 示例位于 `examples/ios-player-poc`。运行
+`scripts/build-ios-player-poc.sh` 可生成测试专用 XCFramework 和 Xcode 工程。按照
+示例 README 启动支持 Range 的本地源站，并设置 `MEDIA_PROXY_ORIGIN_URL`。
+
+该脚本只对测试产物显式启用 `allow-private-upstream`。正常的
+`scripts/build-mobile.sh` 默认不会启用此 feature，并且只允许 iOS 与 Android
+POC 显式使用测试开关。不得发布 POC XCFramework。
+
+### Android 模拟器播放器 POC
+
+Media3 1.11.0 示例位于 `examples/android-player-poc`。运行
+`scripts/build-android-player-poc.sh` 会为当前模拟器和真机交叉编译 ARM64
+原生库并组装测试 APK；生产 Android 构建仍默认覆盖三个受支持 ABI。示例 README
+说明了如何通过模拟器的 `10.0.2.2` 宿主机别名连接支持 Range 的本地源站。
+
+已在 ARM64、API 35 模拟器验证：Media3 进入 `STATE_READY`，播放和向前 Seek
+10 秒成功，完整的 3,434,642 字节文件及区间 sidecar 已落盘；使用变化后的 signed
+URL 查询参数重新启动时命中同一缓存，源站没有新增请求。已连接的 MIUI API 31
+真机通过设备安全策略拒绝 USB APK 安装，因此真机播放仍需用户先在设备上明确授权。
+
 每个平台 POC 应证明：
 
 - 在动态 localhost 端口启动并确定性停止；
@@ -285,28 +314,12 @@ ArkTS 主线程之外调用；bridge 会拒绝未知数字 ID，并在返回前�
 
 1. 完成 Core 剩余的 Host 合同：不透明请求注册和来源刷新回调。启停、动态端口和 Host 缓存目录注入已经通过 C ABI 提供。
 2. 将现有 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略单元及桌面集成测试持续作为发布门禁。
-3. 构建 Android JNI/AAR POC，并在真机上验证 Media3。
+3. 使用 Media3 在真机上验证已打包的 Android AAR。
 4. 根据 Android POC 固化共享生命周期和错误合同。
 5. 构建 iOS XCFramework/Swift Adapter，并验证 AVPlayer。
 6. 构建鸿蒙 HAR/N-API Adapter，并验证 AVPlayer。
 7. 完成跨平台验收矩阵后，再将 SDK 标记为生产可用。
 
-## 不透明播放流程
-
-使用 `proxy_source_register` 注册 signed URL，然后用返回的 ID 构造
-`http://127.0.0.1:<实际端口>/media/<id>`。HLS 分片、变体、密钥和初始化映射也使用相同的
-不透明路由。URL 过期时，使用相同 ID 调用 `proxy_source_refresh`。不要在播放器 URL、日志
-或分析事件中暴露 signed URL。相同 identity 和 URL 重复注册会复用原 ID，刷新 URL 不会改变
-缓存身份。
-
-使用 `proxy_source_set_refresh_callback` 注册自动刷新回调。回调可能在 Core 的阻塞工作线程
-执行，并返回临时的 NUL 结尾 UTF-8 URL。Core 会立即复制和校验，对同一 source ID 的并发
-刷新进行合并，并对失败请求最多重试一次。
-
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI，以及
-`proxy_source_register`、`proxy_source_refresh`、`proxy_source_remove`。这些 API
-将 signed URL 保留在 Core 内部，只返回不透明 ID。平台产物包括 iOS XCFramework/Swift、
-Android JNI/AAR 和鸿蒙 N-API/HAR。HTTP `/media/<id>` 路由、HLS 子资源重写和刷新回调调度
-已经完成，三端真实播放器真机验证仍未完成。本文档是剩余移动 SDK 工作的验收合同。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装模板、原生 XCFramework 生成以及通过类型检查的鸿蒙 AVPlayer POC。尚未提供已验证的 AAR、生产级 Swift 或经过真机验证的 HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

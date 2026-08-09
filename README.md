@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. iOS XCFramework/Swift, Android JNI/AAR, and HarmonyOS N-API/HAR packaging are available; real-player device validation is still pending. Localhost caller authentication is intentionally outside this project's current scope.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle, Android JNI bridge, HarmonyOS N-API bridge, and native iOS XCFramework packaging are available; production AAR, Swift, and HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -17,11 +17,11 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - HLS playlist rewriting and segment proxying
 - Size/count-based cache cleanup with physical file deletion
 - Stable cache identity independent of signed URLs
-- Opaque native source registration and signed-URL refresh primitives
 - Upstream host allowlist and private-address rejection
 - Pure-Rust TLS with bundled WebPKI roots for consistent mobile builds
 - Localhost-only HTTP/1.1 listener (HTTP and HTTPS origins are supported)
 - C ABI lifecycle entry points for mobile adapters (`include/media_proxy_cache.h`)
+- Optional compliance-gated P2P byte-provider boundary (disabled by default)
 
 ## Requirements
 
@@ -35,6 +35,24 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 cargo build --locked
 cargo test --locked
 ```
+
+### Optional P2P boundary
+
+Build and test the optional module with:
+
+```bash
+cargo test --locked --features p2p
+```
+
+This feature is not a BitTorrent client. It does not accept magnet links and
+does not implement DHT, public trackers, or peer discovery. The Host must make
+an explicit authorization decision and provide a stable content ID, total
+length, full-content SHA-256, and a per-piece SHA-256 manifest. Core verifies
+every supplied piece before returning bytes. Keep the feature disabled when the
+application has no authorized P2P source.
+
+See [Optional P2P Client Integration](docs/p2p-client-integration.md) for the
+manifest, C callback, lifecycle, playback URL, and acceptance contract.
 
 ### Dependency security
 
@@ -135,9 +153,8 @@ The crate also builds `staticlib` and `cdylib` artifacts. Mobile adapters can
 include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
 server with a host-owned cache directory, start it on a fixed port or port `0`,
 and release it with `stop`/`destroy`. This is a preview ABI. Build and release
-packaging scripts are provided. iOS releases include an XCFramework and Swift
-ownership wrapper. Android releases include a Kotlin API, validated JNI bridge,
-and AAR. The HarmonyOS N-API wrapper still requires integration.
+packaging scripts are provided; platform-specific JNI, Swift, and N-API wrappers
+still require integration in the host projects.
 
 Real upstream access must use `proxy_server_create_with_hosts` and pass the
 comma-separated host allowlist. The simpler `proxy_server_create` intentionally
@@ -153,28 +170,14 @@ PLATFORM=macos ./scripts/build-mobile.sh dist/desktop
 PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
 ```
 
-Build the directly importable iOS SDK on macOS with Xcode installed:
-
-```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-./scripts/build-ios-xcframework.sh
-```
-
 It requires the corresponding Rust targets and copies the C header beside each
-platform's native artifacts. Build the Android AAR after generating its `.so`
-files:
+platform's native artifacts. Android Kotlin packaging should consume the
+generated `.so` files through an Android library module.
 
-```bash
-PLATFORM=android ./scripts/build-mobile.sh dist/mobile
-./scripts/build-android-aar.sh dist/mobile dist/android-sdk
-```
-
-Adapter ownership templates are under `platform/ios` and `platform/harmony`.
-The iOS release additionally contains
-`MediaProxyCacheCore.xcframework`, its Clang module map, and
-`Sources/MediaProxyCache.swift`. The Android module is under `android/` and
-produces `media-proxy-cache.aar`. HarmonyOS packaging is under `harmony/` and
-produces a HAR-compatible archive when an OHOS NDK is configured.
+Adapter ownership templates are under `platform/android`, `platform/ios`, and
+`platform/harmony`. They are API contracts only until each host project links
+the generated native library and supplies its JNI, Swift module map, or N-API
+bridge.
 
 The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
 targets; Windows uses the GNU x86_64 target by default and requires a MinGW
@@ -191,8 +194,11 @@ with `Get-FileHash <archive> -Algorithm SHA256`.
 The separate `.github/workflows/mobile.yml` workflow builds iOS and Android
 native libraries on GitHub-hosted runners and publishes them as Release assets
 for tagged pushes. HarmonyOS builds are opt-in: set repository variable
-`ENABLE_HARMONY_BUILD=true` and secret `OHOS_NDK_URL` to a downloadable OHOS NDK
-archive. Without that configuration the HarmonyOS job is skipped.
+`ENABLE_HARMONY_BUILD=true`, secret `OHOS_NDK_URL` to a downloadable OHOS NDK
+archive, and `OHOS_HVIGOR_URL` to a downloadable archive containing executable
+`hvigorw`. Set `OHOS_NDK_SHA256` and `OHOS_HVIGOR_SHA256` to the lowercase or
+uppercase SHA-256 digest of the corresponding immutable archive. Without that
+configuration the HarmonyOS job is skipped or fails before extracting tools.
 
 On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
 release dylib and exercises the complete create/start/stop/destroy lifecycle.
@@ -317,9 +323,7 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- Real-player validation is still pending on iOS, Android, and HarmonyOS
-- The Android AAR has CI build and content validation, but not yet Media3 device validation
-- The iOS XCFramework has CI and local structural validation, but not yet AVPlayer device validation
+- No production-validated three-ABI Android AAR, production iOS Swift, or HarmonyOS HAR package; ARM64 Android Media3 and iOS Simulator player POCs are validated
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed

@@ -4,8 +4,9 @@
 //! the returned handle remains valid until `proxy_server_destroy` is called.
 
 use crate::server::{ProxyConfig, ProxyServer};
-use crate::source_registry::SourceRegistry;
-use std::ffi::{c_char, c_void, CStr};
+#[cfg(feature = "p2p")]
+use std::ffi::c_void;
+use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{mpsc, Arc, Mutex};
@@ -15,11 +16,9 @@ pub struct ProxyServerHandle {
     config: Mutex<Option<ProxyConfig>>,
     server: Arc<Mutex<Option<Arc<ProxyServer>>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
-    pub(crate) sources: SourceRegistry,
+    #[cfg(feature = "p2p")]
+    p2p_sources: crate::p2p::P2pSourceRegistry,
 }
-
-pub type ProxySourceRefreshCallback =
-    unsafe extern "C" fn(context: *mut c_void, source_id: u64) -> *const c_char;
 
 /// # Safety
 ///
@@ -91,12 +90,186 @@ fn create_handle(
         allowed_hosts,
         ..Default::default()
     };
+    #[cfg(feature = "p2p")]
+    let p2p_sources = crate::p2p::P2pSourceRegistry::with_cache_limit(
+        config.cache_dir.join("p2p"),
+        config.max_cache_bytes,
+    );
     Box::into_raw(Box::new(ProxyServerHandle {
         config: Mutex::new(Some(config)),
         server: Arc::new(Mutex::new(None)),
         thread: Mutex::new(None),
-        sources: SourceRegistry::default(),
+        #[cfg(feature = "p2p")]
+        p2p_sources,
     }))
+}
+
+#[cfg(feature = "p2p")]
+pub type ProxyP2pPieceCallback = unsafe extern "C" fn(
+    context: *mut c_void,
+    piece_index: usize,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize;
+
+#[cfg(feature = "p2p")]
+const MAX_P2P_CALLBACK_PIECE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Registers an authorized P2P manifest and Host piece callback.
+///
+/// # Safety
+///
+/// `handle`, `manifest_json`, callback, and context must remain valid as
+/// documented by the C header. The callback may run on arbitrary Core threads.
+#[cfg(feature = "p2p")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_p2p_source_register(
+    handle: *mut ProxyServerHandle,
+    manifest_json: *const u8,
+    manifest_length: usize,
+    callback: Option<ProxyP2pPieceCallback>,
+    context: *mut c_void,
+) -> u64 {
+    let (Some(handle), Some(callback)) = (handle.as_ref(), callback) else {
+        return 0;
+    };
+    if manifest_json.is_null() || manifest_length == 0 {
+        return 0;
+    }
+    let json = std::slice::from_raw_parts(manifest_json, manifest_length);
+    let Ok((source, manifest)) = crate::p2p::parse_authorized_manifest_json(json) else {
+        return 0;
+    };
+    let context = context as usize;
+    let provider: crate::p2p::P2pPieceProvider = Arc::new(move |piece_index| {
+        let required = unsafe { callback(context as *mut c_void, piece_index, ptr::null_mut(), 0) };
+        if required == 0 || required > MAX_P2P_CALLBACK_PIECE_BYTES {
+            return Err(crate::utils::error::ProxyError::Request(
+                "P2P Host piece length is invalid".to_string(),
+            ));
+        }
+        let mut bytes = vec![0u8; required];
+        let written = unsafe {
+            callback(
+                context as *mut c_void,
+                piece_index,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+            )
+        };
+        if written != required {
+            return Err(crate::utils::error::ProxyError::Request(
+                "P2P Host piece write length mismatch".to_string(),
+            ));
+        }
+        Ok(bytes)
+    });
+    handle
+        .p2p_sources
+        .register(source, manifest, provider)
+        .unwrap_or(0)
+}
+
+/// Registers an authorized P2P manifest backed by files named
+/// `<piece_index>.piece` in a Host-owned directory.
+///
+/// This entry point is intended for managed runtimes that cannot safely expose
+/// a synchronous callback on arbitrary Core threads. Piece bytes are still
+/// subject to the manifest digest and size checks before they can be served.
+///
+/// # Safety
+///
+/// `handle` must be a live handle. `manifest_json` must reference
+/// `manifest_length` readable bytes, and `piece_directory` must be a valid
+/// NUL-terminated UTF-8 string for the duration of this call.
+#[cfg(feature = "p2p")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_p2p_source_register_directory(
+    handle: *mut ProxyServerHandle,
+    manifest_json: *const u8,
+    manifest_length: usize,
+    piece_directory: *const c_char,
+) -> u64 {
+    let (Some(handle), Some(piece_directory)) = (handle.as_ref(), read_string(piece_directory))
+    else {
+        return 0;
+    };
+    if manifest_json.is_null() || manifest_length == 0 || piece_directory.trim().is_empty() {
+        return 0;
+    }
+    let json = std::slice::from_raw_parts(manifest_json, manifest_length);
+    let Ok((source, manifest)) = crate::p2p::parse_authorized_manifest_json(json) else {
+        return 0;
+    };
+    let piece_directory = PathBuf::from(piece_directory);
+    if !piece_directory.is_absolute() {
+        return 0;
+    }
+    let provider: crate::p2p::P2pPieceProvider = Arc::new(move |piece_index| {
+        use std::io::Read;
+
+        let path = piece_directory.join(format!("{piece_index}.piece"));
+        let mut file = std::fs::File::open(path).map_err(|_| {
+            crate::utils::error::ProxyError::Request("P2P Host piece is unavailable".to_string())
+        })?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(MAX_P2P_CALLBACK_PIECE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                crate::utils::error::ProxyError::Request(
+                    "P2P Host piece could not be read".to_string(),
+                )
+            })?;
+        if bytes.is_empty() || bytes.len() > MAX_P2P_CALLBACK_PIECE_BYTES {
+            return Err(crate::utils::error::ProxyError::Request(
+                "P2P Host piece length is invalid".to_string(),
+            ));
+        }
+        Ok(bytes)
+    });
+    handle
+        .p2p_sources
+        .register(source, manifest, provider)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "p2p")]
+#[no_mangle]
+/// Removes an opaque P2P source ID.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function.
+pub unsafe extern "C" fn proxy_p2p_source_remove(
+    handle: *mut ProxyServerHandle,
+    source_id: u64,
+) -> u8 {
+    handle
+        .as_ref()
+        .map(|handle| u8::from(handle.p2p_sources.remove(source_id)))
+        .unwrap_or(0)
+}
+
+/// Verifies every authorized piece and the complete content digest.
+///
+/// Returns 1 only when the Host callback supplies the complete authorized
+/// content; returns 0 for an invalid source ID or any integrity/provider error.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function. The
+/// registered callback and context must remain valid until this call returns.
+#[cfg(feature = "p2p")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_p2p_source_verify_complete(
+    handle: *mut ProxyServerHandle,
+    source_id: u64,
+) -> u8 {
+    handle
+        .as_ref()
+        .map(|handle| u8::from(handle.p2p_sources.verify_complete(source_id).is_ok()))
+        .unwrap_or(0)
 }
 
 /// Starts the server and waits until its socket is bound. Returns the bound port,
@@ -122,7 +295,8 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     };
     let (tx, rx) = mpsc::sync_channel(1);
     let published = handle.server.clone();
-    let sources = handle.sources.clone();
+    #[cfg(feature = "p2p")]
+    let p2p_registry = handle.p2p_sources.clone();
     let thread = std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -135,7 +309,13 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             }
         };
         let result = runtime.block_on(async {
-            let server = Arc::new(ProxyServer::with_config_and_registry(config, sources));
+            #[cfg(not(feature = "p2p"))]
+            let server = Arc::new(ProxyServer::with_config(config));
+            #[cfg(feature = "p2p")]
+            let server = Arc::new(ProxyServer::with_config_and_p2p_registry(
+                config,
+                p2p_registry,
+            ));
             if let Ok(mut value) = published.lock() {
                 *value = Some(server.clone());
             }
@@ -197,118 +377,42 @@ pub unsafe extern "C" fn proxy_server_destroy(handle: *mut ProxyServerHandle) {
     };
 }
 
-/// Registers a source and returns an opaque process-local ID. The URL is copied
-/// into Core memory and is never returned to the caller.
-///
-/// # Safety
-///
-/// `handle` must be a live handle returned by a create function. `identity` and
-/// `url` must point to immutable NUL-terminated strings for this call.
-#[no_mangle]
-pub unsafe extern "C" fn proxy_source_register(
-    handle: *mut ProxyServerHandle,
-    identity: *const c_char,
-    url: *const c_char,
-) -> u64 {
-    let Some(handle) = handle.as_ref() else {
-        return 0;
-    };
-    let (Some(identity), Some(url)) = (read_string(identity), read_string(url)) else {
-        return 0;
-    };
-    handle
-        .sources
-        .register_or_reuse(&identity, &url)
-        .unwrap_or(0)
-}
-
-#[no_mangle]
-/// Replaces the current URL for an existing opaque source ID.
-///
-/// # Safety
-///
-/// `handle` must be live and `url` must point to an immutable NUL-terminated
-/// string for this call.
-pub unsafe extern "C" fn proxy_source_refresh(
-    handle: *mut ProxyServerHandle,
-    source_id: u64,
-    url: *const c_char,
-) -> u8 {
-    let Some(handle) = handle.as_ref() else {
-        return 0;
-    };
-    let Some(url) = read_string(url) else {
-        return 0;
-    };
-    handle
-        .sources
-        .refresh(source_id, &url)
-        .map(|_| 1)
-        .unwrap_or(0)
-}
-
-#[no_mangle]
-/// Removes a source ID. Repeated removal is safe and returns zero.
-///
-/// # Safety
-///
-/// `handle` must be null or a live handle returned by a create function.
-pub unsafe extern "C" fn proxy_source_remove(handle: *mut ProxyServerHandle, source_id: u64) -> u8 {
-    handle
-        .as_ref()
-        .map(|handle| u8::from(handle.sources.remove(source_id)))
-        .unwrap_or(0)
-}
-
-/// Registers or clears the Host callback used after upstream 401/403 responses.
-/// The returned string is copied during the callback and remains Host-owned.
-///
-/// # Safety
-///
-/// `handle` must be live. The callback and context must remain valid until the
-/// callback is cleared or the handle is destroyed. Returned strings must be
-/// immutable, NUL-terminated UTF-8 for the duration of the callback.
-#[no_mangle]
-pub unsafe extern "C" fn proxy_source_set_refresh_callback(
-    handle: *mut ProxyServerHandle,
-    callback: Option<ProxySourceRefreshCallback>,
-    context: *mut c_void,
-) -> u8 {
-    let Some(handle) = handle.as_ref() else {
-        return 0;
-    };
-    let provider = callback.map(|callback| {
-        let context = context as usize;
-        Arc::new(move |source_id| {
-            let value = unsafe { callback(context as *mut c_void, source_id) };
-            unsafe { read_string(value) }
-                .ok_or_else(|| crate::utils::error::ProxyError::Request("来源刷新失败".to_string()))
-        }) as crate::source_registry::RefreshProvider
-    });
-    u8::from(handle.sources.set_refresh_provider(provider).is_ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
-
-    unsafe extern "C" fn test_refresh_callback(
-        _context: *mut c_void,
-        _source_id: u64,
-    ) -> *const c_char {
-        static URL: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-        URL.get_or_init(|| CString::new("https://media.example/refreshed.mp4?token=new").unwrap())
-            .as_ptr()
-    }
-
-    unsafe extern "C" fn null_refresh_callback(
-        _context: *mut c_void,
-        _source_id: u64,
-    ) -> *const c_char {
-        ptr::null()
-    }
+    #[cfg(feature = "p2p")]
     use std::io::{Read, Write};
+
+    #[cfg(feature = "p2p")]
+    unsafe extern "C" fn p2p_piece_callback(
+        context: *mut c_void,
+        piece_index: usize,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> usize {
+        let pieces = &*(context as *const Vec<Vec<u8>>);
+        let Some(piece) = pieces.get(piece_index) else {
+            return 0;
+        };
+        if buffer.is_null() || capacity == 0 {
+            return piece.len();
+        }
+        if capacity < piece.len() {
+            return 0;
+        }
+        ptr::copy_nonoverlapping(piece.as_ptr(), buffer, piece.len());
+        piece.len()
+    }
+
+    #[cfg(feature = "p2p")]
+    fn raw_http(port: u16, request: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        String::from_utf8(response).unwrap()
+    }
 
     #[test]
     fn ffi_lifecycle_uses_dynamic_port_and_rejects_repeated_start() {
@@ -331,6 +435,8 @@ mod tests {
             let invalid = [0xff_u8, 0];
             assert!(proxy_server_create(0, invalid.as_ptr().cast()).is_null());
             assert_eq!(proxy_server_start(ptr::null_mut()), 0);
+            #[cfg(feature = "p2p")]
+            assert_eq!(proxy_p2p_source_verify_complete(ptr::null_mut(), 1), 0);
             proxy_server_stop(ptr::null_mut());
             proxy_server_destroy(ptr::null_mut());
         }
@@ -354,118 +460,148 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "p2p")]
     #[test]
-    fn ffi_source_registration_refresh_and_remove_are_opaque_and_validated() {
+    fn ffi_registers_and_reads_verified_p2p_source() {
         let cache = tempfile::tempdir().unwrap();
         let path = CString::new(cache.path().to_str().unwrap()).unwrap();
-        let identity = CString::new("asset-1").unwrap();
-        let source = CString::new("https://media.example/a.mp4?token=secret").unwrap();
-        let rotated = CString::new("https://media.example/a.mp4?token=rotated").unwrap();
-        let invalid = CString::new("file:///tmp/a").unwrap();
-        unsafe {
-            let handle = proxy_server_create_with_hosts(
-                0,
-                path.as_ptr(),
-                CString::new("media.example").unwrap().as_ptr(),
-            );
-            assert!(!handle.is_null());
-            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
-            assert_ne!(id, 0);
-            assert_eq!(
-                proxy_source_register(handle, identity.as_ptr(), source.as_ptr()),
-                id
-            );
-            assert!(!id.to_string().contains("secret"));
-            assert_eq!(proxy_source_refresh(handle, id, rotated.as_ptr()), 1);
-            assert_eq!(proxy_source_refresh(handle, 999, rotated.as_ptr()), 0);
-            assert_eq!(proxy_source_refresh(handle, id, invalid.as_ptr()), 0);
-            assert_eq!(proxy_source_remove(handle, id), 1);
-            assert_eq!(proxy_source_remove(handle, id), 0);
-            assert_eq!(
-                proxy_source_register(handle, ptr::null(), source.as_ptr()),
-                0
-            );
-            proxy_server_destroy(handle);
-        }
-    }
-
-    #[test]
-    fn ffi_refresh_callback_is_copied_and_validated() {
-        let cache = tempfile::tempdir().unwrap();
-        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
-        let identity = CString::new("asset").unwrap();
-        let source = CString::new("https://media.example/original.mp4").unwrap();
+        let pieces = vec![b"data".to_vec()];
+        let digest = crate::utils::digest::sha256_hex(b"data");
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "content_id": "asset",
+            "content_length": 4,
+            "content_sha256": digest,
+            "piece_length": 4,
+            "piece_sha256": [crate::utils::digest::sha256_hex(b"data")],
+            "authorization_reference": "license",
+            "explicitly_authorized": true
+        }))
+        .unwrap();
         unsafe {
             let handle = proxy_server_create(0, path.as_ptr());
-            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
-            assert_eq!(
-                proxy_source_set_refresh_callback(
-                    handle,
-                    Some(test_refresh_callback),
-                    ptr::null_mut(),
-                ),
-                1
+            let id = proxy_p2p_source_register(
+                handle,
+                manifest.as_ptr(),
+                manifest.len(),
+                Some(p2p_piece_callback),
+                (&pieces as *const Vec<Vec<u8>>).cast_mut().cast(),
             );
-            (*handle).sources.refresh_from_provider(id).unwrap();
-            assert!((*handle)
-                .sources
-                .resolve(id)
-                .unwrap()
-                .url
-                .contains("token=new"));
-            assert_eq!(
-                proxy_source_set_refresh_callback(handle, None, ptr::null_mut()),
-                1
-            );
-            assert!((*handle).sources.refresh_from_provider(id).is_err());
-            assert_eq!(
-                proxy_source_set_refresh_callback(
-                    handle,
-                    Some(null_refresh_callback),
-                    ptr::null_mut(),
-                ),
-                1
-            );
-            assert!((*handle).sources.refresh_from_provider(id).is_err());
-            assert_eq!(
-                (*handle).sources.resolve(id).unwrap().url,
-                "https://media.example/refreshed.mp4?token=new"
-            );
-            proxy_server_destroy(handle);
-            assert_eq!(
-                proxy_source_set_refresh_callback(
-                    ptr::null_mut(),
-                    Some(test_refresh_callback),
-                    ptr::null_mut(),
-                ),
-                0
-            );
-        }
-    }
-
-    #[test]
-    fn ffi_registered_id_is_visible_to_running_http_server() {
-        let cache = tempfile::tempdir().unwrap();
-        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
-        let identity = CString::new("asset-ffi-route").unwrap();
-        let source = CString::new("https://media.example/video.mp4?token=secret").unwrap();
-        unsafe {
-            let handle = proxy_server_create(0, path.as_ptr());
-            assert!(!handle.is_null());
-            let id = proxy_source_register(handle, identity.as_ptr(), source.as_ptr());
             assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 1);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, u64::MAX), 0);
+            assert_eq!((*handle).p2p_sources.read_range(id, 0, 3).unwrap(), b"data");
             let port = proxy_server_start(handle);
             assert_ne!(port, 0);
+            let server = (*handle).server.lock().unwrap().clone().unwrap();
+            assert_eq!(server.p2p_registry().read_range(id, 0, 3).unwrap(), b"data");
+            let response = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-2\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(response.starts_with("HTTP/1.1 206"), "{response}");
+            assert!(response
+                .to_ascii_lowercase()
+                .contains("content-range: bytes 1-2/4"));
+            assert!(response.ends_with("at"));
 
-            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            write!(
-                stream,
-                "GET /media/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            let mut response = String::new();
-            stream.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+            let full = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(full.starts_with("HTTP/1.1 200"));
+            assert!(full.ends_with("data"));
+
+            let suffix = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=-2\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(suffix.starts_with("HTTP/1.1 206"));
+            assert!(suffix.ends_with("ta"));
+
+            let head = raw_http(
+                port,
+                &format!("HEAD /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(head.starts_with("HTTP/1.1 200"));
+            assert!(!head.ends_with("data"));
+            let invalid_range = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nRange: bytes=8-9\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(invalid_range.starts_with("HTTP/1.1 416"));
+            assert_eq!(proxy_p2p_source_remove(handle, id), 1);
+            assert_eq!(proxy_p2p_source_remove(handle, id), 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 0);
+            let removed = raw_http(
+                port,
+                &format!("GET /p2p/{id} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(removed.starts_with("HTTP/1.1 400"));
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn ffi_complete_verification_rejects_corrupt_host_bytes() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let pieces = vec![b"evil".to_vec()];
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "content_id": "asset",
+            "content_length": 4,
+            "content_sha256": crate::utils::digest::sha256_hex(b"data"),
+            "piece_length": 4,
+            "piece_sha256": [crate::utils::digest::sha256_hex(b"data")],
+            "authorization_reference": "license",
+            "explicitly_authorized": true
+        }))
+        .unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            let id = proxy_p2p_source_register(
+                handle,
+                manifest.as_ptr(),
+                manifest.len(),
+                Some(p2p_piece_callback),
+                (&pieces as *const Vec<Vec<u8>>).cast_mut().cast(),
+            );
+            assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 0);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn ffi_directory_provider_registers_verified_piece_files() {
+        let cache = tempfile::tempdir().unwrap();
+        let pieces = tempfile::tempdir().unwrap();
+        std::fs::write(pieces.path().join("0.piece"), b"data").unwrap();
+        let cache_path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let piece_path = CString::new(pieces.path().to_str().unwrap()).unwrap();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "content_id": "directory-asset",
+            "content_length": 4,
+            "content_sha256": crate::utils::digest::sha256_hex(b"data"),
+            "piece_length": 4,
+            "piece_sha256": [crate::utils::digest::sha256_hex(b"data")],
+            "authorization_reference": "license",
+            "explicitly_authorized": true
+        }))
+        .unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, cache_path.as_ptr());
+            let id = proxy_p2p_source_register_directory(
+                handle,
+                manifest.as_ptr(),
+                manifest.len(),
+                piece_path.as_ptr(),
+            );
+            assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 1);
+            assert_eq!((*handle).p2p_sources.read_range(id, 1, 2).unwrap(), b"at");
+            assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             proxy_server_destroy(handle);
         }
     }

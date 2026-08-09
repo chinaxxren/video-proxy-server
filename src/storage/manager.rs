@@ -2,6 +2,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -17,6 +18,7 @@ pub struct StorageManagerConfig {
     pub max_cache_size: u64,
     pub max_file_count: usize,
     pub cleanup_interval: Duration,
+    pub external_cache_dirs: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -79,6 +81,7 @@ mod tests {
                 max_cache_size: 0,
                 max_file_count: 0,
                 cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: Vec::new(),
             },
         );
         manager
@@ -93,6 +96,102 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), deleted.notified())
             .await
             .expect("cleanup did not delete the cache entry");
+    }
+
+    #[tokio::test]
+    async fn cleanup_counts_external_p2p_cache_toward_the_shared_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let p2p_piece = directory.path().join("manifest").join("0.piece");
+        std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
+        std::fs::write(&p2p_piece, b"p2p").unwrap();
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 4,
+                max_file_count: 100,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: vec![directory.path().to_path_buf()],
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"http"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), deleted.notified())
+            .await
+            .expect("cleanup did not count external P2P bytes");
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_evict_http_entries_when_p2p_alone_exceeds_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let p2p_piece = directory.path().join("manifest").join("0.piece");
+        std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
+        std::fs::write(&p2p_piece, b"p2p-too-large").unwrap();
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 4,
+                max_file_count: 100,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: vec![directory.path().to_path_buf()],
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"http"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), deleted.notified())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_evicts_http_entries_when_p2p_exactly_fills_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let p2p_piece = directory.path().join("manifest").join("0.piece");
+        std::fs::create_dir_all(p2p_piece.parent().unwrap()).unwrap();
+        std::fs::write(&p2p_piece, b"full").unwrap();
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+            },
+            StorageManagerConfig {
+                max_cache_size: 4,
+                max_file_count: 100,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: vec![directory.path().to_path_buf()],
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"http"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), deleted.notified())
+            .await
+            .expect("cleanup did not enforce the combined budget");
     }
 
     struct CoordinatedStorage {
@@ -162,6 +261,7 @@ mod tests {
                 max_cache_size: 0,
                 max_file_count: 0,
                 cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: Vec::new(),
             },
         ));
         manager
@@ -258,6 +358,7 @@ mod tests {
                 max_cache_size: 0,
                 max_file_count: 0,
                 cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: Vec::new(),
             },
         );
 
@@ -274,8 +375,35 @@ impl Default for StorageManagerConfig {
             max_cache_size: 1024 * 1024 * 1024, // 1GB
             max_file_count: 1000,
             cleanup_interval: Duration::from_secs(60),
+            external_cache_dirs: Vec::new(),
         }
     }
+}
+
+async fn external_cache_size(directories: &[PathBuf]) -> u64 {
+    let mut total = 0u64;
+    let mut pending = directories.to_vec();
+    while let Some(directory) = pending.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+            continue;
+        };
+        loop {
+            let Ok(Some(entry)) = entries.next_entry().await else {
+                break;
+            };
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                if let Ok(metadata) = entry.metadata().await {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+        }
+    }
+    total
 }
 
 #[derive(Clone)]
@@ -396,12 +524,22 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     _ = cleanup_shutdown.notified() => break,
                 }
 
+                let external_size = external_cache_size(&config.external_cache_dirs).await;
+
                 // 阶段一：持锁挑选淘汰对象。只读取簿记，不做 IO。
                 let to_remove = {
                     let entries = cache_entries.read().await;
                     let total = *total_size.read().await;
+                    let combined_total = total.saturating_add(external_size);
 
-                    if total <= config.max_cache_size && entries.len() <= config.max_file_count {
+                    // P2P owns eviction of its files. If it alone exceeds the
+                    // byte budget, do not destroy every HTTP entry trying to
+                    // correct a condition this manager cannot fix.
+                    if (external_size > config.max_cache_size
+                        && entries.len() <= config.max_file_count)
+                        || (combined_total <= config.max_cache_size
+                            && entries.len() <= config.max_file_count)
+                    {
                         continue;
                     }
 
@@ -409,7 +547,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     let mut entry_list: Vec<_> = entries.values().cloned().collect();
                     entry_list.sort_by_key(|entry| entry.last_access);
 
-                    let mut current_total = total;
+                    let mut current_total = combined_total;
                     let mut current_count = entries.len();
                     let mut victims = Vec::new();
 

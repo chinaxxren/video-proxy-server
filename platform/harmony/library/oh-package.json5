@@ -1,0 +1,9 @@
+{
+  "name": "media-proxy-cache",
+  "version": "0.3.3",
+  "description": "HarmonyOS native media proxy cache library",
+  "license": "Apache-2.0",
+  "main": "Index.ets",
+  "types": "Index.d.ts",
+  "dependencies": {}
+}

@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.3.3",
+  "description": "HarmonyOS AVPlayer integration POC",
+  "main": "",
+  "dependencies": {
+    "media-proxy-cache": "file:../../../platform/harmony/library"
+  }
+}

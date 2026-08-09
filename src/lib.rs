@@ -1,10 +1,18 @@
+#[cfg(feature = "android-jni")]
+mod android_jni;
 pub mod data_request;
 pub mod data_source;
 pub mod data_source_manager;
 pub mod ffi;
 pub mod handlers;
+#[cfg(any(feature = "harmony-napi", test))]
+mod harmony_config;
+#[cfg(feature = "harmony-napi")]
+mod harmony_napi;
 pub mod hls;
 pub mod http_types;
+#[cfg(feature = "p2p")]
+pub mod p2p;
 pub mod request_handler;
 pub mod server;
 pub mod source_registry;

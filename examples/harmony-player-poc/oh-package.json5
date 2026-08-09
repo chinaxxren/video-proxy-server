@@ -1,0 +1,7 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "media-proxy-cache-harmony-player-poc",
+  "version": "0.3.3",
+  "description": "HarmonyOS AVPlayer integration POC",
+  "dependencies": {}
+}

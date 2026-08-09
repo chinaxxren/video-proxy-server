@@ -1,0 +1,10 @@
+{
+  "app": {
+    "bundleName": "dev.mediaproxycache.playerpoc",
+    "vendor": "Media Proxy Cache",
+    "versionCode": 1,
+    "versionName": "0.3.3",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name"
+  }
+}

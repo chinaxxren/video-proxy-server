@@ -2,6 +2,12 @@ name: mobile-native
 
 on:
   workflow_dispatch:
+    inputs:
+      include_p2p:
+        description: Build the explicitly optional P2P variant
+        required: false
+        default: false
+        type: boolean
   push:
     tags: ["v*"]
 
@@ -11,58 +17,53 @@ permissions:
 jobs:
   ios:
     runs-on: macos-14
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
-      - name: Test Swift adapter lifecycle
-        run: ./scripts/test-ios-adapter.sh
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - name: Build iOS libraries
         run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
-      - name: Build iOS XCFramework and Swift adapter
-        run: ./scripts/build-ios-xcframework.sh dist/mobile dist/ios-sdk
       - name: Archive iOS artifacts
         run: |
-          ditto -c -k --norsrc --keepParent dist/ios-sdk media-proxy-cache-${GITHUB_REF_NAME}-ios.zip
-          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios.zip > media-proxy-cache-${GITHUB_REF_NAME}-ios.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz -C dist/mobile ios ios-sim include build-features.txt
+          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-ios
-          path: media-proxy-cache-${{ github.ref_name }}-ios.*
+          name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-ios.*
+          files: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
 
   android:
     runs-on: ubuntu-22.04
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
       - name: Install Android NDK
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-35" \
-            "ndk;29.0.14206865" \
-            "cmake;3.22.1"
-      - uses: gradle/actions/setup-gradle@v5
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" "ndk;29.0.14206865"
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
+          gradle-version: "9.7.0"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - name: Build Android libraries
         run: |
           export NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
-          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
-          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
-          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
           export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
@@ -73,72 +74,82 @@ jobs:
           export AR_armv7_linux_androideabi="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export AR_x86_64_linux_android="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           PLATFORM=android ./scripts/build-mobile.sh dist/mobile
-      - name: Build and test Android AAR
-        run: ./scripts/build-android-aar.sh dist/mobile dist/android-sdk
-      - name: Verify Android AAR contents
-        run: |
-          unzip -l dist/android-sdk/media-proxy-cache.aar > aar-contents.txt
-          for entry in \
-            classes.jar \
-            jni/arm64-v8a/libproxy_server.so \
-            jni/arm64-v8a/libmedia_proxy_cache_jni.so \
-            jni/armeabi-v7a/libproxy_server.so \
-            jni/armeabi-v7a/libmedia_proxy_cache_jni.so \
-            jni/x86_64/libproxy_server.so \
-            jni/x86_64/libmedia_proxy_cache_jni.so; do
-            grep -Fq "$entry" aar-contents.txt || { echo "Missing AAR entry: $entry" >&2; exit 1; }
-          done
+      - name: Package Android AAR
+        run: ./scripts/package-android-aar.sh dist/mobile/android dist/mobile/android
       - name: Archive Android artifacts
         run: |
-          cp dist/android-sdk/media-proxy-cache.aar media-proxy-cache-${GITHUB_REF_NAME}-android.aar
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android.aar > media-proxy-cache-${GITHUB_REF_NAME}-android.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-android
-          path: media-proxy-cache-${{ github.ref_name }}-android.*
+          name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-android.*
+          files: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
 
   harmony:
     if: vars.ENABLE_HARMONY_BUILD == 'true'
     runs-on: ubuntu-22.04
+    env:
+      P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
+      P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-ohos,armv7-unknown-linux-ohos
       - name: Install OHOS NDK toolchain
         env:
           OHOS_NDK_URL: ${{ secrets.OHOS_NDK_URL }}
+          OHOS_NDK_SHA256: ${{ secrets.OHOS_NDK_SHA256 }}
+          OHOS_HVIGOR_URL: ${{ secrets.OHOS_HVIGOR_URL }}
+          OHOS_HVIGOR_SHA256: ${{ secrets.OHOS_HVIGOR_SHA256 }}
         run: |
           test -n "$OHOS_NDK_URL" || { echo "Configure repository secret OHOS_NDK_URL" >&2; exit 1; }
+          test -n "$OHOS_NDK_SHA256" || { echo "Configure repository secret OHOS_NDK_SHA256" >&2; exit 1; }
+          test -n "$OHOS_HVIGOR_URL" || { echo "Configure repository secret OHOS_HVIGOR_URL" >&2; exit 1; }
+          test -n "$OHOS_HVIGOR_SHA256" || { echo "Configure repository secret OHOS_HVIGOR_SHA256" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/ohos-ndk"
           curl --fail --location "$OHOS_NDK_URL" --output "$RUNNER_TEMP/ohos-ndk.tar.gz"
+          echo "$OHOS_NDK_SHA256  $RUNNER_TEMP/ohos-ndk.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/ohos-ndk.tar.gz" -C "$RUNNER_TEMP/ohos-ndk" --strip-components=1
-          test -x "$RUNNER_TEMP/ohos-ndk/native/llvm/bin/aarch64-linux-ohos-clang"
+          mkdir -p "$RUNNER_TEMP/ohos-hvigor"
+          curl --fail --location "$OHOS_HVIGOR_URL" --output "$RUNNER_TEMP/ohos-hvigor.tar.gz"
+          echo "$OHOS_HVIGOR_SHA256  $RUNNER_TEMP/ohos-hvigor.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/ohos-hvigor.tar.gz" -C "$RUNNER_TEMP/ohos-hvigor" --strip-components=1
+          HVIGORW_PATH="$(find "$RUNNER_TEMP/ohos-hvigor" -type f -name hvigorw -print -quit)"
+          test -n "$HVIGORW_PATH" && test -x "$HVIGORW_PATH"
           echo "OHOS_NDK_HOME=$RUNNER_TEMP/ohos-ndk" >> "$GITHUB_ENV"
+          echo "HVIGORW=$HVIGORW_PATH" >> "$GITHUB_ENV"
       - name: Build HarmonyOS libraries
         run: |
-          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/aarch64-linux-ohos-clang"
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$OHOS_NDK_HOME/native/llvm/bin/armv7-unknown-linux-ohos-clang"
+          LLVM_BIN="$OHOS_NDK_HOME/native/llvm/bin"
+          AARCH64_CLANG="$(find "$LLVM_BIN" -maxdepth 1 -type f \( -name aarch64-unknown-linux-ohos-clang -o -name aarch64-linux-ohos-clang \) -print -quit)"
+          ARMV7_CLANG="$(find "$LLVM_BIN" -maxdepth 1 -type f -name armv7-unknown-linux-ohos-clang -print -quit)"
+          LLVM_AR="$LLVM_BIN/llvm-ar"
+          LLVM_NM="$LLVM_BIN/llvm-nm"
+          test -x "$AARCH64_CLANG" && test -x "$ARMV7_CLANG" && test -x "$LLVM_AR" && test -x "$LLVM_NM"
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$AARCH64_CLANG"
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$ARMV7_CLANG"
+          export CC_aarch64_unknown_linux_ohos="$AARCH64_CLANG"
+          export CC_armv7_unknown_linux_ohos="$ARMV7_CLANG"
+          export AR_aarch64_unknown_linux_ohos="$LLVM_AR"
+          export AR_armv7_unknown_linux_ohos="$LLVM_AR"
+          export NM="$LLVM_NM"
           PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
-      - name: Build HarmonyOS HAR adapter
-        run: OHOS_NDK_HOME="$OHOS_NDK_HOME" ./scripts/build-harmony-har.sh dist/mobile dist/harmony-sdk
-      - name: Verify HarmonyOS HAR contents
-        run: |
-          tar -tzf dist/harmony-sdk/media-proxy-cache-harmony.har.tar.gz | sort
-          test -f dist/harmony-sdk/native/libmedia_proxy_cache_napi.so
+      - name: Package HarmonyOS HAR
+        run: ./scripts/package-harmony-har.sh dist/mobile/harmony dist/mobile/harmony
       - name: Archive HarmonyOS artifacts
         run: |
-          cp dist/harmony-sdk/media-proxy-cache-harmony.har.tar.gz media-proxy-cache-${GITHUB_REF_NAME}-harmony.har.tar.gz
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony.har.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz -C dist/mobile harmony include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-harmony
-          path: media-proxy-cache-${{ github.ref_name }}-harmony.*
+          name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-harmony.*
+          files: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*

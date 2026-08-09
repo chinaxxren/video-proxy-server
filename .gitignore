@@ -22,3 +22,24 @@
 # 忽略操作系统生成的文件
 .DS_Store
 Thumbs.db
+
+# Android library build output and staged Rust libraries
+/platform/android/.gradle/
+/platform/android/library/build/
+/platform/android/library/src/main/jniLibs/
+/platform/harmony/.hvigor/
+/platform/harmony/library/build/
+/platform/harmony/library/libs/
+/platform/harmony/library/BuildProfile.ets
+
+# Generated iOS player POC artifacts
+/dist/ios-player-poc/
+/examples/ios-player-poc/MediaProxyCachePlayerPOC.xcodeproj/
+/dist/android-player-poc/
+/examples/android-player-poc/.gradle/
+/examples/android-player-poc/app/build/
+/examples/harmony-player-poc/.hvigor/
+/examples/harmony-player-poc/oh_modules/
+/examples/harmony-player-poc/entry/build/
+/examples/harmony-player-poc/entry/oh_modules/
+/examples/harmony-player-poc/entry/BuildProfile.ets
