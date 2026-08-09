@@ -632,9 +632,75 @@ impl PeerConnection {
         .map_err(|error| ProxyError::Network(format!("peer message body failed: {error}")))?;
         parse_peer_message(&encoded)
     }
+
+    pub async fn download_block(&mut self, index: u32, begin: u32, length: u32) -> Result<Vec<u8>> {
+        validate_block_request(begin, length)?;
+        let operation = async {
+            self.send(&PeerMessage::Interested).await?;
+            loop {
+                match self.receive().await? {
+                    PeerMessage::Unchoke => break,
+                    PeerMessage::Choke
+                    | PeerMessage::KeepAlive
+                    | PeerMessage::Have(_)
+                    | PeerMessage::Bitfield(_) => continue,
+                    _ => {
+                        return Err(ProxyError::Request(
+                            "unexpected peer message before unchoke".into(),
+                        ))
+                    }
+                }
+            }
+            self.send(&PeerMessage::Request {
+                index,
+                begin,
+                length,
+            })
+            .await?;
+            loop {
+                match self.receive().await? {
+                    PeerMessage::Piece {
+                        index: received_index,
+                        begin: received_begin,
+                        block,
+                    } => {
+                        if received_index != index
+                            || received_begin != begin
+                            || block.len() != length as usize
+                        {
+                            return Err(ProxyError::Request(
+                                "peer returned mismatched block".into(),
+                            ));
+                        }
+                        return Ok(block);
+                    }
+                    PeerMessage::Choke => {
+                        return Err(ProxyError::Request("peer choked block request".into()))
+                    }
+                    PeerMessage::KeepAlive | PeerMessage::Have(_) => continue,
+                    _ => {
+                        return Err(ProxyError::Request(
+                            "unexpected peer message during block request".into(),
+                        ))
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), operation)
+            .await
+            .map_err(|_| ProxyError::Network("peer block request timed out".into()))?
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BLOCK_BYTES: u32 = 16 * 1024;
+
+fn validate_block_request(begin: u32, length: u32) -> Result<()> {
+    if length == 0 || length > MAX_REQUEST_BLOCK_BYTES || begin.checked_add(length).is_none() {
+        return Err(ProxyError::Request("invalid peer block request".into()));
+    }
+    Ok(())
+}
 
 pub fn encode_handshake(handshake: &BitTorrentHandshake) -> [u8; 68] {
     let mut output = [0u8; 68];
@@ -1280,5 +1346,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("public"));
+    }
+
+    #[test]
+    fn validates_peer_block_request_bounds() {
+        assert!(validate_block_request(0, 16 * 1024).is_ok());
+        assert!(validate_block_request(0, 0).is_err());
+        assert!(validate_block_request(0, 16 * 1024 + 1).is_err());
+        assert!(validate_block_request(u32::MAX, 1).is_err());
     }
 }
