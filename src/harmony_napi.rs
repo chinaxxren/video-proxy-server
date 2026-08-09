@@ -25,7 +25,10 @@ impl MediaProxyCache {
                 .iter()
                 .any(|host| host.trim().is_empty() || host.contains(','))
         {
-            return Err(Error::new(Status::InvalidArg, "invalid proxy configuration"));
+            return Err(Error::new(
+                Status::InvalidArg,
+                "invalid proxy configuration",
+            ));
         }
         let cache_directory = CString::new(cache_directory)
             .map_err(|_| Error::new(Status::InvalidArg, "invalid cache directory"))?;
@@ -52,8 +55,7 @@ impl MediaProxyCache {
             .handle
             .lock()
             .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?;
-        let handle = handle
-            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        let handle = handle.ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
         let port = unsafe { proxy_server_start(handle as *mut ProxyServerHandle) };
         if port == 0 {
             Err(Error::new(Status::GenericFailure, "proxy start failed"))
@@ -73,11 +75,7 @@ impl MediaProxyCache {
 
     #[napi]
     pub fn close(&self) {
-        let handle = self
-            .handle
-            .lock()
-            .ok()
-            .and_then(|mut handle| handle.take());
+        let handle = self.handle.lock().ok().and_then(|mut handle| handle.take());
         if let Some(handle) = handle {
             unsafe { proxy_server_destroy(handle as *mut ProxyServerHandle) }
         }
