@@ -36,6 +36,76 @@ pub struct TorrentFile {
     pub length: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct TorrentPieceStore {
+    directory: std::path::PathBuf,
+}
+
+impl TorrentPieceStore {
+    pub fn new(root: &std::path::Path, info_hash: &[u8; 20]) -> Result<Self> {
+        if !root.is_absolute() {
+            return Err(ProxyError::Storage(
+                "torrent piece root must be absolute".into(),
+            ));
+        }
+        let name = info_hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            ProxyError::Storage(format!("create torrent piece directory failed: {error}"))
+        })?;
+        Ok(Self { directory })
+    }
+
+    pub fn store(&self, index: u32, bytes: &[u8], expected_sha1: &[u8; 20]) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
+            return Err(ProxyError::Storage("invalid torrent piece size".into()));
+        }
+        verify_piece_sha1(bytes, expected_sha1)?;
+        let final_path = self.directory.join(format!("{index}.piece"));
+        let temp_path = self.directory.join(format!("{index}.piece.tmp"));
+        std::fs::write(&temp_path, bytes)
+            .map_err(|error| ProxyError::Storage(format!("write torrent piece failed: {error}")))?;
+        std::fs::rename(&temp_path, &final_path).map_err(|error| {
+            let _ = std::fs::remove_file(&temp_path);
+            ProxyError::Storage(format!("commit torrent piece failed: {error}"))
+        })
+    }
+
+    pub fn load(&self, index: u32, expected_sha1: &[u8; 20]) -> Result<Option<Vec<u8>>> {
+        let path = self.directory.join(format!("{index}.piece"));
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ProxyError::Storage(format!(
+                    "read torrent piece failed: {error}"
+                )))
+            }
+        };
+        if bytes.is_empty()
+            || bytes.len() > 8 * 1024 * 1024
+            || verify_piece_sha1(&bytes, expected_sha1).is_err()
+        {
+            let _ = std::fs::remove_file(path);
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub fn completed(&self, hashes: &[[u8; 20]]) -> Result<Vec<u32>> {
+        let mut completed = Vec::new();
+        for (index, hash) in hashes.iter().enumerate() {
+            if self.load(index as u32, hash)?.is_some() {
+                completed.push(index as u32);
+            }
+        }
+        Ok(completed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtendedHandshake {
     pub ut_metadata_id: u8,
@@ -1760,6 +1830,17 @@ mod tests {
         assert_eq!(metadata.files[0].path, vec!["root", "a"]);
         let unsafe_torrent = b"d4:infod5:filesld6:lengthi1e4:pathl2:..eee4:name4:root12:piece lengthi1e6:pieces20:12345678901234567890ee";
         assert!(parse_torrent_metadata(unsafe_torrent).is_err());
+    }
+
+    #[test]
+    fn piece_store_recovers_verified_pieces_and_drops_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TorrentPieceStore::new(root.path(), &[1; 20]).unwrap();
+        let hash: [u8; 20] = Sha1::digest(b"piece").into();
+        store.store(0, b"piece", &hash).unwrap();
+        assert_eq!(store.completed(&[hash]).unwrap(), vec![0]);
+        std::fs::write(store.directory.join("0.piece"), b"broken").unwrap();
+        assert!(store.load(0, &hash).unwrap().is_none());
     }
 
     #[test]
