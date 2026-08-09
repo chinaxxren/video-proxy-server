@@ -1248,6 +1248,44 @@ pub async fn download_next_piece(
     }
 }
 
+pub async fn download_from_peer(
+    target: std::net::SocketAddr,
+    handshake: &BitTorrentHandshake,
+    scheduler: &mut PieceScheduler,
+    metadata: &TorrentMetadata,
+    store: &TorrentPieceStore,
+    max_pieces: usize,
+) -> Result<usize> {
+    if max_pieces == 0 || max_pieces > 10_000 {
+        return Err(ProxyError::Request("invalid peer download limit".into()));
+    }
+    let mut connection = PeerConnection::connect(target, handshake).await?;
+    let bitfield = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match connection.receive().await? {
+                PeerMessage::Bitfield(bitfield) => return Ok::<Vec<u8>, ProxyError>(bitfield),
+                PeerMessage::KeepAlive | PeerMessage::Have(_) | PeerMessage::Choke => continue,
+                _ => {
+                    return Err(ProxyError::Request(
+                        "peer did not provide a bitfield".into(),
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| ProxyError::Network("peer bitfield timed out".into()))??;
+    scheduler.observe_bitfield(&bitfield)?;
+    let mut downloaded = 0usize;
+    while downloaded < max_pieces {
+        match download_next_piece(&mut connection, scheduler, &bitfield, metadata, store).await? {
+            Some(_) => downloaded += 1,
+            None => break,
+        }
+    }
+    Ok(downloaded)
+}
+
 fn torrent_piece_length(metadata: &TorrentMetadata, index: u32) -> Result<u32> {
     let index = index as usize;
     if index >= metadata.piece_sha1.len() {
