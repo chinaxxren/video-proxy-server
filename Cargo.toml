@@ -32,6 +32,7 @@ p2p = []
 # Parsing alone performs no tracker, DHT, peer, upload, or seeding activity.
 p2p-network = ["dep:sha1"]
 p2p-upload = ["p2p-network"]
+p2p-librqbit = ["p2p-network", "dep:librqbit"]
 android-jni = ["dep:jni"]
 harmony-napi = ["dep:napi", "dep:napi-derive"]
 
@@ -63,6 +64,7 @@ url = { version = "2.2", default-features = false, features = ["std"] }
 m3u8-rs = { version = "6.0.1", default-features = false, features = ["parser"] }
 sha2 = { version = "0.11", default-features = false }
 sha1 = { version = "0.10", default-features = false, optional = true }
+librqbit = { version = "8.1.1", default-features = false, features = ["rust-tls", "disable-upload"], optional = true }
 jni = { version = "0.22.4", default-features = false, optional = true }
 napi = { package = "napi-h", version = "2.16.1", default-features = false, features = ["napi3"], optional = true }
 napi-derive = { version = "2.16.13", default-features = false, features = ["strict"], optional = true }
