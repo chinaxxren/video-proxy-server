@@ -100,6 +100,11 @@ uint8_t proxy_torrent_set_paused(
     int64_t torrent_id,
     uint8_t paused
 );
+// Session-wide bytes/second. Pass 0 to remove the download limit.
+uint8_t proxy_torrent_set_download_limit(
+    ProxyServerHandle *handle,
+    uint32_t bytes_per_second
+);
 #endif
 
 #ifdef __cplusplus

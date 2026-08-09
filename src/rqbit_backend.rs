@@ -6,6 +6,7 @@ use librqbit::{
     Session, SessionOptions,
 };
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -15,6 +16,7 @@ use tokio::sync::{Mutex, RwLock};
 pub struct RqbitBackendConfig {
     pub cache_directory: PathBuf,
     pub max_torrents: usize,
+    pub download_bytes_per_second: Option<NonZeroU32>,
 }
 
 impl RqbitBackendConfig {
@@ -22,6 +24,7 @@ impl RqbitBackendConfig {
         Self {
             cache_directory,
             max_torrents: 8,
+            download_bytes_per_second: None,
         }
     }
 }
@@ -76,6 +79,10 @@ impl RqbitBackend {
             listen_port_range: None,
             enable_upnp_port_forwarding: false,
             fastresume: true,
+            ratelimits: librqbit::limits::LimitsConfig {
+                download_bps: config.download_bytes_per_second,
+                upload_bps: None,
+            },
             ..Default::default()
         };
         let session = Session::new_with_opts(cache_directory, options)
@@ -223,6 +230,10 @@ impl RqbitBackend {
         })
     }
 
+    pub fn set_download_limit(&self, bytes_per_second: Option<NonZeroU32>) {
+        self.session.ratelimits.set_download_bps(bytes_per_second);
+    }
+
     pub async fn remove(&self, torrent_id: usize, delete_files: bool) -> Result<()> {
         if !self.torrents.read().await.contains_key(&torrent_id) {
             return Err(ProxyError::Request("unknown librqbit torrent ID".into()));
@@ -274,6 +285,7 @@ mod tests {
         let error = RqbitBackend::with_config(RqbitBackendConfig {
             cache_directory: cache.path().to_path_buf(),
             max_torrents: 0,
+            download_bytes_per_second: None,
         })
         .await
         .err()

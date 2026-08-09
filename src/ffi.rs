@@ -37,6 +37,10 @@ enum RqbitCommand {
         paused: bool,
         reply: mpsc::SyncSender<bool>,
     },
+    SetDownloadLimit {
+        bytes_per_second: u32,
+        reply: mpsc::SyncSender<bool>,
+    },
 }
 
 pub struct ProxyServerHandle {
@@ -326,6 +330,46 @@ pub unsafe extern "C" fn proxy_torrent_set_paused(
         .send(RqbitCommand::SetPaused {
             torrent_id,
             paused: paused == 1,
+            reply,
+        })
+        .is_err()
+    {
+        return 0;
+    }
+    u8::from(
+        response
+            .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+            .unwrap_or(false),
+    )
+}
+
+/// Sets the session-wide BitTorrent download limit in bytes per second.
+/// Passing zero removes the limit. Returns 1 when the backend is active.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_set_download_limit(
+    handle: *mut ProxyServerHandle,
+    bytes_per_second: u32,
+) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return 0;
+    };
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::SetDownloadLimit {
+            bytes_per_second,
             reply,
         })
         .is_err()
@@ -674,6 +718,19 @@ async fn run_rqbit_commands(
                 let changed = match &backend {
                     Some(backend) if paused => backend.pause(torrent_id).await.is_ok(),
                     Some(backend) => backend.resume(torrent_id).await.is_ok(),
+                    None => false,
+                };
+                let _ = reply.send(changed);
+            }
+            RqbitCommand::SetDownloadLimit {
+                bytes_per_second,
+                reply,
+            } => {
+                let changed = match &backend {
+                    Some(backend) => {
+                        backend.set_download_limit(std::num::NonZeroU32::new(bytes_per_second));
+                        true
+                    }
                     None => false,
                 };
                 let _ = reply.send(changed);
