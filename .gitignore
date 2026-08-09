@@ -27,3 +27,6 @@ Thumbs.db
 /platform/android/.gradle/
 /platform/android/library/build/
 /platform/android/library/src/main/jniLibs/
+/platform/harmony/.hvigor/
+/platform/harmony/library/build/
+/platform/harmony/library/libs/

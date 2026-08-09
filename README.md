@@ -194,8 +194,9 @@ with `Get-FileHash <archive> -Algorithm SHA256`.
 The separate `.github/workflows/mobile.yml` workflow builds iOS and Android
 native libraries on GitHub-hosted runners and publishes them as Release assets
 for tagged pushes. HarmonyOS builds are opt-in: set repository variable
-`ENABLE_HARMONY_BUILD=true` and secret `OHOS_NDK_URL` to a downloadable OHOS NDK
-archive. Without that configuration the HarmonyOS job is skipped.
+`ENABLE_HARMONY_BUILD=true`, secret `OHOS_NDK_URL` to a downloadable OHOS NDK
+archive, and `OHOS_HVIGOR_URL` to a downloadable archive containing executable
+`hvigorw`. Without that configuration the HarmonyOS job is skipped.
 
 On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
 release dylib and exercises the complete create/start/stop/destroy lifecycle.

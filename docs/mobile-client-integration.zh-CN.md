@@ -230,6 +230,10 @@ await avPlayer.setUrl(playbackUrl)
 - 测试 AVPlayer 的 Range、Seek、HLS、后台播放和应用恢复；
 - 验证 debug/release 构建中的 HAR 加载与符号可见性。
 
+`scripts/package-harmony-har.sh` 会暂存两个原生 ABI，启用 ArkTS type check 运行 Hvigor，
+构建 `MediaProxyCache.har`，并校验声明文件和原生库条目。当前已使用 DevEco Hvigor 6.24.3
+和 OHOS ELF stub 验证结构；Rust OHOS 原生库仍需 CI 实际验证。
+
 ## 安全要求
 
 - 仅绑定 `127.0.0.1`，不能绑定全部网络接口。

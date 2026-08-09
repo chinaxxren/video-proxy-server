@@ -234,6 +234,11 @@ HarmonyOS work items:
 - test AVPlayer Range, seek, HLS, background playback, and application recovery;
 - verify HAR loading and symbol visibility in both debug and release builds.
 
+`scripts/package-harmony-har.sh` stages both native ABIs, runs Hvigor with
+ArkTS type checking, builds `MediaProxyCache.har`, and verifies its declaration
+and native library entries. The structure has been validated with DevEco Hvigor
+6.24.3 and OHOS ELF stubs; the Rust OHOS libraries still require CI validation.
+
 ## Security Requirements
 
 - Bind only to `127.0.0.1`; do not bind to all interfaces.
