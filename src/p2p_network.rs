@@ -88,6 +88,13 @@ pub fn encode_ut_metadata_request(extension_id: u8, piece: u32) -> Result<PeerMe
     })
 }
 
+pub fn encode_extended_handshake() -> PeerMessage {
+    PeerMessage::Extended {
+        extension_id: 0,
+        payload: b"d1:md11:ut_metadatai1eee".to_vec(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MetadataExtensionResponse {
     Data {
@@ -1100,6 +1107,63 @@ impl PeerConnection {
         verify_piece_sha1(&piece, expected_sha1)?;
         Ok(piece)
     }
+
+    pub async fn download_metadata(&mut self, expected_info_hash: [u8; 20]) -> Result<Vec<u8>> {
+        let operation = async {
+            self.send(&encode_extended_handshake()).await?;
+            let remote = loop {
+                match self.receive().await? {
+                    PeerMessage::Extended {
+                        extension_id: 0,
+                        payload,
+                    } => break parse_extended_handshake(&payload)?,
+                    PeerMessage::KeepAlive | PeerMessage::Have(_) | PeerMessage::Bitfield(_) => {
+                        continue
+                    }
+                    _ => {
+                        return Err(ProxyError::Request(
+                            "peer did not provide extended handshake".into(),
+                        ))
+                    }
+                }
+            };
+            let mut assembler = MetadataAssembler::new(expected_info_hash, remote.metadata_size)?;
+            for piece in 0..remote.metadata_size.div_ceil(16 * 1024) {
+                self.send(&encode_ut_metadata_request(
+                    remote.ut_metadata_id,
+                    piece as u32,
+                )?)
+                .await?;
+                loop {
+                    match self.receive().await? {
+                        PeerMessage::Extended {
+                            extension_id,
+                            payload,
+                        } if extension_id == remote.ut_metadata_id => {
+                            let response = parse_ut_metadata_response(&payload)?;
+                            if matches!(response, MetadataExtensionResponse::Reject { .. }) {
+                                return Err(ProxyError::Request(
+                                    "peer rejected metadata piece".into(),
+                                ));
+                            }
+                            assembler.insert(response)?;
+                            break;
+                        }
+                        PeerMessage::KeepAlive | PeerMessage::Have(_) => continue,
+                        _ => {
+                            return Err(ProxyError::Request(
+                                "unexpected message during metadata exchange".into(),
+                            ))
+                        }
+                    }
+                }
+            }
+            assembler.finish()
+        };
+        tokio::time::timeout(Duration::from_secs(60), operation)
+            .await
+            .map_err(|_| ProxyError::Network("metadata exchange timed out".into()))?
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -1589,6 +1653,11 @@ mod tests {
         assert_eq!(
             parse_peer_message(&encode_peer_message(&message).unwrap()).unwrap(),
             message
+        );
+        assert_eq!(
+            parse_peer_message(&encode_peer_message(&encode_extended_handshake()).unwrap())
+                .unwrap(),
+            encode_extended_handshake()
         );
     }
 
