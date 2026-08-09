@@ -37,7 +37,8 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 | 鸿蒙 | 动态库 | HAR | ArkTS/N-API |
 
 原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 由 Rust
-`android-jni` feature 提供实现，鸿蒙声明仍需要 N-API 实现。
+`android-jni` feature 提供实现，鸿蒙声明由 Rust `harmony-napi` feature 提供实现。
+Android AAR 和 HarmonyOS HAR 仍待实际验证。
 
 建议支持的架构：
 
@@ -220,8 +221,8 @@ await avPlayer.setUrl(playbackUrl)
 鸿蒙工作项：
 
 - 根据支持的鸿蒙 SDK 版本验证 Rust target 和原生构建链；
-- 优先打包 ARM64，仅依据产品设备矩阵扩展；
-- N-API 调用保持异步，并明确回调线程；
+- 根据产品设备矩阵验证打包的 ARM64 和 ARMv7 库；
+- 将可能阻塞的 N-API 生命周期调用迁移到异步任务，并明确回调线程；
 - 使用应用 Context 提供的沙箱路径；
 - 验证 localhost 网络访问和 cleartext 策略；
 - 测试 AVPlayer 的 Range、Seek、HLS、后台播放和应用恢复；
@@ -279,4 +280,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供生产可用的 AAR、Swift 或 N-API/HAR Adapter，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供已验证的 AAR、生产级 Swift 或 HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

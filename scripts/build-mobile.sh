@@ -18,6 +18,9 @@ fi
 if [[ "${PLATFORM:-all}" == "android" ]]; then
   CARGO_FEATURES+=(android-jni)
 fi
+if [[ "${PLATFORM:-all}" == "harmony" ]]; then
+  CARGO_FEATURES+=(harmony-napi)
+fi
 CARGO_FEATURE_ARGS=()
 if [[ "${#CARGO_FEATURES[@]}" -gt 0 ]]; then
   CARGO_FEATURE_ARGS=(--features "$(IFS=,; echo "${CARGO_FEATURES[*]}")")
@@ -31,7 +34,7 @@ printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
 verify_native_symbols() {
   local artifact="$1" platform="$2" nm_tool
-  [[ "$P2P_ENABLED" == "1" || "$platform" == "android" ]] || return 0
+  [[ "$P2P_ENABLED" == "1" || "$platform" == "android" || "$platform" == "harmony" ]] || return 0
   if [[ -n "${NM:-}" ]]; then
     nm_tool="$NM"
   elif command -v llvm-nm >/dev/null 2>&1; then
@@ -67,6 +70,12 @@ verify_native_symbols() {
         return 1
       }
     done
+  fi
+  if [[ "$platform" == "harmony" ]]; then
+    rg -q "[[:space:]]napi_register_module_v1$" <<<"$symbols" || {
+      echo "Missing HarmonyOS N-API registration symbol in $artifact" >&2
+      return 1
+    }
   fi
 }
 

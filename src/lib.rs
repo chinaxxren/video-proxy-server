@@ -1,5 +1,7 @@
 #[cfg(feature = "android-jni")]
 mod android_jni;
+#[cfg(feature = "harmony-napi")]
+mod harmony_napi;
 pub mod data_request;
 pub mod data_source;
 pub mod data_source_manager;

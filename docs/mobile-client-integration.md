@@ -38,7 +38,8 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 
 Native archives include the current platform templates under `adapter/`.
 Swift directly wraps the C ABI; Kotlin is backed by the Rust `android-jni`
-feature, while the HarmonyOS declaration still requires an N-API implementation.
+feature, and the HarmonyOS declaration is backed by the Rust `harmony-napi`
+feature. Android AAR and HarmonyOS HAR validation remain pending.
 
 Expected architecture targets:
 
@@ -223,8 +224,8 @@ await avPlayer.setUrl(playbackUrl)
 HarmonyOS work items:
 
 - validate the Rust target and native build chain against the supported HarmonyOS SDK version;
-- package ARM64 first and expand only from the product device matrix;
-- keep N-API calls asynchronous and document callback threads;
+- validate the packaged ARM64 and ARMv7 libraries against the product device matrix;
+- move potentially blocking N-API lifecycle calls onto async tasks and document callback threads;
 - use a sandbox path supplied by the application context;
 - verify localhost networking and cleartext policy;
 - test AVPlayer Range, seek, HLS, background playback, and application recovery;
@@ -282,4 +283,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes an Android JNI bridge, build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide production AAR, Swift, or N-API/HAR adapters, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide validated AAR, production Swift, or HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
