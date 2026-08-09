@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -547,6 +548,90 @@ pub enum PeerMessage {
         length: u32,
     },
     Port(u16),
+}
+
+#[derive(Debug)]
+pub struct PeerConnection {
+    stream: tokio::net::TcpStream,
+    pub remote_handshake: BitTorrentHandshake,
+}
+
+impl PeerConnection {
+    pub async fn connect(
+        target: std::net::SocketAddr,
+        local: &BitTorrentHandshake,
+    ) -> Result<Self> {
+        if !is_public_socket(target) {
+            return Err(ProxyError::Request(
+                "peer target must be a public address".into(),
+            ));
+        }
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(target),
+        )
+        .await
+        .map_err(|_| ProxyError::Network("peer connection timed out".into()))?
+        .map_err(|error| ProxyError::Network(format!("peer connection failed: {error}")))?;
+        stream
+            .set_nodelay(true)
+            .map_err(|error| ProxyError::Network(format!("peer TCP setup failed: {error}")))?;
+        let handshake = encode_handshake(local);
+        tokio::time::timeout(Duration::from_secs(5), stream.write_all(&handshake))
+            .await
+            .map_err(|_| ProxyError::Network("peer handshake send timed out".into()))?
+            .map_err(|error| ProxyError::Network(format!("peer handshake send failed: {error}")))?;
+        let mut response = [0u8; 68];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut response))
+            .await
+            .map_err(|_| ProxyError::Network("peer handshake receive timed out".into()))?
+            .map_err(|error| {
+                ProxyError::Network(format!("peer handshake receive failed: {error}"))
+            })?;
+        let remote_handshake = parse_handshake(&response)?;
+        if remote_handshake.info_hash != local.info_hash {
+            return Err(ProxyError::Request(
+                "peer handshake info hash mismatch".into(),
+            ));
+        }
+        Ok(Self {
+            stream,
+            remote_handshake,
+        })
+    }
+
+    pub async fn send(&mut self, message: &PeerMessage) -> Result<()> {
+        let encoded = encode_peer_message(message)?;
+        tokio::time::timeout(Duration::from_secs(5), self.stream.write_all(&encoded))
+            .await
+            .map_err(|_| ProxyError::Network("peer message send timed out".into()))?
+            .map_err(|error| ProxyError::Network(format!("peer message send failed: {error}")))
+    }
+
+    pub async fn receive(&mut self) -> Result<PeerMessage> {
+        let mut prefix = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(15), self.stream.read_exact(&mut prefix))
+            .await
+            .map_err(|_| ProxyError::Network("peer message receive timed out".into()))?
+            .map_err(|error| {
+                ProxyError::Network(format!("peer message receive failed: {error}"))
+            })?;
+        let length = u32::from_be_bytes(prefix) as usize;
+        if length > MAX_PEER_MESSAGE_BYTES {
+            return Err(ProxyError::Request("peer message is too large".into()));
+        }
+        let mut encoded = Vec::with_capacity(length + 4);
+        encoded.extend_from_slice(&prefix);
+        encoded.resize(length + 4, 0);
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            self.stream.read_exact(&mut encoded[4..]),
+        )
+        .await
+        .map_err(|_| ProxyError::Network("peer message body timed out".into()))?
+        .map_err(|error| ProxyError::Network(format!("peer message body failed: {error}")))?;
+        parse_peer_message(&encoded)
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -1179,6 +1264,19 @@ mod tests {
             numwant: None,
         };
         let error = announce_udp_tracker("127.0.0.1:80".parse().unwrap(), &request, 1, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("public"));
+    }
+
+    #[tokio::test]
+    async fn peer_connection_rejects_private_target_before_network_io() {
+        let handshake = BitTorrentHandshake {
+            reserved: [0; 8],
+            info_hash: [1; 20],
+            peer_id: [2; 20],
+        };
+        let error = PeerConnection::connect("127.0.0.1:6881".parse().unwrap(), &handshake)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("public"));
