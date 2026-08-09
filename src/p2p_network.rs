@@ -1106,6 +1106,61 @@ impl PieceScheduler {
     }
 }
 
+pub async fn download_next_piece(
+    connection: &mut PeerConnection,
+    scheduler: &mut PieceScheduler,
+    peer_bitfield: &[u8],
+    metadata: &TorrentMetadata,
+    store: &TorrentPieceStore,
+) -> Result<Option<u32>> {
+    let Some(index) = scheduler.claim_next(peer_bitfield)? else {
+        return Ok(None);
+    };
+    let result = async {
+        let length = torrent_piece_length(metadata, index)?;
+        let expected = metadata
+            .piece_sha1
+            .get(index as usize)
+            .ok_or_else(|| ProxyError::Request("piece hash index out of range".into()))?;
+        if store.load(index, expected)?.is_none() {
+            let bytes = connection.download_piece(index, length, expected).await?;
+            store.store(index, &bytes, expected)?;
+        }
+        Ok::<(), ProxyError>(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            scheduler.complete(index)?;
+            Ok(Some(index))
+        }
+        Err(error) => {
+            scheduler.fail(index)?;
+            Err(error)
+        }
+    }
+}
+
+fn torrent_piece_length(metadata: &TorrentMetadata, index: u32) -> Result<u32> {
+    let index = index as usize;
+    if index >= metadata.piece_sha1.len() {
+        return Err(ProxyError::Request("piece index out of range".into()));
+    }
+    if index + 1 < metadata.piece_sha1.len() {
+        return Ok(metadata.piece_length);
+    }
+    let consumed = (metadata.piece_length as u64)
+        .checked_mul(index as u64)
+        .ok_or_else(|| ProxyError::Request("piece offset overflow".into()))?;
+    u32::try_from(
+        metadata
+            .total_length
+            .checked_sub(consumed)
+            .ok_or_else(|| ProxyError::Request("piece length underflow".into()))?,
+    )
+    .map_err(|_| ProxyError::Request("last piece length overflow".into()))
+}
+
 impl PeerConnection {
     pub async fn connect(
         target: std::net::SocketAddr,
@@ -2120,5 +2175,23 @@ mod tests {
         scheduler.complete(0).unwrap();
         assert!(!scheduler.is_complete());
         assert!(scheduler.observe_bitfield(&[0b1110_0001]).is_err());
+    }
+
+    #[test]
+    fn calculates_last_torrent_piece_length() {
+        let metadata = TorrentMetadata {
+            info_hash: [0; 20],
+            name: "x".into(),
+            total_length: 10,
+            piece_length: 4,
+            piece_sha1: vec![[0; 20]; 3],
+            files: vec![TorrentFile {
+                path: vec!["x".into()],
+                length: 10,
+            }],
+        };
+        assert_eq!(torrent_piece_length(&metadata, 0).unwrap(), 4);
+        assert_eq!(torrent_piece_length(&metadata, 2).unwrap(), 2);
+        assert!(torrent_piece_length(&metadata, 3).is_err());
     }
 }
