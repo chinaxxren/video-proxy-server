@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 A Rust HTTP media proxy with byte-range caching and HLS support. The server listens on `127.0.0.1`, streams data from approved upstream hosts, and persists completed byte ranges on disk.
 
-> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. The C ABI lifecycle, Android JNI bridge, HarmonyOS N-API bridge, and native iOS XCFramework packaging are available; production AAR, Swift, and HAR adapters are still pending. Localhost caller authentication is intentionally outside this project's current scope.
+> Status: prototype. The core safety and cache-correctness issues have initial fixes and regression tests, but the project is not yet recommended as a production dependency. C ABI, Android/Kotlin, iOS/Swift, and HarmonyOS/ArkTS adapters and packaging are available. Localhost caller authentication is intentionally outside this project's current scope.
 
 ## Features
 
@@ -22,6 +22,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 - Localhost-only HTTP/1.1 listener (HTTP and HTTPS origins are supported)
 - C ABI lifecycle entry points for mobile adapters (`include/media_proxy_cache.h`)
 - Optional compliance-gated P2P byte-provider boundary (disabled by default)
+- Optional librqbit Magnet/BitTorrent streaming backend (disabled by default)
 
 ## Requirements
 
@@ -63,10 +64,10 @@ Host can continue filling later pieces while playback proceeds. Core does not
 discover peers or download from a P2P network; the Host owns acquisition and
 authorization.
 
-The separate `p2p-network` feature currently provides only network-free Magnet
-metadata parsing. Tracker requests, DHT, peer wire sessions, automatic
-downloads, uploads, and seeding remain disabled until their gated modules are
-implemented and validated.
+For real Magnet, Tracker, DHT, peer discovery, and automatic piece downloading,
+use the separately gated `p2p-librqbit` backend. See
+[BitTorrent Client Integration](docs/torrent-client-integration.md). Upload and
+seeding are disabled in the librqbit production backend.
 
 ### Dependency security
 

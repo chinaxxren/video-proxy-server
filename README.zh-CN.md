@@ -4,7 +4,7 @@
 
 一个使用 Rust 实现的 HTTP 媒体代理缓存。服务监听 `127.0.0.1`，从明确允许的上游域名流式读取媒体，并在磁盘上持久化真实完成的字节区间。
 
-> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI 生命周期接口、Android JNI Bridge、HarmonyOS N-API Bridge 和 iOS 原生 XCFramework 打包已经提供，生产可用的 AAR、Swift 和 HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
+> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI、Android/Kotlin、iOS/Swift、HarmonyOS/ArkTS Adapter 和打包能力已经提供。localhost 调用方认证明确不在本项目当前范围内。
 
 ## 功能
 
@@ -22,6 +22,7 @@
 - 仅监听 localhost 的 HTTP/1.1 服务（支持 HTTP 和 HTTPS 上游）
 - 面向移动端 Adapter 的 C ABI 生命周期入口（`include/media_proxy_cache.h`）
 - 默认关闭、带合规授权门的可选 P2P 字节提供接口
+- 默认关闭、基于 librqbit 的可选 Magnet/BitTorrent 边下边播后端
 
 ## 环境要求
 
@@ -58,8 +59,9 @@ Host 将已授权分片写入 `<分片目录>/<index>.piece`。播放器使用�
 读取并校验请求分片，将校验后的字节写入共享缓存并立即返回。播放期间 Host 可以继续填充后续
 分片。Core 不负责发现 Peer 或从 P2P 网络下载，分片获取和授权由 Host 负责。
 
-独立的 `p2p-network` feature 当前只提供不联网的 Magnet 元数据解析。Tracker 请求、DHT、Peer
-wire 连接、自动下载、上传和做种仍保持关闭，待对应的受控模块完成并验证后再开放。
+真实 Magnet、Tracker、DHT、Peer 自动发现和分片下载由独立开关
+`p2p-librqbit` 提供，参见 [BitTorrent 客户端接入](docs/torrent-client-integration.zh-CN.md)。
+librqbit 生产后端明确关闭上传和做种。
 
 ### 依赖安全
 
