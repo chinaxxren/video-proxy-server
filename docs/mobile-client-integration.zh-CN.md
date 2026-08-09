@@ -178,6 +178,11 @@ iOS 工作项：
 
 编译 Rust 动态库，暴露 JNI 接口，并将 Kotlin API 与原生库打包为 AAR。
 
+仓库现在包含基于 Rust `jni 0.22` 的 Bridge 和 AGP `9.3.1` library 工程。
+`scripts/package-android-aar.sh` 会暂存 arm64-v8a、armeabi-v7a 和 x86_64 动态库，
+构建 Release AAR，并校验 `classes.jar` 与三个 JNI 库。该流水线仍需首次 Android
+NDK/CI 实际执行后才能视为已验证。
+
 建议接口形态：
 
 ```kotlin

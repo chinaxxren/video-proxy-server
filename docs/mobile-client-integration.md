@@ -180,6 +180,12 @@ iOS work items:
 
 Compile Rust shared libraries, expose JNI bindings, and package Kotlin APIs and native libraries in an AAR.
 
+The repository now contains the Rust `jni 0.22` bridge and an AGP `9.3.1`
+library project. `scripts/package-android-aar.sh` stages arm64-v8a,
+armeabi-v7a, and x86_64 libraries, builds the release AAR, and verifies
+`classes.jar` plus all three JNI libraries. This pipeline still requires its
+first Android NDK/CI execution before it is considered validated.
+
 Recommended shape:
 
 ```kotlin

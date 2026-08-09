@@ -22,3 +22,8 @@
 # 忽略操作系统生成的文件
 .DS_Store
 Thumbs.db
+
+# Android library build output and staged Rust libraries
+/platform/android/.gradle/
+/platform/android/library/build/
+/platform/android/library/src/main/jniLibs/

@@ -47,10 +47,17 @@ jobs:
       P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
       - name: Install Android NDK
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;26.3.11579264"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;26.3.11579264"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -67,6 +74,8 @@ jobs:
           export AR_armv7_linux_androideabi="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export AR_x86_64_linux_android="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           PLATFORM=android ./scripts/build-mobile.sh dist/mobile
+      - name: Package Android AAR
+        run: ./scripts/package-android-aar.sh dist/mobile/android dist/mobile/android
       - name: Archive Android artifacts
         run: |
           tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt

@@ -1,6 +1,6 @@
 package com.example.mediaproxy
 
-/** Thin Kotlin ownership wrapper around the shared Rust C ABI. */
+/** Thin Kotlin ownership wrapper around the shared Rust JNI bridge. */
 class MediaProxyCache private constructor(private var handle: Long) : AutoCloseable {
     companion object {
         init { System.loadLibrary("proxy_server") }

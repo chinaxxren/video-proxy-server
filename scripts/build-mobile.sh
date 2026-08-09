@@ -130,7 +130,7 @@ case "${PLATFORM:-all}" in
   macos) build_target macos aarch64-apple-darwin; build_target macos x86_64-apple-darwin ;;
   windows) build_target windows x86_64-pc-windows-gnu ;;
   ios) build_target ios aarch64-apple-ios staticlib; build_target ios-sim aarch64-apple-ios-sim staticlib; build_target ios-sim x86_64-apple-ios staticlib; build_ios_xcframework; install_adapter_template ios platform/ios/MediaProxyCache.swift ;;
-  android) build_target android aarch64-linux-android cdylib; build_target android armv7-linux-androideabi cdylib; build_target android x86_64-linux-android cdylib; install_adapter_template android platform/android/MediaProxyCache.kt ;;
+  android) build_target android aarch64-linux-android cdylib; build_target android armv7-linux-androideabi cdylib; build_target android x86_64-linux-android cdylib; install_adapter_template android platform/android/library/src/main/kotlin/com/example/mediaproxy/MediaProxyCache.kt ;;
   harmony) build_target harmony aarch64-unknown-linux-ohos cdylib; build_target harmony armv7-unknown-linux-ohos cdylib; install_adapter_template harmony platform/harmony/MediaProxyCache.d.ts ;;
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;
   *) echo "Usage: PLATFORM={macos|windows|ios|android|harmony|all} $0 [output-dir]" >&2; exit 2 ;;
