@@ -14,6 +14,11 @@ requires an explicit authorization flag and validates the Magnet URI before it
 creates the P2P session. Starting the ordinary localhost proxy alone performs no
 BitTorrent network activity.
 
+Core manages at most eight torrents by default. Rust hosts may override this
+with `RqbitBackendConfig::max_torrents`. Concurrent additions are serialized,
+and Magnet URIs with the same info-hash reuse one torrent ID even when their
+tracker parameters differ.
+
 ## Build
 
 ```bash

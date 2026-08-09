@@ -11,6 +11,10 @@ Tracker、DHT、Peer 自动发现、断点数据、分片校验和面向 Range �
 只能添加应用已获得合法授权的内容。Core 要求显式授权，并在创建 P2P 会话前严格校验
 Magnet URI。仅启动普通 localhost 代理不会产生 BitTorrent 网络活动。
 
+Core 默认最多同时管理 8 个 torrent。Rust Host 可通过
+`RqbitBackendConfig::max_torrents` 修改。并发添加会串行校验；info-hash 相同但 Tracker
+参数不同的 Magnet 会复用同一个 torrent ID。
+
 ## 构建
 
 ```bash

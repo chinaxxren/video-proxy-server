@@ -9,7 +9,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+
+#[derive(Clone, Debug)]
+pub struct RqbitBackendConfig {
+    pub cache_directory: PathBuf,
+    pub max_torrents: usize,
+}
+
+impl RqbitBackendConfig {
+    pub fn new(cache_directory: PathBuf) -> Self {
+        Self {
+            cache_directory,
+            max_torrents: 8,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct RqbitFileInfo {
@@ -31,13 +46,26 @@ pub struct RqbitTorrentStatus {
 pub struct RqbitBackend {
     session: Arc<Session>,
     torrents: RwLock<HashMap<usize, Arc<ManagedTorrent>>>,
+    info_hashes: RwLock<HashMap<[u8; 20], usize>>,
+    add_lock: Mutex<()>,
+    max_torrents: usize,
 }
 
 impl RqbitBackend {
     pub async fn new(cache_directory: PathBuf) -> Result<Self> {
+        Self::with_config(RqbitBackendConfig::new(cache_directory)).await
+    }
+
+    pub async fn with_config(config: RqbitBackendConfig) -> Result<Self> {
+        let cache_directory = config.cache_directory;
         if !cache_directory.is_absolute() {
             return Err(ProxyError::Storage(
                 "librqbit cache directory must be absolute".into(),
+            ));
+        }
+        if config.max_torrents == 0 {
+            return Err(ProxyError::Request(
+                "librqbit max_torrents must be greater than zero".into(),
             ));
         }
         std::fs::create_dir_all(&cache_directory).map_err(|error| {
@@ -58,6 +86,9 @@ impl RqbitBackend {
         Ok(Self {
             session,
             torrents: RwLock::new(HashMap::new()),
+            info_hashes: RwLock::new(HashMap::new()),
+            add_lock: Mutex::new(()),
+            max_torrents: config.max_torrents,
         })
     }
 
@@ -71,7 +102,17 @@ impl RqbitBackend {
                 "magnet download is not authorized".into(),
             ));
         }
-        crate::p2p_network::parse_magnet_uri(magnet)?;
+        let request = crate::p2p_network::parse_magnet_uri(magnet)?;
+        let _add_guard = self.add_lock.lock().await;
+        if let Some(id) = self.info_hashes.read().await.get(&request.info_hash) {
+            return Ok(*id);
+        }
+        if self.torrents.read().await.len() >= self.max_torrents {
+            return Err(ProxyError::Request(format!(
+                "librqbit torrent limit ({}) reached",
+                self.max_torrents
+            )));
+        }
         let response = self
             .session
             .add_torrent(
@@ -90,6 +131,7 @@ impl RqbitBackend {
                     ProxyError::Network(format!("initialize magnet failed: {error:#}"))
                 })?;
                 self.torrents.write().await.insert(id, handle);
+                self.info_hashes.write().await.insert(request.info_hash, id);
                 Ok(id)
             }
             AddTorrentResponse::ListOnly(_) => Err(ProxyError::Request(
@@ -192,6 +234,10 @@ impl RqbitBackend {
                 ProxyError::Storage(format!("remove librqbit torrent failed: {error:#}"))
             })?;
         self.torrents.write().await.remove(&torrent_id);
+        self.info_hashes
+            .write()
+            .await
+            .retain(|_, id| *id != torrent_id);
         Ok(())
     }
 
@@ -220,6 +266,19 @@ mod tests {
             .err()
             .expect("relative directory must be rejected");
         assert!(error.to_string().contains("must be absolute"));
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_torrent_limit() {
+        let cache = tempfile::tempdir().expect("create temporary cache");
+        let error = RqbitBackend::with_config(RqbitBackendConfig {
+            cache_directory: cache.path().to_path_buf(),
+            max_torrents: 0,
+        })
+        .await
+        .err()
+        .expect("zero limit must be rejected");
+        assert!(error.to_string().contains("max_torrents"));
     }
 
     #[tokio::test]
