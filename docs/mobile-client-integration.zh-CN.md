@@ -181,8 +181,10 @@ iOS 工作项：
 
 仓库现在包含基于 Rust `jni 0.22` 的 Bridge 和 AGP `9.3.1` library 工程。
 `scripts/package-android-aar.sh` 会暂存 arm64-v8a、armeabi-v7a 和 x86_64 动态库，
-构建 Release AAR，并校验 `classes.jar` 与三个 JNI 库。该流水线仍需首次 Android
-NDK/CI 实际执行后才能视为已验证。
+构建 Release AAR，并校验 `classes.jar` 与三个 JNI 库。CI 使用 NDK
+`29.0.14206865` 和 Gradle `9.7.0`；AGP 9.3.1 会拒绝之前配置的 Gradle 9.3.1。
+ARM64 JNI 库和 Debug APK 已通过该工具链构建，完整三 ABI Release AAR 仍需一次
+成功的 CI/Release 运行验证。
 JNI 暴露进程内不透明 token，而不是原生指针值。未知、已移除和重复销毁的 token 会在
 访问原生内存前被拒绝，销毁操作也会与活动 JNI 调用串行化。
 
@@ -264,9 +266,21 @@ await avPlayer.setUrl(playbackUrl)
 `scripts/build-ios-player-poc.sh` 可生成测试专用 XCFramework 和 Xcode 工程。按照
 示例 README 启动支持 Range 的本地源站，并设置 `MEDIA_PROXY_ORIGIN_URL`。
 
-该脚本只对 iOS 测试产物显式启用 `allow-private-upstream`。正常的
-`scripts/build-mobile.sh` 默认不会启用此 feature，并会拒绝其他平台使用测试
-开关。不得发布 POC XCFramework。
+该脚本只对测试产物显式启用 `allow-private-upstream`。正常的
+`scripts/build-mobile.sh` 默认不会启用此 feature，并且只允许 iOS 与 Android
+POC 显式使用测试开关。不得发布 POC XCFramework。
+
+### Android 模拟器播放器 POC
+
+Media3 1.11.0 示例位于 `examples/android-player-poc`。运行
+`scripts/build-android-player-poc.sh` 会为当前模拟器和真机交叉编译 ARM64
+原生库并组装测试 APK；生产 Android 构建仍默认覆盖三个受支持 ABI。示例 README
+说明了如何通过模拟器的 `10.0.2.2` 宿主机别名连接支持 Range 的本地源站。
+
+已在 ARM64、API 35 模拟器验证：Media3 进入 `STATE_READY`，播放和向前 Seek
+10 秒成功，完整的 3,434,642 字节文件及区间 sidecar 已落盘；使用变化后的 signed
+URL 查询参数重新启动时命中同一缓存，源站没有新增请求。已连接的 MIUI API 31
+真机通过设备安全策略拒绝 USB APK 安装，因此真机播放仍需用户先在设备上明确授权。
 
 每个平台 POC 应证明：
 

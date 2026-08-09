@@ -321,7 +321,7 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- No validated Android AAR, production iOS Swift, or HarmonyOS HAR package
+- No production-validated three-ABI Android AAR, production iOS Swift, or HarmonyOS HAR package; ARM64 Android Media3 and iOS Simulator player POCs are validated
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed

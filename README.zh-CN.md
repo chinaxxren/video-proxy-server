@@ -248,7 +248,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 
 ## 已知限制
 
-- 尚无已验证的 Android AAR、生产级 iOS Swift 或 HarmonyOS HAR 包
+- 尚无生产验证的三 ABI Android AAR、生产级 iOS Swift 或 HarmonyOS HAR 包；ARM64 Android Media3 与 iOS 模拟器播放器 POC 已验证
 - Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖

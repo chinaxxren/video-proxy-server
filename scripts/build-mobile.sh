@@ -7,6 +7,7 @@ PROFILE="${PROFILE:-release}"
 P2P_ENABLED="${P2P_ENABLED:-0}"
 TEST_ALLOW_PRIVATE_UPSTREAM="${TEST_ALLOW_PRIVATE_UPSTREAM:-0}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-13.0}"
+ANDROID_ARM64_ONLY="${ANDROID_ARM64_ONLY:-0}"
 
 if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   echo "P2P_ENABLED must be 0 or 1" >&2
@@ -16,14 +17,18 @@ if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" != "0" && "$TEST_ALLOW_PRIVATE_UPSTREAM" !=
   echo "TEST_ALLOW_PRIVATE_UPSTREAM must be 0 or 1" >&2
   exit 2
 fi
+if [[ "$ANDROID_ARM64_ONLY" != "0" && "$ANDROID_ARM64_ONLY" != "1" ]]; then
+  echo "ANDROID_ARM64_ONLY must be 0 or 1" >&2
+  exit 2
+fi
 
 CARGO_FEATURES=()
 if [[ "$P2P_ENABLED" == "1" ]]; then
   CARGO_FEATURES+=(p2p)
 fi
 if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" == "1" ]]; then
-  [[ "${PLATFORM:-all}" == "ios" ]] || {
-    echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit iOS test builds" >&2
+  [[ "${PLATFORM:-all}" == "ios" || "${PLATFORM:-all}" == "android" ]] || {
+    echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit iOS or Android test builds" >&2
     exit 2
   }
   CARGO_FEATURES+=(allow-private-upstream)
@@ -45,6 +50,7 @@ cp include/media_proxy_cache.h "$OUT_DIR/include/"
 cp include/module.modulemap "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 printf 'test_allow_private_upstream=%s\n' "$TEST_ALLOW_PRIVATE_UPSTREAM" >> "$OUT_DIR/build-features.txt"
+printf 'android_arm64_only=%s\n' "$ANDROID_ARM64_ONLY" >> "$OUT_DIR/build-features.txt"
 
 verify_native_symbols() {
   local artifact="$1" platform="$2" nm_tool
@@ -156,7 +162,14 @@ case "${PLATFORM:-all}" in
   macos) build_target macos aarch64-apple-darwin; build_target macos x86_64-apple-darwin ;;
   windows) build_target windows x86_64-pc-windows-gnu ;;
   ios) build_target ios aarch64-apple-ios staticlib; build_target ios-sim aarch64-apple-ios-sim staticlib; build_target ios-sim x86_64-apple-ios staticlib; build_ios_xcframework; install_adapter_template ios platform/ios/MediaProxyCache.swift ;;
-  android) build_target android aarch64-linux-android cdylib; build_target android armv7-linux-androideabi cdylib; build_target android x86_64-linux-android cdylib; install_adapter_template android platform/android/library/src/main/kotlin/com/example/mediaproxy/MediaProxyCache.kt ;;
+  android)
+    build_target android aarch64-linux-android cdylib
+    if [[ "$ANDROID_ARM64_ONLY" == "0" ]]; then
+      build_target android armv7-linux-androideabi cdylib
+      build_target android x86_64-linux-android cdylib
+    fi
+    install_adapter_template android platform/android/library/src/main/kotlin/com/example/mediaproxy/MediaProxyCache.kt
+    ;;
   harmony) build_target harmony aarch64-unknown-linux-ohos cdylib; build_target harmony armv7-unknown-linux-ohos cdylib; install_adapter_template harmony platform/harmony/MediaProxyCache.d.ts ;;
   all) PLATFORM=macos "$0" "$OUT_DIR"; PLATFORM=windows "$0" "$OUT_DIR"; PLATFORM=ios "$0" "$OUT_DIR"; PLATFORM=android "$0" "$OUT_DIR"; PLATFORM=harmony "$0" "$OUT_DIR" ;;
   *) echo "Usage: PLATFORM={macos|windows|ios|android|harmony|all} $0 [output-dir]" >&2; exit 2 ;;

@@ -184,8 +184,10 @@ Compile Rust shared libraries, expose JNI bindings, and package Kotlin APIs and 
 The repository now contains the Rust `jni 0.22` bridge and an AGP `9.3.1`
 library project. `scripts/package-android-aar.sh` stages arm64-v8a,
 armeabi-v7a, and x86_64 libraries, builds the release AAR, and verifies
-`classes.jar` plus all three JNI libraries. This pipeline still requires its
-first Android NDK/CI execution before it is considered validated.
+`classes.jar` plus all three JNI libraries. CI uses NDK `29.0.14206865` and
+Gradle `9.7.0`; AGP 9.3.1 rejects the previously configured Gradle 9.3.1.
+The ARM64 JNI library and debug APK have been built with this toolchain, while
+the full three-ABI release AAR still requires a successful CI/release run.
 JNI exposes process-local opaque tokens rather than pointer values. Unknown,
 removed, and repeatedly destroyed tokens are rejected before native memory is
 accessed, and destruction is serialized with active JNI calls.
@@ -270,9 +272,26 @@ The maintained AVPlayer example is in `examples/ios-player-poc`. Run
 project. Follow the example README to start the Range-capable local origin and set
 `MEDIA_PROXY_ORIGIN_URL`.
 
-The script deliberately enables `allow-private-upstream` only for this iOS test
+The script deliberately enables `allow-private-upstream` only for this test
 artifact. `scripts/build-mobile.sh` keeps that feature disabled by default and
-rejects the test switch for other platforms. Do not publish the POC XCFramework.
+only accepts the explicit test switch for iOS and Android POCs. Do not publish the
+POC XCFramework.
+
+### Android Emulator player POC
+
+The Media3 1.11.0 example is in `examples/android-player-poc`. Run
+`scripts/build-android-player-poc.sh` to cross-compile the ARM64 library used by
+the available Emulator/device and assemble the test APK. Production Android
+builds still target all three supported ABIs. The example README documents how
+to launch it against the Range-capable local origin through the Emulator's
+`10.0.2.2` host alias.
+
+Verified on an ARM64 API 35 Emulator: Media3 reached `STATE_READY`, playback and
+a ten-second seek succeeded, the complete 3,434,642-byte file plus range sidecar
+were persisted, and a relaunch with a changed signed-URL query hit the same cache
+without another origin request. An attached MIUI API 31 device rejected USB APK
+installation through its device security policy, so physical-device playback is
+still pending explicit user authorization on that device.
 
 Each platform POC should demonstrate:
 

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Proxy Player</string>
+    <string name="title">Media Proxy Cache</string>
+    <string name="video_player">Proxy video player</string>
+    <string name="status_starting">Status  Starting</string>
+    <string name="status_missing_origin">Status  Pass origin_url launch extra</string>
+    <string name="status_invalid_origin">Status  Invalid origin URL</string>
+    <string name="status_buffering">Status  Buffering</string>
+    <string name="status_playing">Status  Playing on port %1$d</string>
+    <string name="status_ended">Status  Ended</string>
+    <string name="status_failed">Status  Failed: %1$s</string>
+    <string name="position">Position  %1$02d:%2$02d</string>
+    <string name="cache_size">Cache  %1$s</string>
+    <string name="seek_forward">Forward 10 seconds</string>
+</resources>
