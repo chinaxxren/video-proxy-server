@@ -111,6 +111,12 @@ uint8_t proxy_torrent_set_download_limit(
     ProxyServerHandle *handle,
     uint32_t bytes_per_second
 );
+uint8_t proxy_torrent_select_files(
+    ProxyServerHandle *handle,
+    int64_t torrent_id,
+    const uint32_t *file_ids,
+    size_t file_count
+);
 #endif
 
 #ifdef __cplusplus

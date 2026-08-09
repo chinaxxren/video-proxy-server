@@ -6,6 +6,7 @@ use librqbit::{
     Session, SessionOptions,
 };
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +35,7 @@ pub struct RqbitFileInfo {
     pub file_id: usize,
     pub relative_path: String,
     pub length: u64,
+    pub selected: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -218,6 +220,7 @@ impl RqbitBackend {
 
     pub async fn files(&self, torrent_id: usize) -> Result<Vec<RqbitFileInfo>> {
         let handle = self.torrent(torrent_id).await?;
+        let only_files = handle.only_files();
         handle
             .with_metadata(|metadata| {
                 metadata
@@ -228,6 +231,10 @@ impl RqbitBackend {
                         file_id,
                         relative_path: file.relative_filename.to_string_lossy().into_owned(),
                         length: file.len,
+                        selected: only_files
+                            .as_ref()
+                            .map(|selected| selected.contains(&file_id))
+                            .unwrap_or(true),
                     })
                     .collect()
             })
@@ -264,6 +271,27 @@ impl RqbitBackend {
 
     pub fn set_download_limit(&self, bytes_per_second: Option<NonZeroU32>) {
         self.session.ratelimits.set_download_bps(bytes_per_second);
+    }
+
+    pub async fn select_files(&self, torrent_id: usize, file_ids: &[usize]) -> Result<()> {
+        if file_ids.is_empty() || file_ids.len() > 4096 {
+            return Err(ProxyError::Request(
+                "librqbit selected file count is invalid".into(),
+            ));
+        }
+        let selected: HashSet<_> = file_ids.iter().copied().collect();
+        if selected.len() != file_ids.len() {
+            return Err(ProxyError::Request(
+                "librqbit selected file IDs contain duplicates".into(),
+            ));
+        }
+        let handle = self.torrent(torrent_id).await?;
+        self.session
+            .update_only_files(&handle, &selected)
+            .await
+            .map_err(|error| {
+                ProxyError::Request(format!("select librqbit files failed: {error:#}"))
+            })
     }
 
     pub async fn remove(&self, torrent_id: usize, delete_files: bool) -> Result<()> {
@@ -336,6 +364,9 @@ mod tests {
         assert!(backend.status(404).await.is_err());
         assert!(backend.pause(404).await.is_err());
         assert!(backend.resume(404).await.is_err());
+        assert!(backend.select_files(404, &[0]).await.is_err());
+        assert!(backend.select_files(404, &[]).await.is_err());
+        assert!(backend.select_files(404, &[0, 0]).await.is_err());
         assert!(backend.remove(404, false).await.is_err());
         assert!(backend
             .add_authorized_torrent_bytes(b"torrent", false)

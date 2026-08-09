@@ -46,6 +46,11 @@ enum RqbitCommand {
         bytes_per_second: u32,
         reply: mpsc::SyncSender<bool>,
     },
+    SelectFiles {
+        torrent_id: usize,
+        file_ids: Vec<usize>,
+        reply: mpsc::SyncSender<bool>,
+    },
 }
 
 pub struct ProxyServerHandle {
@@ -437,6 +442,56 @@ pub unsafe extern "C" fn proxy_torrent_set_download_limit(
     )
 }
 
+/// Selects the files that librqbit should download for a torrent.
+///
+/// # Safety
+///
+/// `handle` must be null or live. `file_ids` must reference `file_count`
+/// readable `u32` values for the duration of this call.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_select_files(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    file_ids: *const u32,
+    file_count: usize,
+) -> u8 {
+    let (Some(handle), Ok(torrent_id)) = (handle.as_ref(), usize::try_from(torrent_id)) else {
+        return 0;
+    };
+    if file_ids.is_null() || file_count == 0 || file_count > 4096 {
+        return 0;
+    }
+    let file_ids = std::slice::from_raw_parts(file_ids, file_count)
+        .iter()
+        .map(|id| *id as usize)
+        .collect();
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return 0;
+    };
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::SelectFiles {
+            torrent_id,
+            file_ids,
+            reply,
+        })
+        .is_err()
+    {
+        return 0;
+    }
+    u8::from(
+        response
+            .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+            .unwrap_or(false),
+    )
+}
+
 #[cfg(feature = "p2p-librqbit")]
 unsafe fn write_ffi_json(json: &str, buffer: *mut u8, capacity: usize) -> usize {
     let Some(required) = json.len().checked_add(1) else {
@@ -810,6 +865,17 @@ async fn run_rqbit_commands(
                         backend.set_download_limit(std::num::NonZeroU32::new(bytes_per_second));
                         true
                     }
+                    None => false,
+                };
+                let _ = reply.send(changed);
+            }
+            RqbitCommand::SelectFiles {
+                torrent_id,
+                file_ids,
+                reply,
+            } => {
+                let changed = match &backend {
+                    Some(backend) => backend.select_files(torrent_id, &file_ids).await.is_ok(),
                     None => false,
                 };
                 let _ = reply.send(changed);
