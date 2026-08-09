@@ -8,6 +8,8 @@ use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
     ProxyServerHandle,
 };
+#[cfg(feature = "p2p-librqbit")]
+use crate::ffi::{proxy_torrent_add_authorized, proxy_torrent_remove};
 use crate::harmony_config::HarmonyConfiguration;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
@@ -56,6 +58,26 @@ fn remove_p2p_source(handle: *mut ProxyServerHandle, source_id: u64) -> bool {
 
 #[cfg(not(feature = "p2p"))]
 fn remove_p2p_source(_handle: *mut ProxyServerHandle, _source_id: u64) -> bool {
+    false
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn add_authorized_torrent(handle: *mut ProxyServerHandle, magnet_uri: &CString) -> i64 {
+    unsafe { proxy_torrent_add_authorized(handle, magnet_uri.as_ptr(), 1) }
+}
+
+#[cfg(not(feature = "p2p-librqbit"))]
+fn add_authorized_torrent(_handle: *mut ProxyServerHandle, _magnet_uri: &CString) -> i64 {
+    -1
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn remove_torrent(handle: *mut ProxyServerHandle, torrent_id: i64, delete_files: bool) -> bool {
+    unsafe { proxy_torrent_remove(handle, torrent_id, u8::from(delete_files)) != 0 }
+}
+
+#[cfg(not(feature = "p2p-librqbit"))]
+fn remove_torrent(_handle: *mut ProxyServerHandle, _torrent_id: i64, _delete_files: bool) -> bool {
     false
 }
 
@@ -184,6 +206,51 @@ impl MediaProxyCache {
         Ok(remove_p2p_source(
             handle as *mut ProxyServerHandle,
             source_id,
+        ))
+    }
+
+    #[napi]
+    pub fn add_authorized_torrent(&self, magnet_uri: String) -> Result<String> {
+        if !magnet_uri.starts_with("magnet:?") {
+            return Err(Error::new(Status::InvalidArg, "invalid Magnet URI"));
+        }
+        let magnet_uri = CString::new(magnet_uri)
+            .map_err(|_| Error::new(Status::InvalidArg, "invalid Magnet URI"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        let torrent_id = add_authorized_torrent(handle as *mut ProxyServerHandle, &magnet_uri);
+        if torrent_id < 0 {
+            return Err(Error::new(
+                Status::GenericFailure,
+                if cfg!(feature = "p2p-librqbit") {
+                    "torrent registration failed"
+                } else {
+                    "librqbit is not enabled in this native library"
+                },
+            ));
+        }
+        Ok(torrent_id.to_string())
+    }
+
+    #[napi]
+    pub fn remove_torrent(&self, torrent_id: String, delete_files: bool) -> Result<bool> {
+        let torrent_id = torrent_id
+            .parse::<i64>()
+            .ok()
+            .filter(|torrent_id| *torrent_id >= 0)
+            .ok_or_else(|| Error::new(Status::InvalidArg, "invalid torrent ID"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(remove_torrent(
+            handle as *mut ProxyServerHandle,
+            torrent_id,
+            delete_files,
         ))
     }
 
