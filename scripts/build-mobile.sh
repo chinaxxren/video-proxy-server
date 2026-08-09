@@ -8,6 +8,7 @@ P2P_ENABLED="${P2P_ENABLED:-0}"
 TEST_ALLOW_PRIVATE_UPSTREAM="${TEST_ALLOW_PRIVATE_UPSTREAM:-0}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-13.0}"
 ANDROID_ARM64_ONLY="${ANDROID_ARM64_ONLY:-0}"
+ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-21}"
 
 if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   echo "P2P_ENABLED must be 0 or 1" >&2
@@ -20,6 +21,63 @@ fi
 if [[ "$ANDROID_ARM64_ONLY" != "0" && "$ANDROID_ARM64_ONLY" != "1" ]]; then
   echo "ANDROID_ARM64_ONLY must be 0 or 1" >&2
   exit 2
+fi
+if ! [[ "$ANDROID_API_LEVEL" =~ ^[0-9]+$ ]] || (( ANDROID_API_LEVEL < 21 )); then
+  echo "ANDROID_API_LEVEL must be an integer greater than or equal to 21" >&2
+  exit 2
+fi
+
+configure_android_toolchain() {
+  local ndk_root="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}" host_tag toolchain
+  [[ -n "$ndk_root" ]] || return 0
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64|Darwin-x86_64) host_tag=darwin-x86_64 ;;
+    Linux-x86_64) host_tag=linux-x86_64 ;;
+    *) echo "Unsupported Android NDK host: $(uname -s)-$(uname -m)" >&2; return 1 ;;
+  esac
+  toolchain="$ndk_root/toolchains/llvm/prebuilt/$host_tag/bin"
+  [[ -x "$toolchain/llvm-ar" ]] || {
+    echo "Invalid Android NDK toolchain: $toolchain" >&2
+    return 1
+  }
+  export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+  export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$toolchain/armv7a-linux-androideabi${ANDROID_API_LEVEL}-clang"
+  export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$toolchain/x86_64-linux-android${ANDROID_API_LEVEL}-clang"
+  export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+  export CC_armv7_linux_androideabi="$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+  export CC_x86_64_linux_android="$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+  export AR_aarch64_linux_android="$toolchain/llvm-ar"
+  export AR_armv7_linux_androideabi="$toolchain/llvm-ar"
+  export AR_x86_64_linux_android="$toolchain/llvm-ar"
+}
+
+configure_harmony_toolchain() {
+  local sdk_root="${OHOS_NDK_HOME:-${OHOS_SDK_HOME:-}}" toolchain aarch64_clang armv7_clang
+  [[ -n "$sdk_root" ]] || return 0
+  toolchain="$sdk_root/native/llvm/bin"
+  aarch64_clang="$(find "$toolchain" -maxdepth 1 -type f \( -name aarch64-unknown-linux-ohos-clang -o -name aarch64-linux-ohos-clang \) -print -quit 2>/dev/null)"
+  armv7_clang="$(find "$toolchain" -maxdepth 1 -type f -name armv7-unknown-linux-ohos-clang -print -quit 2>/dev/null)"
+  [[ -x "$aarch64_clang" && -x "$armv7_clang" && -x "$toolchain/llvm-ar" ]] || {
+    echo "Invalid OpenHarmony native LLVM toolchain: $toolchain" >&2
+    return 1
+  }
+  export OHOS_NDK_HOME="$sdk_root"
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$aarch64_clang"
+  export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$armv7_clang"
+  export CC_aarch64_unknown_linux_ohos="$aarch64_clang"
+  export CC_armv7_unknown_linux_ohos="$armv7_clang"
+  export AR_aarch64_unknown_linux_ohos="$toolchain/llvm-ar"
+  export AR_armv7_unknown_linux_ohos="$toolchain/llvm-ar"
+  if [[ -x "$toolchain/llvm-nm" ]]; then
+    export NM="$toolchain/llvm-nm"
+  fi
+}
+
+if [[ "${PLATFORM:-all}" == "android" ]]; then
+  configure_android_toolchain
+fi
+if [[ "${PLATFORM:-all}" == "harmony" ]]; then
+  configure_harmony_toolchain
 fi
 
 CARGO_FEATURES=()
@@ -71,6 +129,7 @@ verify_native_symbols() {
   if [[ "$P2P_ENABLED" == "1" ]]; then
     for symbol in \
       proxy_p2p_source_register \
+      proxy_p2p_source_register_directory \
       proxy_p2p_source_verify_complete \
       proxy_p2p_source_remove; do
       rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
@@ -90,6 +149,17 @@ verify_native_symbols() {
         return 1
       }
     done
+    if [[ "$P2P_ENABLED" == "1" ]]; then
+      for symbol in \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeRegisterP2PDirectory \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeVerifyP2PSource \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveP2PSource; do
+        rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
+          echo "Missing Android P2P JNI symbol $symbol in $artifact" >&2
+          return 1
+        }
+      done
+    fi
   fi
   if [[ "$platform" == "harmony" ]]; then
     rg -q "[[:space:]]napi_register_module_v1$" <<<"$symbols" || {
@@ -166,7 +236,11 @@ build_ios_xcframework() {
     -library "$simulator_dir/libproxy_server.a" \
     -headers "$OUT_DIR/include" \
     -output "$framework"
-  swiftc -typecheck -I "$OUT_DIR/include" platform/ios/MediaProxyCache.swift
+  local swift_flags=()
+  if [[ "$P2P_ENABLED" == "1" ]]; then
+    swift_flags=(-D MEDIA_PROXY_CACHE_ENABLE_P2P -Xcc -DMEDIA_PROXY_CACHE_ENABLE_P2P)
+  fi
+  swiftc -typecheck -I "$OUT_DIR/include" "${swift_flags[@]}" platform/ios/MediaProxyCache.swift
 }
 
 install_adapter_template() {

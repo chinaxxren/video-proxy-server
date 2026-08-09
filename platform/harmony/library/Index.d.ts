@@ -3,4 +3,8 @@ export declare class MediaProxyCache {
   start(): number;
   stop(): void;
   close(): void;
+  registerP2PDirectory(manifestJson: string, pieceDirectory: string): string;
+  verifyP2PSource(sourceId: string): boolean;
+  removeP2PSource(sourceId: string): boolean;
+  p2pPlaybackUrl(sourceId: string): string;
 }

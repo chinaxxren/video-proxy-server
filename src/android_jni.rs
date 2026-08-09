@@ -1,11 +1,15 @@
 //! Android JNI ownership bridge for the Kotlin adapter.
 
+#[cfg(feature = "p2p")]
+use crate::ffi::{
+    proxy_p2p_source_register_directory, proxy_p2p_source_remove, proxy_p2p_source_verify_complete,
+};
 use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
     ProxyServerHandle,
 };
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jint, jlong};
+use jni::sys::{jboolean, jint, jlong};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -114,6 +118,114 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeDestroy
             unsafe { proxy_server_destroy(handle) }
         }
         Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p")]
+fn register_p2p_directory(
+    handle: *mut ProxyServerHandle,
+    manifest_json: &str,
+    piece_directory: &CString,
+) -> u64 {
+    unsafe {
+        proxy_p2p_source_register_directory(
+            handle,
+            manifest_json.as_ptr(),
+            manifest_json.len(),
+            piece_directory.as_ptr(),
+        )
+    }
+}
+
+#[cfg(not(feature = "p2p"))]
+fn register_p2p_directory(
+    _handle: *mut ProxyServerHandle,
+    _manifest_json: &str,
+    _piece_directory: &CString,
+) -> u64 {
+    0
+}
+
+#[cfg(feature = "p2p")]
+fn verify_p2p_source(handle: *mut ProxyServerHandle, source_id: u64) -> bool {
+    unsafe { proxy_p2p_source_verify_complete(handle, source_id) != 0 }
+}
+
+#[cfg(not(feature = "p2p"))]
+fn verify_p2p_source(_handle: *mut ProxyServerHandle, _source_id: u64) -> bool {
+    false
+}
+
+#[cfg(feature = "p2p")]
+fn remove_p2p_source(handle: *mut ProxyServerHandle, source_id: u64) -> bool {
+    unsafe { proxy_p2p_source_remove(handle, source_id) != 0 }
+}
+
+#[cfg(not(feature = "p2p"))]
+fn remove_p2p_source(_handle: *mut ProxyServerHandle, _source_id: u64) -> bool {
+    false
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRegisterP2PDirectory<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    manifest_json: JString<'local>,
+    piece_directory: JString<'local>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let manifest_json = manifest_json.try_to_string(env)?;
+        let piece_directory = piece_directory.try_to_string(env)?;
+        let Ok(piece_directory) = CString::new(piece_directory) else {
+            return Ok(0);
+        };
+        Ok(with_handle(handle, |handle| {
+            register_p2p_directory(handle, &manifest_json, &piece_directory)
+        })
+        .and_then(|source_id| jlong::try_from(source_id).ok())
+        .unwrap_or(0))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeVerifyP2PSource<'local>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    source_id: jlong,
+) -> jboolean {
+    env.with_env(|_| -> jni::errors::Result<jboolean> {
+        let verified = u64::try_from(source_id)
+            .ok()
+            .and_then(|source_id| {
+                with_handle(handle, |handle| verify_p2p_source(handle, source_id))
+            })
+            .unwrap_or(false);
+        Ok(verified)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveP2PSource<'local>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    source_id: jlong,
+) -> jboolean {
+    env.with_env(|_| -> jni::errors::Result<jboolean> {
+        let removed = u64::try_from(source_id)
+            .ok()
+            .and_then(|source_id| {
+                with_handle(handle, |handle| remove_p2p_source(handle, source_id))
+            })
+            .unwrap_or(false);
+        Ok(removed)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

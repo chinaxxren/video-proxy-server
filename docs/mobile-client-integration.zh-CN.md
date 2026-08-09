@@ -47,6 +47,10 @@ Android AAR 仍待运行时验证。鸿蒙 HAR 已使用真实 Rust OHOS 库完�
 - Android：优先 `arm64-v8a`；仅在产品需要时增加 `armeabi-v7a` 和 `x86_64`
 - 鸿蒙：`aarch64-unknown-linux-ohos` 和 `armv7-unknown-linux-ohos`
 
+为了可复现地进行本机构建，Android 设置 `ANDROID_NDK_HOME`（或
+`ANDROID_NDK_ROOT`），鸿蒙设置 `OHOS_NDK_HOME`（或 `OHOS_SDK_HOME`）。
+`scripts/build-mobile.sh` 会自动配置对应的 clang 和 LLVM 归档工具。
+
 ## 建议 Host API
 
 以下名称仅用于说明。最终平台 API 应遵循各平台命名习惯，但保持一致行为。

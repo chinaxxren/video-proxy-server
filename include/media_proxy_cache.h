@@ -37,6 +37,16 @@ uint64_t proxy_p2p_source_register(
     ProxyP2pPieceCallback callback,
     void *context
 );
+// Registers a managed-runtime-friendly provider that reads pieces from
+// <piece_directory>/<piece_index>.piece. The Host must supply an absolute,
+// app-private directory path and keep it available until the source is removed.
+// Core still verifies every piece against the authorized manifest before serving it.
+uint64_t proxy_p2p_source_register_directory(
+    ProxyServerHandle *handle,
+    const uint8_t *manifest_json,
+    size_t manifest_length,
+    const char *piece_directory
+);
 uint8_t proxy_p2p_source_verify_complete(ProxyServerHandle *handle, uint64_t source_id);
 uint8_t proxy_p2p_source_remove(ProxyServerHandle *handle, uint64_t source_id);
 #endif

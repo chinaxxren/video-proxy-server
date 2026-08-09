@@ -25,7 +25,7 @@ P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
 P2P_ENABLED=1 ./scripts/package-mobile.sh
 ```
 
-启用 P2P 的原生构建会校验 register、完整校验和 remove 三个 ABI 导出符号；任何符号
+启用 P2P 的原生构建会校验回调/目录注册、完整校验和 remove ABI 导出符号；任何符号
 缺失都会使构建失败。
 打包时还要求 `build-features.txt` 与 `P2P_ENABLED` 完全一致，防止默认库被错误标记为
 可选 P2P Release，反向混用也会被拒绝。
@@ -85,6 +85,54 @@ Adapter 可在播放前调用 `proxy_p2p_source_verify_complete` 校验全部分
 如果完整摘要不匹配，Core 会永久使共享该 manifest 缓存身份的全部已注册 source 失效，
 后续 Range 请求会失败；Host 必须注册修正后的授权 source。该失效标记会跨 Core 重启保留；
 显式移除其最后一个注册会清理目录及标记。
+
+## 托管客户端 Adapter
+
+Swift、Kotlin 和 ArkTS 使用目录 Provider API，避免托管对象必须跨任意 Rust 工作线程
+承受同步回调。Host 在自己的应用沙箱内使用绝对路径，并按以下格式写入已授权分片：
+
+```text
+<分片目录>/0.piece
+<分片目录>/1.piece
+...
+```
+
+文件名由 Core 使用整数索引生成；每次读取限制为 8 MiB，并且字节通过 Manifest 校验后
+才能对播放器提供。该接口不会下载分片、发现 peer 或授予内容权限。Host 必须保持目录
+可用，直到显式移除 source。
+
+```kotlin
+val sourceId = cache.registerP2PDirectory(manifestJson, pieceDirectory.absolutePath)
+check(cache.verifyP2PSource(sourceId))
+player.setMediaItem(MediaItem.fromUri(cache.p2pPlaybackUrl(sourceId)))
+cache.removeP2PSource(sourceId) // 授权撤销
+```
+
+iOS 需要同时为 Swift 与 C 定义 `MEDIA_PROXY_CACHE_ENABLE_P2P`：
+
+```swift
+let sourceID = try cache.registerP2PDirectory(
+    manifestJSON: manifestData,
+    pieceDirectory: pieceDirectoryURL
+)
+guard cache.verifyP2PSource(sourceID) else {
+    throw NSError(domain: "MediaProxyCache", code: 6)
+}
+let player = AVPlayer(url: try cache.p2pPlaybackURL(sourceID: sourceID))
+cache.removeP2PSource(sourceID)
+```
+
+鸿蒙使用十进制字符串传递 opaque ID，避免 JavaScript number 的精度损失：
+
+```typescript
+const sourceId = cache.registerP2PDirectory(manifestJson, pieceDirectory)
+if (!cache.verifyP2PSource(sourceId)) throw new Error('P2P verification failed')
+avPlayer.url = cache.p2pPlaybackUrl(sourceId)
+cache.removeP2PSource(sourceId)
+```
+
+默认 Android 和鸿蒙库保留托管方法，但由于没有编译 P2P，注册时会明确失败。iOS 在没有
+编译期 P2P 定义时不会暴露这些方法。
 
 ## 播放
 

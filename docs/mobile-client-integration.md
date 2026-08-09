@@ -49,6 +49,11 @@ Expected architecture targets:
 - Android: `arm64-v8a`, with `armeabi-v7a` and `x86_64` only when product support requires them
 - HarmonyOS: `aarch64-unknown-linux-ohos` and `armv7-unknown-linux-ohos`
 
+For reproducible local cross-compilation, set `ANDROID_NDK_HOME` (or
+`ANDROID_NDK_ROOT`) for Android and `OHOS_NDK_HOME` (or `OHOS_SDK_HOME`) for
+HarmonyOS. `scripts/build-mobile.sh` configures the corresponding clang and
+LLVM archive tools automatically.
+
 ## Proposed Host API
 
 Names are illustrative. Final platform APIs should follow native naming conventions while preserving the same behavior.

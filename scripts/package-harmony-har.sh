@@ -54,11 +54,11 @@ verify_packaged_abi() {
   packaged="$verify_dir/$abi.so"
   input="$INPUT_DIR/$target/libproxy_server.so"
   tar -xOzf "$har" "package/libs/$abi/libproxy_server.so" > "$packaged"
-  "$readelf" -h "$packaged" | grep -Fq "Machine:                           $machine" || {
+  "$readelf" -h "$packaged" | grep -F "Machine:                           $machine" >/dev/null || {
     echo "HarmonyOS HAR contains the wrong machine type for $abi" >&2
     exit 1
   }
-  "$readelf" --dyn-syms "$packaged" | grep -Fq 'napi_register_module_v1' || {
+  "$readelf" --dyn-syms "$packaged" | grep -F 'napi_register_module_v1' >/dev/null || {
     echo "HarmonyOS HAR is missing its N-API entry point for $abi" >&2
     exit 1
   }

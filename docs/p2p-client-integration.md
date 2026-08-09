@@ -27,8 +27,8 @@ P2P_ENABLED=1 PLATFORM=android ./scripts/build-mobile.sh
 P2P_ENABLED=1 ./scripts/package-mobile.sh
 ```
 
-P2P-enabled native builds fail if the resulting library does not export all
-three P2P ABI functions: register, complete verification, and remove.
+P2P-enabled native builds fail if the resulting library does not export the
+callback and directory registration APIs, complete verification, and remove.
 Packaging also requires `build-features.txt` to match `P2P_ENABLED`, preventing
 default libraries from being mislabeled as an optional P2P release (or vice versa).
 The package step also rejects inputs missing the public C header or all native
@@ -100,6 +100,59 @@ source sharing that manifest cache identity; subsequent Range requests fail and
 the Host must register a corrected authorized source. The invalidation survives
 Core restart for that identity; explicit removal of its final registration
 purges the directory and its marker.
+
+## Managed Client Adapters
+
+Swift, Kotlin, and ArkTS use the directory Provider API so managed objects do
+not need to survive synchronous callbacks on arbitrary Rust worker threads.
+The Host writes authorized pieces under an absolute, app-private directory as:
+
+```text
+<piece-directory>/0.piece
+<piece-directory>/1.piece
+...
+```
+
+Core constructs these numeric filenames itself, limits each read to 8 MiB, and
+verifies the bytes against the Manifest before serving them. This API does not
+download pieces, discover peers, or grant authorization. The Host must keep the
+directory available until it removes the source.
+
+```kotlin
+val sourceId = cache.registerP2PDirectory(manifestJson, pieceDirectory.absolutePath)
+check(cache.verifyP2PSource(sourceId))
+player.setMediaItem(MediaItem.fromUri(cache.p2pPlaybackUrl(sourceId)))
+cache.removeP2PSource(sourceId) // authorization revocation
+```
+
+The Swift methods are available when `MEDIA_PROXY_CACHE_ENABLE_P2P` is defined
+for both Swift and C:
+
+```swift
+let sourceID = try cache.registerP2PDirectory(
+    manifestJSON: manifestData,
+    pieceDirectory: pieceDirectoryURL
+)
+guard cache.verifyP2PSource(sourceID) else {
+    throw NSError(domain: "MediaProxyCache", code: 6)
+}
+let player = AVPlayer(url: try cache.p2pPlaybackURL(sourceID: sourceID))
+cache.removeP2PSource(sourceID)
+```
+
+HarmonyOS uses a decimal string for the opaque ID to avoid JavaScript number
+precision loss:
+
+```typescript
+const sourceId = cache.registerP2PDirectory(manifestJson, pieceDirectory)
+if (!cache.verifyP2PSource(sourceId)) throw new Error('P2P verification failed')
+avPlayer.url = cache.p2pPlaybackUrl(sourceId)
+cache.removeP2PSource(sourceId)
+```
+
+The default Android and HarmonyOS libraries retain these managed methods but
+registration fails clearly because P2P is not compiled in. The iOS methods are
+omitted unless the compile-time P2P definition is present.
 
 ## Playback
 

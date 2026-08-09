@@ -170,6 +170,70 @@ pub unsafe extern "C" fn proxy_p2p_source_register(
         .unwrap_or(0)
 }
 
+/// Registers an authorized P2P manifest backed by files named
+/// `<piece_index>.piece` in a Host-owned directory.
+///
+/// This entry point is intended for managed runtimes that cannot safely expose
+/// a synchronous callback on arbitrary Core threads. Piece bytes are still
+/// subject to the manifest digest and size checks before they can be served.
+///
+/// # Safety
+///
+/// `handle` must be a live handle. `manifest_json` must reference
+/// `manifest_length` readable bytes, and `piece_directory` must be a valid
+/// NUL-terminated UTF-8 string for the duration of this call.
+#[cfg(feature = "p2p")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_p2p_source_register_directory(
+    handle: *mut ProxyServerHandle,
+    manifest_json: *const u8,
+    manifest_length: usize,
+    piece_directory: *const c_char,
+) -> u64 {
+    let (Some(handle), Some(piece_directory)) = (handle.as_ref(), read_string(piece_directory))
+    else {
+        return 0;
+    };
+    if manifest_json.is_null() || manifest_length == 0 || piece_directory.trim().is_empty() {
+        return 0;
+    }
+    let json = std::slice::from_raw_parts(manifest_json, manifest_length);
+    let Ok((source, manifest)) = crate::p2p::parse_authorized_manifest_json(json) else {
+        return 0;
+    };
+    let piece_directory = PathBuf::from(piece_directory);
+    if !piece_directory.is_absolute() {
+        return 0;
+    }
+    let provider: crate::p2p::P2pPieceProvider = Arc::new(move |piece_index| {
+        use std::io::Read;
+
+        let path = piece_directory.join(format!("{piece_index}.piece"));
+        let mut file = std::fs::File::open(path).map_err(|_| {
+            crate::utils::error::ProxyError::Request("P2P Host piece is unavailable".to_string())
+        })?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(MAX_P2P_CALLBACK_PIECE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                crate::utils::error::ProxyError::Request(
+                    "P2P Host piece could not be read".to_string(),
+                )
+            })?;
+        if bytes.is_empty() || bytes.len() > MAX_P2P_CALLBACK_PIECE_BYTES {
+            return Err(crate::utils::error::ProxyError::Request(
+                "P2P Host piece length is invalid".to_string(),
+            ));
+        }
+        Ok(bytes)
+    });
+    handle
+        .p2p_sources
+        .register(source, manifest, provider)
+        .unwrap_or(0)
+}
+
 #[cfg(feature = "p2p")]
 #[no_mangle]
 /// Removes an opaque P2P source ID.
@@ -504,6 +568,40 @@ mod tests {
             );
             assert_ne!(id, 0);
             assert_eq!(proxy_p2p_source_verify_complete(handle, id), 0);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[cfg(feature = "p2p")]
+    #[test]
+    fn ffi_directory_provider_registers_verified_piece_files() {
+        let cache = tempfile::tempdir().unwrap();
+        let pieces = tempfile::tempdir().unwrap();
+        std::fs::write(pieces.path().join("0.piece"), b"data").unwrap();
+        let cache_path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let piece_path = CString::new(pieces.path().to_str().unwrap()).unwrap();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "content_id": "directory-asset",
+            "content_length": 4,
+            "content_sha256": crate::utils::digest::sha256_hex(b"data"),
+            "piece_length": 4,
+            "piece_sha256": [crate::utils::digest::sha256_hex(b"data")],
+            "authorization_reference": "license",
+            "explicitly_authorized": true
+        }))
+        .unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, cache_path.as_ptr());
+            let id = proxy_p2p_source_register_directory(
+                handle,
+                manifest.as_ptr(),
+                manifest.len(),
+                piece_path.as_ptr(),
+            );
+            assert_ne!(id, 0);
+            assert_eq!(proxy_p2p_source_verify_complete(handle, id), 1);
+            assert_eq!((*handle).p2p_sources.read_range(id, 1, 2).unwrap(), b"at");
+            assert_eq!(proxy_p2p_source_remove(handle, id), 1);
             proxy_server_destroy(handle);
         }
     }
