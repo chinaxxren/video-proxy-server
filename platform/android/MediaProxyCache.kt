@@ -11,7 +11,9 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
             require(cacheDirectory.isNotBlank())
             require(allowedHosts.isNotEmpty())
             require(allowedHosts.none { it.isBlank() || ',' in it })
-            return MediaProxyCache(nativeCreate(port, cacheDirectory, allowedHosts.joinToString(",")))
+            val handle = nativeCreate(port, cacheDirectory, allowedHosts.joinToString(","))
+            check(handle != 0L) { "proxy server creation failed" }
+            return MediaProxyCache(handle)
         }
 
         @JvmStatic private external fun nativeCreate(port: Int, cacheDirectory: String, allowedHosts: String): Long

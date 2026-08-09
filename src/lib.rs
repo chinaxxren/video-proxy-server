@@ -1,3 +1,5 @@
+#[cfg(feature = "android-jni")]
+mod android_jni;
 pub mod data_request;
 pub mod data_source;
 pub mod data_source_manager;

@@ -36,8 +36,8 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 | Android | 动态库 | AAR | Kotlin/JNI |
 | 鸿蒙 | 动态库 | HAR | ArkTS/N-API |
 
-原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 仍需要
-JNI 实现，鸿蒙声明仍需要 N-API 实现。
+原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 由 Rust
+`android-jni` feature 提供实现，鸿蒙声明仍需要 N-API 实现。
 
 建议支持的架构：
 
@@ -266,7 +266,7 @@ await avPlayer.setUrl(playbackUrl)
 
 1. 完成 Core 剩余的 Host 合同：不透明请求注册和来源刷新回调。启停、动态端口和 Host 缓存目录注入已经通过 C ABI 提供。
 2. 将现有 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略单元及桌面集成测试持续作为发布门禁。
-3. 构建 Android JNI/AAR POC，并在真机上验证 Media3。
+3. 将现有 Android JNI Bridge 打包为 AAR，并在真机上验证 Media3。
 4. 根据 Android POC 固化共享生命周期和错误合同。
 5. 构建 iOS XCFramework/Swift Adapter，并验证 AVPlayer。
 6. 构建鸿蒙 HAR/N-API Adapter，并验证 AVPlayer。
@@ -274,4 +274,4 @@ await avPlayer.setUrl(playbackUrl)
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供生产可用的 JNI/AAR、Swift 或 N-API/HAR Adapter，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、构建/发布脚本、所有权封装模板以及原生 XCFramework 生成。尚未提供生产可用的 AAR、Swift 或 N-API/HAR Adapter，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

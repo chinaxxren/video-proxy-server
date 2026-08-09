@@ -4,7 +4,7 @@
 
 一个使用 Rust 实现的 HTTP 媒体代理缓存。服务监听 `127.0.0.1`，从明确允许的上游域名流式读取媒体，并在磁盘上持久化真实完成的字节区间。
 
-> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI 生命周期接口和 iOS 原生 XCFramework 打包已经提供，生产可用的 JNI/AAR、Swift 和 N-API/HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
+> 当前状态：原型。核心安全和缓存正确性问题已有第一轮修复及回归测试，但仍不建议直接作为生产依赖。C ABI 生命周期接口、Android JNI Bridge 和 iOS 原生 XCFramework 打包已经提供，生产可用的 AAR、Swift 和 N-API/HAR Adapter 尚未完成。localhost 调用方认证明确不在本项目当前范围内。
 
 ## 功能
 
@@ -248,7 +248,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 
 ## 已知限制
 
-- 尚无 Android JNI/AAR、iOS Swift 或 HarmonyOS N-API/HAR Adapter
+- 尚无 Android AAR、生产级 iOS Swift 或 HarmonyOS N-API/HAR Adapter
 - Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖

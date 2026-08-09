@@ -37,8 +37,8 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 | HarmonyOS | Shared libraries | HAR | ArkTS/N-API |
 
 Native archives include the current platform templates under `adapter/`.
-Swift directly wraps the C ABI; Kotlin still requires JNI, and the HarmonyOS
-declaration still requires an N-API implementation.
+Swift directly wraps the C ABI; Kotlin is backed by the Rust `android-jni`
+feature, while the HarmonyOS declaration still requires an N-API implementation.
 
 Expected architecture targets:
 
@@ -268,7 +268,7 @@ Each platform POC should demonstrate:
 
 1. Complete the remaining Core host contracts: opaque request registration and source-refresh callback. Start/stop, dynamic port, and Host cache-directory injection are already available through the C ABI.
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
-3. Build the Android JNI/AAR POC and validate Media3 on real devices.
+3. Package the existing Android JNI bridge as an AAR and validate Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
 5. Build the iOS XCFramework/Swift adapter and validate AVPlayer.
 6. Build the HarmonyOS HAR/N-API adapter and validate AVPlayer.
@@ -276,4 +276,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide production JNI/AAR, Swift, or N-API/HAR adapters, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes an Android JNI bridge, build/release scripts, ownership-wrapper templates, and native XCFramework generation. It does not yet provide production AAR, Swift, or N-API/HAR adapters, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

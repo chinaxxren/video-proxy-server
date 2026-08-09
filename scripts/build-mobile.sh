@@ -11,9 +11,16 @@ if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   exit 2
 fi
 
-CARGO_FEATURE_ARGS=()
+CARGO_FEATURES=()
 if [[ "$P2P_ENABLED" == "1" ]]; then
-  CARGO_FEATURE_ARGS=(--features p2p)
+  CARGO_FEATURES+=(p2p)
+fi
+if [[ "${PLATFORM:-all}" == "android" ]]; then
+  CARGO_FEATURES+=(android-jni)
+fi
+CARGO_FEATURE_ARGS=()
+if [[ "${#CARGO_FEATURES[@]}" -gt 0 ]]; then
+  CARGO_FEATURE_ARGS=(--features "$(IFS=,; echo "${CARGO_FEATURES[*]}")")
 fi
 
 cd "$ROOT_DIR"
@@ -22,9 +29,9 @@ cp include/media_proxy_cache.h "$OUT_DIR/include/"
 cp include/module.modulemap "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
 
-verify_p2p_symbols() {
-  local artifact="$1" nm_tool
-  [[ "$P2P_ENABLED" == "1" ]] || return 0
+verify_native_symbols() {
+  local artifact="$1" platform="$2" nm_tool
+  [[ "$P2P_ENABLED" == "1" || "$platform" == "android" ]] || return 0
   if [[ -n "${NM:-}" ]]; then
     nm_tool="$NM"
   elif command -v llvm-nm >/dev/null 2>&1; then
@@ -38,15 +45,29 @@ verify_p2p_symbols() {
     echo "Unable to inspect native symbols in $artifact" >&2
     return 1
   }
-  for symbol in \
-    proxy_p2p_source_register \
-    proxy_p2p_source_verify_complete \
-    proxy_p2p_source_remove; do
-    rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
-      echo "Missing P2P ABI symbol $symbol in $artifact" >&2
-      return 1
-    }
-  done
+  if [[ "$P2P_ENABLED" == "1" ]]; then
+    for symbol in \
+      proxy_p2p_source_register \
+      proxy_p2p_source_verify_complete \
+      proxy_p2p_source_remove; do
+      rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
+        echo "Missing P2P ABI symbol $symbol in $artifact" >&2
+        return 1
+      }
+    done
+  fi
+  if [[ "$platform" == "android" ]]; then
+    for symbol in \
+      Java_com_example_mediaproxy_MediaProxyCache_nativeCreate \
+      Java_com_example_mediaproxy_MediaProxyCache_nativeStart \
+      Java_com_example_mediaproxy_MediaProxyCache_nativeStop \
+      Java_com_example_mediaproxy_MediaProxyCache_nativeDestroy; do
+      rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
+        echo "Missing Android JNI symbol $symbol in $artifact" >&2
+        return 1
+      }
+    done
+  fi
 }
 
 build_target() {
@@ -70,7 +91,7 @@ build_target() {
     "target/$target/$PROFILE/proxy_server.dll.a" \
     "target/$target/$PROFILE/proxy_server.lib"; do
     if [[ -f "$artifact" ]]; then
-      verify_p2p_symbols "$artifact"
+      verify_native_symbols "$artifact" "$platform"
       cp "$artifact" "$OUT_DIR/$platform/$target/"
       copied=1
     fi
