@@ -14,7 +14,11 @@ cp "$SOURCE" "$OUTPUT_DIR/libs/arm64-v8a/libproxy_server.so"
 cp "$ROOT_DIR/include/media_proxy_cache.h" "$OUTPUT_DIR/include/"
 cp "$ROOT_DIR/harmony/Index.ets" "$OUTPUT_DIR/"
 cp "$ROOT_DIR/harmony/oh-package.json5" "$OUTPUT_DIR/"
-clang -fPIC -shared -Werror -I "$OHOS_NDK_HOME/native/llvm/include" -I "$ROOT_DIR/include" \
+FEATURE_FLAGS=()
+if [[ "${LIBRQBIT_ENABLED:-0}" == "1" ]]; then
+  FEATURE_FLAGS+=(-DMEDIA_PROXY_CACHE_ENABLE_LIBRQBIT)
+fi
+clang -fPIC -shared -Werror "${FEATURE_FLAGS[@]}" -I "$OHOS_NDK_HOME/native/llvm/include" -I "$ROOT_DIR/include" \
   "$ROOT_DIR/harmony/native/media_proxy_cache_napi.c" -L "$OUTPUT_DIR/libs/arm64-v8a" \
   -lproxy_server -o "$OUTPUT_DIR/native/libmedia_proxy_cache_napi.so"
 tar -czf "$OUTPUT_DIR/media-proxy-cache-harmony.har.tar.gz" -C "$OUTPUT_DIR" Index.ets oh-package.json5 include libs native

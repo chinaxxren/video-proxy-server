@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      include_librqbit:
+        description: Build the optional Magnet/BitTorrent librqbit variant
+        required: false
+        default: false
+        type: boolean
   push:
     tags: ["v*"]
 
@@ -20,6 +25,8 @@ jobs:
     env:
       P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
       P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
+      LIBRQBIT_ENABLED: ${{ inputs.include_librqbit && '1' || '0' }}
+      LIBRQBIT_SUFFIX: ${{ inputs.include_librqbit && '-librqbit' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,22 +36,24 @@ jobs:
         run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
       - name: Archive iOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz -C dist/mobile ios ios-sim include build-features.txt
-          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile ios ios-sim include build-features.txt
+          shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}
-          path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
+          name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}.*
+          files: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
 
   android:
     runs-on: ubuntu-22.04
     env:
       P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
       P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
+      LIBRQBIT_ENABLED: ${{ inputs.include_librqbit && '1' || '0' }}
+      LIBRQBIT_SUFFIX: ${{ inputs.include_librqbit && '-librqbit' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -78,16 +87,16 @@ jobs:
         run: ./scripts/package-android-aar.sh dist/mobile/android dist/mobile/android
       - name: Archive Android artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}
-          path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
+          name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}.*
+          files: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
 
   harmony:
     if: vars.ENABLE_HARMONY_BUILD == 'true'
@@ -95,6 +104,8 @@ jobs:
     env:
       P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
       P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
+      LIBRQBIT_ENABLED: ${{ inputs.include_librqbit && '1' || '0' }}
+      LIBRQBIT_SUFFIX: ${{ inputs.include_librqbit && '-librqbit' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -143,13 +154,13 @@ jobs:
         run: ./scripts/package-harmony-har.sh dist/mobile/harmony dist/mobile/harmony
       - name: Archive HarmonyOS artifacts
         run: |
-          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz -C dist/mobile harmony include build-features.txt
-          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}.sha256
+          tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile harmony include build-features.txt
+          sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}
-          path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*
+          name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
+          path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}.*
+          files: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*

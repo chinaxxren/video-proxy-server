@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-${ROOT_DIR}/dist/mobile}"
 PROFILE="${PROFILE:-release}"
 P2P_ENABLED="${P2P_ENABLED:-0}"
+LIBRQBIT_ENABLED="${LIBRQBIT_ENABLED:-0}"
 TEST_ALLOW_PRIVATE_UPSTREAM="${TEST_ALLOW_PRIVATE_UPSTREAM:-0}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-13.0}"
 ANDROID_ARM64_ONLY="${ANDROID_ARM64_ONLY:-0}"
@@ -12,6 +13,10 @@ ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-21}"
 
 if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   echo "P2P_ENABLED must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$LIBRQBIT_ENABLED" != "0" && "$LIBRQBIT_ENABLED" != "1" ]]; then
+  echo "LIBRQBIT_ENABLED must be 0 or 1" >&2
   exit 2
 fi
 if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" != "0" && "$TEST_ALLOW_PRIVATE_UPSTREAM" != "1" ]]; then
@@ -84,6 +89,9 @@ CARGO_FEATURES=()
 if [[ "$P2P_ENABLED" == "1" ]]; then
   CARGO_FEATURES+=(p2p)
 fi
+if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
+  CARGO_FEATURES+=(p2p-librqbit)
+fi
 if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" == "1" ]]; then
   [[ "${PLATFORM:-all}" == "ios" || "${PLATFORM:-all}" == "android" || "${PLATFORM:-all}" == "harmony" ]] || {
     echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit mobile POC builds" >&2
@@ -107,12 +115,13 @@ mkdir -p "$OUT_DIR/include"
 cp include/media_proxy_cache.h "$OUT_DIR/include/"
 cp include/module.modulemap "$OUT_DIR/include/"
 printf 'p2p_enabled=%s\n' "$P2P_ENABLED" > "$OUT_DIR/build-features.txt"
+printf 'librqbit_enabled=%s\n' "$LIBRQBIT_ENABLED" >> "$OUT_DIR/build-features.txt"
 printf 'test_allow_private_upstream=%s\n' "$TEST_ALLOW_PRIVATE_UPSTREAM" >> "$OUT_DIR/build-features.txt"
 printf 'android_arm64_only=%s\n' "$ANDROID_ARM64_ONLY" >> "$OUT_DIR/build-features.txt"
 
 verify_native_symbols() {
   local artifact="$1" platform="$2" nm_tool
-  [[ "$P2P_ENABLED" == "1" || "$platform" == "android" || "$platform" == "harmony" ]] || return 0
+  [[ "$P2P_ENABLED" == "1" || "$LIBRQBIT_ENABLED" == "1" || "$platform" == "android" || "$platform" == "harmony" ]] || return 0
   if [[ -n "${NM:-}" ]]; then
     nm_tool="$NM"
   elif command -v llvm-nm >/dev/null 2>&1; then
@@ -138,6 +147,14 @@ verify_native_symbols() {
       }
     done
   fi
+  if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
+    for symbol in proxy_torrent_add_authorized proxy_torrent_remove; do
+      rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
+        echo "Missing librqbit ABI symbol $symbol in $artifact" >&2
+        return 1
+      }
+    done
+  fi
   if [[ "$platform" == "android" ]]; then
     for symbol in \
       Java_com_example_mediaproxy_MediaProxyCache_nativeCreate \
@@ -156,6 +173,16 @@ verify_native_symbols() {
         Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveP2PSource; do
         rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
           echo "Missing Android P2P JNI symbol $symbol in $artifact" >&2
+          return 1
+        }
+      done
+    fi
+    if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
+      for symbol in \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrent \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent; do
+        rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
+          echo "Missing Android librqbit JNI symbol $symbol in $artifact" >&2
           return 1
         }
       done
@@ -239,6 +266,9 @@ build_ios_xcframework() {
   local swift_flags=()
   if [[ "$P2P_ENABLED" == "1" ]]; then
     swift_flags=(-D MEDIA_PROXY_CACHE_ENABLE_P2P -Xcc -DMEDIA_PROXY_CACHE_ENABLE_P2P)
+  fi
+  if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
+    swift_flags+=(-D MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT -Xcc -DMEDIA_PROXY_CACHE_ENABLE_LIBRQBIT)
   fi
   swiftc -typecheck -I "$OUT_DIR/include" "${swift_flags[@]}" platform/ios/MediaProxyCache.swift
 }

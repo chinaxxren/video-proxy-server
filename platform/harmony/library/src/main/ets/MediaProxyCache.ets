@@ -7,6 +7,8 @@ interface NativeMediaProxyCache {
   registerP2pDirectory(manifestJson: string, pieceDirectory: string): string;
   verifyP2pSource(sourceId: string): boolean;
   removeP2pSource(sourceId: string): boolean;
+  addAuthorizedTorrent(magnetUri: string): string;
+  removeTorrent(torrentId: string, deleteFiles: boolean): boolean;
 }
 
 interface NativeFactory {
@@ -69,5 +71,26 @@ export class MediaProxyCache {
       throw new Error('Invalid P2P source ID');
     }
     return `http://127.0.0.1:${this.boundPort}/p2p/${sourceId}`;
+  }
+
+  addAuthorizedTorrent(magnetUri: string): string {
+    if (this.boundPort === 0 || !magnetUri.startsWith('magnet:?')) {
+      throw new Error('A running proxy and valid Magnet URI are required');
+    }
+    return this.core.addAuthorizedTorrent(magnetUri);
+  }
+
+  removeTorrent(torrentId: string, deleteFiles: boolean = false): boolean {
+    if (!/^[0-9]+$/.test(torrentId)) {
+      throw new Error('Invalid torrent ID');
+    }
+    return this.core.removeTorrent(torrentId, deleteFiles);
+  }
+
+  torrentPlaybackUrl(torrentId: string, fileId: number): string {
+    if (this.boundPort === 0 || !/^[0-9]+$/.test(torrentId) || !Number.isInteger(fileId) || fileId < 0) {
+      throw new Error('Invalid torrent playback request');
+    }
+    return `http://127.0.0.1:${this.boundPort}/torrent/${torrentId}/${fileId}`;
   }
 }

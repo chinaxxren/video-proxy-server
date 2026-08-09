@@ -8,4 +8,7 @@ export declare class MediaProxyCache {
   verifyP2PSource(sourceId: string): boolean;
   removeP2PSource(sourceId: string): boolean;
   p2pPlaybackUrl(sourceId: string): string;
+  addAuthorizedTorrent(magnetUri: string): string;
+  removeTorrent(torrentId: string, deleteFiles?: boolean): boolean;
+  torrentPlaybackUrl(torrentId: string, fileId: number): string;
 }

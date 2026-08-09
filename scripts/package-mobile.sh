@@ -5,8 +5,13 @@ INPUT_DIR="${1:-${ROOT_DIR}/dist/mobile}"
 OUTPUT_DIR="${2:-${ROOT_DIR}/dist/releases}"
 VERSION="${VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
 P2P_ENABLED="${P2P_ENABLED:-0}"
+LIBRQBIT_ENABLED="${LIBRQBIT_ENABLED:-0}"
 if [[ "$P2P_ENABLED" != "0" && "$P2P_ENABLED" != "1" ]]; then
   echo "P2P_ENABLED must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$LIBRQBIT_ENABLED" != "0" && "$LIBRQBIT_ENABLED" != "1" ]]; then
+  echo "LIBRQBIT_ENABLED must be 0 or 1" >&2
   exit 2
 fi
 test -d "$INPUT_DIR" || { echo "Missing artifact directory: $INPUT_DIR" >&2; exit 1; }
@@ -15,6 +20,10 @@ test -f "$FEATURE_MARKER" || { echo "Missing build feature marker: $FEATURE_MARK
 EXPECTED_FEATURE="p2p_enabled=$P2P_ENABLED"
 if ! grep -Fqx "$EXPECTED_FEATURE" "$FEATURE_MARKER"; then
   echo "Build feature marker does not match requested package: expected $EXPECTED_FEATURE" >&2
+  exit 1
+fi
+if ! grep -Fqx "librqbit_enabled=$LIBRQBIT_ENABLED" "$FEATURE_MARKER"; then
+  echo "Build feature marker does not match LIBRQBIT_ENABLED=$LIBRQBIT_ENABLED" >&2
   exit 1
 fi
 HEADER="$INPUT_DIR/include/media_proxy_cache.h"
@@ -36,7 +45,11 @@ P2P_SUFFIX=""
 if [[ "$P2P_ENABLED" == "1" ]]; then
   P2P_SUFFIX="-p2p"
 fi
-ARCHIVE="$OUTPUT_DIR/media-proxy-cache-v${VERSION}-mobile${P2P_SUFFIX}.tar.gz"
+LIBRQBIT_SUFFIX=""
+if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
+  LIBRQBIT_SUFFIX="-librqbit"
+fi
+ARCHIVE="$OUTPUT_DIR/media-proxy-cache-v${VERSION}-mobile${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz"
 tar -czf "$ARCHIVE" -C "$INPUT_DIR" .
 CHECKSUMS="$OUTPUT_DIR/SHA256SUMS"
 if command -v sha256sum >/dev/null 2>&1; then
