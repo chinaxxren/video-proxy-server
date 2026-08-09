@@ -27,6 +27,13 @@ pub struct TorrentMetadata {
     pub total_length: u64,
     pub piece_length: u32,
     pub piece_sha1: Vec<[u8; 20]>,
+    pub files: Vec<TorrentFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TorrentFile {
+    pub path: Vec<String>,
+    pub length: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,11 +279,11 @@ pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         return Err(ProxyError::Parse("torrent name is unsafe".into()));
     }
-    let total_length = info
-        .get(b"length" as &[u8])
-        .and_then(BValue::integer)
-        .filter(|value| *value > 0)
-        .ok_or_else(|| ProxyError::Parse("single-file torrent length is invalid".into()))?;
+    let files = parse_torrent_files(&info, &name)?;
+    let total_length = files
+        .iter()
+        .try_fold(0u64, |total, file| total.checked_add(file.length))
+        .ok_or_else(|| ProxyError::Parse("torrent total length overflow".into()))?;
     let piece_length = info
         .get(b"piece length" as &[u8])
         .and_then(BValue::integer)
@@ -308,7 +315,74 @@ pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
         total_length,
         piece_length,
         piece_sha1,
+        files,
     })
+}
+
+fn parse_torrent_files(
+    info: &std::collections::BTreeMap<Vec<u8>, BValue>,
+    name: &str,
+) -> Result<Vec<TorrentFile>> {
+    if let Some(length) = info
+        .get(b"length" as &[u8])
+        .and_then(BValue::integer)
+        .filter(|value| *value > 0)
+    {
+        if info.contains_key(b"files" as &[u8]) {
+            return Err(ProxyError::Parse(
+                "torrent mixes single and multi-file layouts".into(),
+            ));
+        }
+        return Ok(vec![TorrentFile {
+            path: vec![name.to_string()],
+            length,
+        }]);
+    }
+    let Some(BValue::List(entries)) = info.get(b"files" as &[u8]) else {
+        return Err(ProxyError::Parse("torrent files are missing".into()));
+    };
+    if entries.is_empty() || entries.len() > 100_000 {
+        return Err(ProxyError::Parse("torrent file count is invalid".into()));
+    }
+    let mut files = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let BValue::Dict(entry) = entry else {
+            return Err(ProxyError::Parse("torrent file entry is invalid".into()));
+        };
+        let length = entry
+            .get(b"length" as &[u8])
+            .and_then(BValue::integer)
+            .ok_or_else(|| ProxyError::Parse("torrent file length is invalid".into()))?;
+        let Some(BValue::List(components)) = entry.get(b"path" as &[u8]) else {
+            return Err(ProxyError::Parse("torrent file path is invalid".into()));
+        };
+        if components.is_empty() || components.len() > 128 {
+            return Err(ProxyError::Parse(
+                "torrent file path depth is invalid".into(),
+            ));
+        }
+        let mut path = vec![name.to_string()];
+        for component in components {
+            let BValue::Bytes(component) = component else {
+                return Err(ProxyError::Parse(
+                    "torrent path component is invalid".into(),
+                ));
+            };
+            let component = String::from_utf8(component.clone())
+                .map_err(|_| ProxyError::Parse("torrent path is not UTF-8".into()))?;
+            if component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains('/')
+                || component.contains('\\')
+            {
+                return Err(ProxyError::Parse("torrent path is unsafe".into()));
+            }
+            path.push(component);
+        }
+        files.push(TorrentFile { path, length });
+    }
+    Ok(files)
 }
 
 pub fn parse_info_metadata(info: &[u8]) -> Result<TorrentMetadata> {
@@ -1667,10 +1741,25 @@ mod tests {
         assert_eq!(metadata.name, "test");
         assert_eq!(metadata.total_length, 3);
         assert_eq!(metadata.piece_sha1, vec![[7; 20]]);
+        assert_eq!(metadata.files[0].path, vec!["test"]);
         assert!(parse_torrent_metadata(b"d4:info3:bade").is_err());
         let info_start = b"d4:info".len();
         let raw_info = &torrent[info_start..torrent.len() - 1];
         assert_eq!(parse_info_metadata(raw_info).unwrap(), metadata);
+    }
+
+    #[test]
+    fn parses_multi_file_torrent_and_rejects_traversal() {
+        let mut torrent =
+            b"d4:infod5:filesld6:lengthi1e4:pathl1:aeee4:name4:root12:piece lengthi1e6:pieces20:"
+                .to_vec();
+        torrent.extend_from_slice(&[3; 20]);
+        torrent.extend_from_slice(b"ee");
+        let metadata = parse_torrent_metadata(&torrent).unwrap();
+        assert_eq!(metadata.total_length, 1);
+        assert_eq!(metadata.files[0].path, vec!["root", "a"]);
+        let unsafe_torrent = b"d4:infod5:filesld6:lengthi1e4:pathl2:..eee4:name4:root12:piece lengthi1e6:pieces20:12345678901234567890ee";
+        assert!(parse_torrent_metadata(unsafe_torrent).is_err());
     }
 
     #[test]
