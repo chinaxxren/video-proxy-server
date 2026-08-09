@@ -21,6 +21,52 @@ pub struct TrackerResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackerAnnounce {
+    pub info_hash: [u8; 20],
+    pub peer_id: [u8; 20],
+    pub port: u16,
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub left: u64,
+    pub numwant: Option<u16>,
+}
+
+pub fn build_tracker_announce_url(tracker: &Url, request: &TrackerAnnounce) -> Result<Url> {
+    if !matches!(tracker.scheme(), "http" | "https") || tracker.host().is_none() {
+        return Err(ProxyError::Parse("HTTP tracker URL is required".into()));
+    }
+    let mut url = tracker.clone();
+    let mut query = url.query().unwrap_or_default().to_string();
+    if !query.is_empty() {
+        query.push('&');
+    }
+    query.push_str("info_hash=");
+    query.push_str(&percent_encode_bytes(&request.info_hash));
+    query.push_str("&peer_id=");
+    query.push_str(&percent_encode_bytes(&request.peer_id));
+    query.push_str(&format!(
+        "&port={}&uploaded={}&downloaded={}&left={}&compact=1",
+        request.port, request.uploaded, request.downloaded, request.left
+    ));
+    if let Some(numwant) = request.numwant {
+        query.push_str(&format!("&numwant={numwant}"));
+    }
+    url.set_query(Some(&query));
+    Ok(url)
+}
+
+fn percent_encode_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(bytes.len() * 3);
+    for byte in bytes {
+        output.push('%');
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitTorrentHandshake {
     pub reserved: [u8; 8],
     pub info_hash: [u8; 20],
@@ -476,5 +522,29 @@ mod tests {
     fn rejects_invalid_handshake_and_oversized_peer_message() {
         assert!(parse_handshake(&[0; 68]).is_err());
         assert!(parse_peer_message(&[0x00, 0x20, 0x00, 0x01]).is_err());
+    }
+
+    #[test]
+    fn builds_binary_safe_tracker_announce_query() {
+        let tracker = Url::parse("https://tracker.example/announce").unwrap();
+        let request = TrackerAnnounce {
+            info_hash: [0x01; 20],
+            peer_id: [0xFF; 20],
+            port: 6881,
+            uploaded: 2,
+            downloaded: 3,
+            left: 4,
+            numwant: Some(30),
+        };
+        let url = build_tracker_announce_url(&tracker, &request).unwrap();
+        let query = url.query().unwrap();
+        assert!(query.contains("info_hash=%01%01%01"));
+        assert!(query.contains("peer_id=%FF%FF%FF"));
+        assert!(query.contains("compact=1"));
+        assert!(build_tracker_announce_url(
+            &Url::parse("udp://tracker.example:80").unwrap(),
+            &request
+        )
+        .is_err());
     }
 }
