@@ -5,6 +5,8 @@ pub mod data_source;
 pub mod data_source_manager;
 pub mod ffi;
 pub mod handlers;
+#[cfg(any(feature = "harmony-napi", test))]
+mod harmony_config;
 #[cfg(feature = "harmony-napi")]
 mod harmony_napi;
 pub mod hls;
