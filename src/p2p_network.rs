@@ -386,6 +386,61 @@ pub fn parse_udp_announce_response(input: &[u8], transaction_id: u32) -> Result<
     })
 }
 
+pub async fn announce_udp_tracker(
+    target: std::net::SocketAddr,
+    request: &TrackerAnnounce,
+    connect_transaction: u32,
+    announce_transaction: u32,
+) -> Result<TrackerResponse> {
+    if !is_public_socket(target) {
+        return Err(ProxyError::Request(
+            "UDP tracker must be a public address".into(),
+        ));
+    }
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = tokio::net::UdpSocket::bind(bind)
+        .await
+        .map_err(|error| ProxyError::Network(format!("UDP tracker bind failed: {error}")))?;
+    socket
+        .connect(target)
+        .await
+        .map_err(|error| ProxyError::Network(format!("UDP tracker connect failed: {error}")))?;
+    let exchange = async {
+        socket
+            .send(&encode_udp_connect_request(connect_transaction))
+            .await
+            .map_err(|error| {
+                ProxyError::Network(format!("UDP tracker connect send failed: {error}"))
+            })?;
+        let mut response = [0u8; 65_507];
+        let length = socket.recv(&mut response).await.map_err(|error| {
+            ProxyError::Network(format!("UDP tracker connect receive failed: {error}"))
+        })?;
+        let connection_id = parse_udp_connect_response(&response[..length], connect_transaction)?;
+        socket
+            .send(&encode_udp_announce_request(
+                connection_id,
+                announce_transaction,
+                request,
+            ))
+            .await
+            .map_err(|error| {
+                ProxyError::Network(format!("UDP tracker announce send failed: {error}"))
+            })?;
+        let length = socket.recv(&mut response).await.map_err(|error| {
+            ProxyError::Network(format!("UDP tracker announce receive failed: {error}"))
+        })?;
+        parse_udp_announce_response(&response[..length], announce_transaction)
+    };
+    tokio::time::timeout(Duration::from_secs(6), exchange)
+        .await
+        .map_err(|_| ProxyError::Network("UDP tracker exchange timed out".into()))?
+}
+
 pub fn build_tracker_announce_url(tracker: &Url, request: &TrackerAnnounce) -> Result<Url> {
     if !matches!(tracker.scheme(), "http" | "https") || tracker.host().is_none() {
         return Err(ProxyError::Parse("HTTP tracker URL is required".into()));
@@ -1107,6 +1162,23 @@ mod tests {
     #[tokio::test]
     async fn dht_udp_query_rejects_private_targets_before_network_io() {
         let error = send_dht_udp_query("127.0.0.1:6881".parse().unwrap(), b"query")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("public"));
+    }
+
+    #[tokio::test]
+    async fn udp_tracker_rejects_private_target_before_network_io() {
+        let request = TrackerAnnounce {
+            info_hash: [1; 20],
+            peer_id: [2; 20],
+            port: 6881,
+            uploaded: 0,
+            downloaded: 0,
+            left: 1,
+            numwant: None,
+        };
+        let error = announce_udp_tracker("127.0.0.1:80".parse().unwrap(), &request, 1, 2)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("public"));
