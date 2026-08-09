@@ -1286,6 +1286,108 @@ pub async fn download_from_peer(
     Ok(downloaded)
 }
 
+pub async fn download_from_peers(
+    peers: Vec<std::net::SocketAddr>,
+    handshake: BitTorrentHandshake,
+    metadata: TorrentMetadata,
+    store: TorrentPieceStore,
+    max_concurrent_peers: usize,
+    max_pieces_per_peer: usize,
+) -> Result<usize> {
+    if peers.is_empty()
+        || max_concurrent_peers == 0
+        || max_concurrent_peers > 32
+        || max_pieces_per_peer == 0
+        || max_pieces_per_peer > 10_000
+    {
+        return Err(ProxyError::Request(
+            "invalid multi-peer download limits".into(),
+        ));
+    }
+    let scheduler = std::sync::Arc::new(tokio::sync::Mutex::new(PieceScheduler::new(
+        metadata.piece_sha1.len(),
+        3,
+    )?));
+    let metadata = std::sync::Arc::new(metadata);
+    let store = std::sync::Arc::new(store);
+    let mut tasks = tokio::task::JoinSet::new();
+    for target in peers.into_iter().take(max_concurrent_peers) {
+        let scheduler = scheduler.clone();
+        let metadata = metadata.clone();
+        let store = store.clone();
+        let handshake = handshake.clone();
+        tasks.spawn(async move {
+            let mut connection = PeerConnection::connect(target, &handshake).await?;
+            let bitfield = loop {
+                match connection.receive().await? {
+                    PeerMessage::Bitfield(bits) => break bits,
+                    PeerMessage::KeepAlive | PeerMessage::Have(_) | PeerMessage::Choke => continue,
+                    _ => {
+                        return Err(ProxyError::Request(
+                            "peer did not provide a bitfield".into(),
+                        ))
+                    }
+                }
+            };
+            scheduler.lock().await.observe_bitfield(&bitfield)?;
+            let mut downloaded = 0usize;
+            while downloaded < max_pieces_per_peer {
+                let index = scheduler.lock().await.claim_next(&bitfield)?;
+                let Some(index) = index else {
+                    break;
+                };
+                let result = async {
+                    let length = torrent_piece_length(&metadata, index)?;
+                    let hash = metadata.piece_sha1.get(index as usize).ok_or_else(|| {
+                        ProxyError::Request("piece hash index out of range".into())
+                    })?;
+                    if store.load(index, hash)?.is_none() {
+                        let bytes = connection.download_piece(index, length, hash).await?;
+                        store.store(index, &bytes, hash)?;
+                    }
+                    Ok::<(), ProxyError>(())
+                }
+                .await;
+                let mut scheduler = scheduler.lock().await;
+                match result {
+                    Ok(()) => {
+                        scheduler.complete(index)?;
+                        downloaded += 1;
+                    }
+                    Err(error) => {
+                        scheduler.fail(index)?;
+                        return Err(error);
+                    }
+                }
+            }
+            Ok::<usize, ProxyError>(downloaded)
+        });
+    }
+    let mut downloaded = 0usize;
+    let mut first_error = None;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(count)) => downloaded = downloaded.saturating_add(count),
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(ProxyError::Request(format!("peer task failed: {error}")));
+                }
+            }
+        }
+    }
+    if downloaded == 0 {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    Ok(downloaded)
+}
+
 fn torrent_piece_length(metadata: &TorrentMetadata, index: u32) -> Result<u32> {
     let index = index as usize;
     if index >= metadata.piece_sha1.len() {
@@ -2432,5 +2534,32 @@ mod tests {
             .unwrap();
         assert_eq!(scheduler.claim_next(&[0b1110_0000]).unwrap(), Some(2));
         scheduler.clear_priorities();
+    }
+
+    #[tokio::test]
+    async fn multi_peer_executor_rejects_empty_peer_set() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TorrentPieceStore::new(root.path(), &[0; 20]).unwrap();
+        let metadata = TorrentMetadata {
+            info_hash: [0; 20],
+            name: "x".into(),
+            total_length: 1,
+            piece_length: 1,
+            piece_sha1: vec![[0; 20]],
+            files: vec![TorrentFile {
+                path: vec!["x".into()],
+                length: 1,
+            }],
+        };
+        let handshake = BitTorrentHandshake {
+            reserved: [0; 8],
+            info_hash: [0; 20],
+            peer_id: [1; 20],
+        };
+        assert!(
+            download_from_peers(Vec::new(), handshake, metadata, store, 1, 1)
+                .await
+                .is_err()
+        );
     }
 }
