@@ -36,6 +36,81 @@ pub struct TrackerAnnounce {
     pub numwant: Option<u16>,
 }
 
+pub const UDP_TRACKER_PROTOCOL_ID: u64 = 0x0000_0417_2710_1980;
+pub const UDP_ACTION_CONNECT: u32 = 0;
+pub const UDP_ACTION_ANNOUNCE: u32 = 1;
+
+pub fn encode_udp_connect_request(transaction_id: u32) -> [u8; 16] {
+    let mut output = [0u8; 16];
+    output[..8].copy_from_slice(&UDP_TRACKER_PROTOCOL_ID.to_be_bytes());
+    output[8..12].copy_from_slice(&UDP_ACTION_CONNECT.to_be_bytes());
+    output[12..].copy_from_slice(&transaction_id.to_be_bytes());
+    output
+}
+
+pub fn parse_udp_connect_response(input: &[u8], transaction_id: u32) -> Result<u64> {
+    if input.len() != 16 || u32::from_be_bytes(input[..4].try_into().unwrap()) != UDP_ACTION_CONNECT
+    {
+        return Err(ProxyError::Parse(
+            "invalid UDP tracker connect response".into(),
+        ));
+    }
+    if u32::from_be_bytes(input[4..8].try_into().unwrap()) != transaction_id {
+        return Err(ProxyError::Parse("UDP tracker transaction mismatch".into()));
+    }
+    Ok(u64::from_be_bytes(input[8..].try_into().unwrap()))
+}
+
+pub fn encode_udp_announce_request(
+    connection_id: u64,
+    transaction_id: u32,
+    request: &TrackerAnnounce,
+) -> [u8; 98] {
+    let mut output = [0u8; 98];
+    output[..8].copy_from_slice(&connection_id.to_be_bytes());
+    output[8..12].copy_from_slice(&UDP_ACTION_ANNOUNCE.to_be_bytes());
+    output[12..16].copy_from_slice(&transaction_id.to_be_bytes());
+    output[16..36].copy_from_slice(&request.info_hash);
+    output[36..56].copy_from_slice(&request.peer_id);
+    output[56..64].copy_from_slice(&request.downloaded.to_be_bytes());
+    output[64..72].copy_from_slice(&request.left.to_be_bytes());
+    output[72..80].copy_from_slice(&request.uploaded.to_be_bytes());
+    output[80..84].copy_from_slice(&0u32.to_be_bytes());
+    output[84..88].copy_from_slice(&0u32.to_be_bytes());
+    output[88..92].copy_from_slice(&0u32.to_be_bytes());
+    output[92..96].copy_from_slice(&(request.numwant.unwrap_or(-1i16 as u16) as u32).to_be_bytes());
+    output[96..98].copy_from_slice(&request.port.to_be_bytes());
+    output
+}
+
+pub fn parse_udp_announce_response(input: &[u8], transaction_id: u32) -> Result<TrackerResponse> {
+    if input.len() < 20 || u32::from_be_bytes(input[..4].try_into().unwrap()) != UDP_ACTION_ANNOUNCE
+    {
+        return Err(ProxyError::Parse(
+            "invalid UDP tracker announce response".into(),
+        ));
+    }
+    if u32::from_be_bytes(input[4..8].try_into().unwrap()) != transaction_id {
+        return Err(ProxyError::Parse("UDP tracker transaction mismatch".into()));
+    }
+    let interval_secs = u32::from_be_bytes(input[8..12].try_into().unwrap()) as u64;
+    let mut peers = Vec::new();
+    if (input.len() - 20) % 6 != 0 {
+        return Err(ProxyError::Parse("invalid UDP tracker peer list".into()));
+    }
+    for chunk in input[20..].chunks_exact(6) {
+        peers.push(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
+            u16::from_be_bytes([chunk[4], chunk[5]]),
+        )));
+    }
+    Ok(TrackerResponse {
+        interval_secs,
+        min_interval_secs: None,
+        peers,
+    })
+}
+
 pub fn build_tracker_announce_url(tracker: &Url, request: &TrackerAnnounce) -> Result<Url> {
     if !matches!(tracker.scheme(), "http" | "https") || tracker.host().is_none() {
         return Err(ProxyError::Parse("HTTP tracker URL is required".into()));
@@ -590,5 +665,42 @@ mod tests {
             &request
         )
         .is_err());
+    }
+
+    #[test]
+    fn round_trips_udp_tracker_packets() {
+        let request = TrackerAnnounce {
+            info_hash: [1; 20],
+            peer_id: [2; 20],
+            port: 6881,
+            uploaded: 3,
+            downloaded: 4,
+            left: 5,
+            numwant: Some(20),
+        };
+        let connect = encode_udp_connect_request(7);
+        let mut connect_response = [0u8; 16];
+        connect_response[..4].copy_from_slice(&0u32.to_be_bytes());
+        connect_response[4..8].copy_from_slice(&7u32.to_be_bytes());
+        connect_response[8..].copy_from_slice(&9u64.to_be_bytes());
+        assert_eq!(parse_udp_connect_response(&connect_response, 7).unwrap(), 9);
+        assert_eq!(
+            u64::from_be_bytes(connect[..8].try_into().unwrap()),
+            UDP_TRACKER_PROTOCOL_ID
+        );
+        let announce = encode_udp_announce_request(9, 8, &request);
+        let mut response = vec![0u8; 26];
+        response[..4].copy_from_slice(&1u32.to_be_bytes());
+        response[4..8].copy_from_slice(&8u32.to_be_bytes());
+        response[8..12].copy_from_slice(&30u32.to_be_bytes());
+        response[20..26].copy_from_slice(&[127, 0, 0, 1, 0x1a, 0xe1]);
+        assert_eq!(
+            parse_udp_announce_response(&response, 8)
+                .unwrap()
+                .peers
+                .len(),
+            1
+        );
+        assert_eq!(&announce[96..98], &6881u16.to_be_bytes());
     }
 }
