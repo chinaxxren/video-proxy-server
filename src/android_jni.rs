@@ -10,10 +10,11 @@ use crate::ffi::{
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
-    proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
-    proxy_torrent_set_download_limit, proxy_torrent_set_paused, proxy_torrent_status_json,
+    proxy_torrent_add_authorized, proxy_torrent_add_file_authorized, proxy_torrent_files_json,
+    proxy_torrent_remove, proxy_torrent_set_download_limit, proxy_torrent_set_paused,
+    proxy_torrent_status_json,
 };
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned};
 use std::collections::HashMap;
@@ -252,6 +253,29 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuth
         };
         Ok(with_handle(handle, |handle| unsafe {
             proxy_torrent_add_authorized(handle, magnet_uri.as_ptr(), 1)
+        })
+        .unwrap_or(-1))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrentFile<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    torrent_bytes: JByteArray<'local>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let bytes = env.convert_byte_array(&torrent_bytes)?;
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return Ok(-1);
+        }
+        Ok(with_handle(handle, |handle| unsafe {
+            proxy_torrent_add_file_authorized(handle, bytes.as_ptr(), bytes.len(), 1)
         })
         .unwrap_or(-1))
     })

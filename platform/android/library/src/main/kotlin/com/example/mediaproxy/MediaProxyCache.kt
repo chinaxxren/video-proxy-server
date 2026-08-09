@@ -93,6 +93,16 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     }
 
     @Synchronized
+    fun addAuthorizedTorrentFile(torrentBytes: ByteArray): Long {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        check(boundPort != 0) { "MediaProxyCache is not running" }
+        require(torrentBytes.isNotEmpty() && torrentBytes.size <= 4 * 1024 * 1024)
+        return nativeAddAuthorizedTorrentFile(handle, torrentBytes).also {
+            check(it >= 0L) { "torrent file registration failed" }
+        }
+    }
+
+    @Synchronized
     fun removeTorrent(torrentId: Long, deleteFiles: Boolean = false): Boolean {
         check(handle != 0L) { "MediaProxyCache is closed" }
         require(torrentId >= 0L)
@@ -170,6 +180,7 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     private external fun nativeVerifyP2PSource(handle: Long, sourceId: Long): Boolean
     private external fun nativeRemoveP2PSource(handle: Long, sourceId: Long): Boolean
     private external fun nativeAddAuthorizedTorrent(handle: Long, magnetUri: String): Long
+    private external fun nativeAddAuthorizedTorrentFile(handle: Long, torrentBytes: ByteArray): Long
     private external fun nativeRemoveTorrent(
         handle: Long,
         torrentId: Long,

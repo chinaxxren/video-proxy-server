@@ -36,6 +36,13 @@ export class MediaProxyCache {
     return nativeAddAuthorizedTorrent(this.nativeHandle, magnetUri)
   }
 
+  addAuthorizedTorrentFile(torrentBytes: Uint8Array): string {
+    if (this.boundPort === 0 || torrentBytes.byteLength === 0 || torrentBytes.byteLength > 4 * 1024 * 1024) {
+      throw new Error('invalid torrent metadata')
+    }
+    return nativeAddAuthorizedTorrentFile(this.nativeHandle, torrentBytes)
+  }
+
   removeTorrent(torrentId: string, deleteFiles: boolean = false): boolean {
     if (!/^\d+$/.test(torrentId)) throw new Error('invalid torrent ID')
     return nativeRemoveTorrent(this.nativeHandle, torrentId, deleteFiles)
@@ -84,6 +91,7 @@ declare function nativeStart(handle: bigint): number
 declare function nativeStop(handle: bigint): void
 declare function nativeDestroy(handle: bigint): void
 declare function nativeAddAuthorizedTorrent(handle: bigint, magnetUri: string): string
+declare function nativeAddAuthorizedTorrentFile(handle: bigint, torrentBytes: Uint8Array): string
 declare function nativeRemoveTorrent(handle: bigint, torrentId: string, deleteFiles: boolean): boolean
 declare function nativeTorrentFilesJson(handle: bigint, torrentId: string): string
 declare function nativeTorrentStatusJson(handle: bigint, torrentId: string): string

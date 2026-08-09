@@ -10,10 +10,13 @@ use crate::ffi::{
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
-    proxy_torrent_add_authorized, proxy_torrent_files_json, proxy_torrent_remove,
-    proxy_torrent_set_download_limit, proxy_torrent_set_paused, proxy_torrent_status_json,
+    proxy_torrent_add_authorized, proxy_torrent_add_file_authorized, proxy_torrent_files_json,
+    proxy_torrent_remove, proxy_torrent_set_download_limit, proxy_torrent_set_paused,
+    proxy_torrent_status_json,
 };
 use crate::harmony_config::HarmonyConfiguration;
+#[cfg(feature = "p2p-librqbit")]
+use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use std::ffi::CString;
@@ -261,6 +264,38 @@ impl MediaProxyCache {
                 } else {
                     "librqbit is not enabled in this native library"
                 },
+            ));
+        }
+        Ok(torrent_id.to_string())
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[napi]
+    pub fn add_authorized_torrent_file(&self, torrent_bytes: Uint8Array) -> Result<String> {
+        let bytes = torrent_bytes.as_ref();
+        if bytes.is_empty() || bytes.len() > 4 * 1024 * 1024 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "invalid torrent metadata length",
+            ));
+        }
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        let torrent_id = unsafe {
+            proxy_torrent_add_file_authorized(
+                handle as *mut ProxyServerHandle,
+                bytes.as_ptr(),
+                bytes.len(),
+                1,
+            )
+        };
+        if torrent_id < 0 {
+            return Err(Error::new(
+                Status::GenericFailure,
+                "torrent file registration failed",
             ));
         }
         Ok(torrent_id.to_string())

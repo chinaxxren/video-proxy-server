@@ -121,6 +121,25 @@ public final class MediaProxyCache: @unchecked Sendable {
         return torrentID
     }
 
+    public func addAuthorizedTorrentFile(_ torrentData: Data) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, let boundPort, boundPort != 0,
+              !torrentData.isEmpty, torrentData.count <= 4 * 1024 * 1024 else {
+            throw MediaProxyCacheError.creationFailed
+        }
+        let torrentID = torrentData.withUnsafeBytes { bytes in
+            proxy_torrent_add_file_authorized(
+                handle,
+                bytes.bindMemory(to: UInt8.self).baseAddress,
+                bytes.count,
+                1
+            )
+        }
+        guard torrentID >= 0 else { throw MediaProxyCacheError.creationFailed }
+        return torrentID
+    }
+
     public func removeTorrent(_ torrentID: Int64, deleteFiles: Bool = false) -> Bool {
         lock.lock()
         defer { lock.unlock() }

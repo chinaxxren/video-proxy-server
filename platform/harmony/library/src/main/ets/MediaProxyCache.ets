@@ -8,6 +8,7 @@ interface NativeMediaProxyCache {
   verifyP2pSource(sourceId: string): boolean;
   removeP2pSource(sourceId: string): boolean;
   addAuthorizedTorrent(magnetUri: string): string;
+  addAuthorizedTorrentFile(torrentBytes: Uint8Array): string;
   removeTorrent(torrentId: string, deleteFiles: boolean): boolean;
   torrentFilesJson(torrentId: string): string;
   torrentStatusJson(torrentId: string): string;
@@ -97,6 +98,13 @@ export class MediaProxyCache {
       throw new Error('A running proxy and valid Magnet URI are required');
     }
     return this.core.addAuthorizedTorrent(magnetUri);
+  }
+
+  addAuthorizedTorrentFile(torrentBytes: Uint8Array): string {
+    if (this.boundPort === 0 || torrentBytes.byteLength === 0 || torrentBytes.byteLength > 4 * 1024 * 1024) {
+      throw new Error('Invalid torrent metadata');
+    }
+    return this.core.addAuthorizedTorrentFile(torrentBytes);
   }
 
   removeTorrent(torrentId: string, deleteFiles: boolean = false): boolean {

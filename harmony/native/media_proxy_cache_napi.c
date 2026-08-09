@@ -104,6 +104,22 @@ static napi_value add_authorized_torrent(napi_env env, napi_callback_info info) 
     napi_value result; napi_create_string_utf8(env, text, NAPI_AUTO_LENGTH, &result); return result;
 }
 
+static napi_value add_authorized_torrent_file(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value argv[2]; napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 2) return NULL;
+    bool lossless; uint64_t id; napi_get_value_bigint_uint64(env, argv[0], &id, &lossless);
+    napi_typedarray_type type; size_t length = 0, offset = 0; void *data = NULL; napi_value array_buffer;
+    if (napi_get_typedarray_info(env, argv[1], &type, &length, &data, &array_buffer, &offset) != napi_ok ||
+        type != napi_uint8_array || data == NULL || length == 0 || length > 4 * 1024 * 1024) return NULL;
+    pthread_mutex_lock(&entries_lock);
+    Entry *entry = lookup(id);
+    int64_t torrent_id = entry == NULL ? -1 : proxy_torrent_add_file_authorized(entry->handle, data, length, 1);
+    pthread_mutex_unlock(&entries_lock);
+    if (torrent_id < 0) return NULL;
+    char text[32]; snprintf(text, sizeof(text), "%lld", (long long)torrent_id);
+    napi_value result; napi_create_string_utf8(env, text, NAPI_AUTO_LENGTH, &result); return result;
+}
+
 static napi_value remove_torrent(napi_env env, napi_callback_info info) {
     size_t argc = 3; napi_value argv[3]; napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     if (argc != 3) return result_bool(env, false);
@@ -197,6 +213,7 @@ static napi_value init(napi_env env, napi_value exports) {
         {"nativeDestroy", NULL, destroy, NULL, NULL, NULL, napi_default, NULL},
 #ifdef MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT
         {"nativeAddAuthorizedTorrent", NULL, add_authorized_torrent, NULL, NULL, NULL, napi_default, NULL},
+        {"nativeAddAuthorizedTorrentFile", NULL, add_authorized_torrent_file, NULL, NULL, NULL, napi_default, NULL},
         {"nativeRemoveTorrent", NULL, remove_torrent, NULL, NULL, NULL, napi_default, NULL},
         {"nativeTorrentFilesJson", NULL, torrent_files_json, NULL, NULL, NULL, napi_default, NULL},
         {"nativeTorrentStatusJson", NULL, torrent_status_json, NULL, NULL, NULL, napi_default, NULL},

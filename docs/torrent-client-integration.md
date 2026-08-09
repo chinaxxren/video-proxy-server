@@ -40,7 +40,8 @@ and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
 ## Lifecycle
 
 1. Create and start `MediaProxyCache`.
-2. Call `addAuthorizedTorrent(magnetUri)`. This is a blocking operation and
+2. Call `addAuthorizedTorrent(magnetUri)` or pass up to 4 MiB of authorized
+   `.torrent` metadata to `addAuthorizedTorrentFile`. This is a blocking operation and
    should run away from the UI thread while metadata is resolved.
 3. Call `torrentFiles` to select a file ID. `torrentStatus` reports progress.
 4. Play `http://127.0.0.1:<port>/torrent/<torrentId>/<fileId>`.
@@ -52,6 +53,10 @@ and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
 The HTTP endpoint supports `GET`, `HEAD`, open-ended ranges, bounded ranges,
 and suffix ranges. Reads are streamed in chunks of at most 8 MiB and each chunk
 has a 30-second timeout.
+
+The `.torrent` entry point accepts `ByteArray` on Android, `Data` on iOS, and
+`Uint8Array` on HarmonyOS. Core copies caller memory before asynchronous work
+and validates bencode structure, paths, piece metadata, and info-hash.
 
 ## Platform APIs
 

@@ -150,6 +150,7 @@ verify_native_symbols() {
   if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
     for symbol in \
       proxy_torrent_add_authorized \
+      proxy_torrent_add_file_authorized \
       proxy_torrent_remove \
       proxy_torrent_files_json \
       proxy_torrent_status_json \
@@ -186,6 +187,7 @@ verify_native_symbols() {
     if [[ "$LIBRQBIT_ENABLED" == "1" ]]; then
       for symbol in \
         Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrent \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrentFile \
         Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent \
         Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentFilesJson \
         Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentStatusJson \
