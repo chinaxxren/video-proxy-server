@@ -54,6 +54,15 @@ application has no authorized P2P source.
 See [Optional P2P Client Integration](docs/p2p-client-integration.md) for the
 manifest, C callback, lifecycle, playback URL, and acceptance contract.
 
+### P2P streaming while downloading
+
+The Host writes authorized pieces as `<piece-directory>/<index>.piece`. The
+player uses the local HTTP Range URL; Core reads and verifies requested pieces,
+persists verified bytes in the shared cache, and returns them immediately. The
+Host can continue filling later pieces while playback proceeds. Core does not
+discover peers or download from a P2P network; the Host owns acquisition and
+authorization.
+
 ### Dependency security
 
 CI runs the RustSec audit on every push and pull request. The same checks can be

@@ -166,6 +166,19 @@ The route supports GET, HEAD, normal/open-ended/suffix Range, and streams large
 responses in verified chunks. It never accepts a source URL, magnet, tracker,
 or peer address. Remove the ID immediately when authorization is revoked.
 
+## Streaming While Pieces Arrive
+
+```text
+Host obtains authorized piece -> writes <index>.piece
+Player requests Range        -> Core reads and verifies that piece
+Core persists verified bytes -> Player receives the Range response
+```
+
+Playback can start before the complete object is available because the Host can
+fill later pieces concurrently. A missing piece is a temporary source failure;
+the Host should finish it and let the player retry the Range. Core itself does
+not perform peer discovery or network acquisition.
+
 ## Acceptance
 
 - unauthorized and malformed manifests are rejected;
