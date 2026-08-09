@@ -39,7 +39,7 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 Native archives include the current platform templates under `adapter/`.
 Swift directly wraps the C ABI; Kotlin is backed by the Rust `android-jni`
 feature, and the HarmonyOS declaration is backed by the Rust `harmony-napi`
-feature. Android AAR runtime validation remains pending. HarmonyOS HAR assembly
+feature. Android AAR assembly is validated; runtime validation remains pending. HarmonyOS HAR assembly
 with real Rust OHOS libraries is validated, while device runtime validation is pending.
 
 Expected architecture targets:
@@ -192,8 +192,8 @@ library project. `scripts/package-android-aar.sh` stages arm64-v8a,
 armeabi-v7a, and x86_64 libraries, builds the release AAR, and verifies
 `classes.jar` plus all three JNI libraries. CI uses NDK `29.0.14206865` and
 Gradle `9.7.0`; AGP 9.3.1 rejects the previously configured Gradle 9.3.1.
-The ARM64 JNI library and debug APK have been built with this toolchain, while
-the full three-ABI release AAR still requires a successful CI/release run.
+The ARM64 JNI library, full three-ABI release AAR, and debug APK have been
+built with this toolchain; runtime validation remains a separate step.
 JNI exposes process-local opaque tokens rather than pointer values. Unknown,
 removed, and repeatedly destroyed tokens are rejected before native memory is
 accessed, and destruction is serialized with active JNI calls.
@@ -331,7 +331,7 @@ Each platform POC should demonstrate:
 
 1. Complete the remaining Core host contracts: opaque request registration and source-refresh callback. Start/stop, dynamic port, and Host cache-directory injection are already available through the C ABI.
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
-3. Package the existing Android JNI bridge as an AAR and validate Media3 on real devices.
+3. Validate the packaged Android AAR with Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
 5. Build the iOS XCFramework/Swift adapter and validate AVPlayer.
 6. Build the HarmonyOS HAR/N-API adapter and validate AVPlayer.

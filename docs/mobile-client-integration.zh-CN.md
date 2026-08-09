@@ -38,7 +38,7 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 
 原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 由 Rust
 `android-jni` feature 提供实现，鸿蒙声明由 Rust `harmony-napi` feature 提供实现。
-Android AAR 仍待运行时验证。鸿蒙 HAR 已使用真实 Rust OHOS 库完成组装验证，设备运行时验证仍待完成。
+Android AAR 已完成组装验证，但运行时验证仍待完成。鸿蒙 HAR 已使用真实 Rust OHOS 库完成组装验证，设备运行时验证仍待完成。
 
 建议支持的架构：
 
@@ -187,8 +187,7 @@ iOS 工作项：
 `scripts/package-android-aar.sh` 会暂存 arm64-v8a、armeabi-v7a 和 x86_64 动态库，
 构建 Release AAR，并校验 `classes.jar` 与三个 JNI 库。CI 使用 NDK
 `29.0.14206865` 和 Gradle `9.7.0`；AGP 9.3.1 会拒绝之前配置的 Gradle 9.3.1。
-ARM64 JNI 库和 Debug APK 已通过该工具链构建，完整三 ABI Release AAR 仍需一次
-成功的 CI/Release 运行验证。
+ARM64 JNI 库、完整三 ABI Release AAR 和 Debug APK 已通过该工具链构建，仍需进行运行时验证。
 JNI 暴露进程内不透明 token，而不是原生指针值。未知、已移除和重复销毁的 token 会在
 访问原生内存前被拒绝，销毁操作也会与活动 JNI 调用串行化。
 
@@ -315,7 +314,7 @@ URL 查询参数重新启动时命中同一缓存，源站没有新增请求。�
 
 1. 完成 Core 剩余的 Host 合同：不透明请求注册和来源刷新回调。启停、动态端口和 Host 缓存目录注入已经通过 C ABI 提供。
 2. 将现有 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略单元及桌面集成测试持续作为发布门禁。
-3. 将现有 Android JNI Bridge 打包为 AAR，并在真机上验证 Media3。
+3. 使用 Media3 在真机上验证已打包的 Android AAR。
 4. 根据 Android POC 固化共享生命周期和错误合同。
 5. 构建 iOS XCFramework/Swift Adapter，并验证 AVPlayer。
 6. 构建鸿蒙 HAR/N-API Adapter，并验证 AVPlayer。

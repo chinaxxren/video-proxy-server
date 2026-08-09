@@ -18,11 +18,18 @@ stage_abi arm64-v8a aarch64-linux-android
 stage_abi armeabi-v7a armv7-linux-androideabi
 stage_abi x86_64 x86_64-linux-android
 
-command -v gradle >/dev/null 2>&1 || {
-  echo "Gradle is required to package the Android AAR" >&2
+GRADLE_BIN="${GRADLE_BIN:-}"
+if [[ -z "$GRADLE_BIN" ]]; then
+  GRADLE_BIN="$(command -v gradle || true)"
+fi
+if [[ -z "$GRADLE_BIN" ]]; then
+  GRADLE_BIN="$(find "${GRADLE_USER_HOME:-$HOME/.gradle}/wrapper/dists" -type f -path '*/bin/gradle' -perm -111 2>/dev/null | sort -V | tail -1 || true)"
+fi
+[[ -x "$GRADLE_BIN" ]] || {
+  echo "Gradle is required to package the Android AAR; set GRADLE_BIN to Gradle 9.5+" >&2
   exit 1
 }
-gradle --no-daemon -p "$ROOT_DIR/platform/android" :library:assembleRelease
+"$GRADLE_BIN" --no-daemon -p "$ROOT_DIR/platform/android" :library:assembleRelease
 
 aar="$ROOT_DIR/platform/android/library/build/outputs/aar/library-release.aar"
 test -f "$aar" || { echo "Android AAR was not produced" >&2; exit 1; }
