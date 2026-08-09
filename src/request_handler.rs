@@ -1,7 +1,7 @@
 use crate::data_request::DataRequest;
 use crate::data_source_manager::DataSourceManager;
 use crate::hls::{DefaultHlsHandler, HlsHandler};
-#[cfg(feature = "p2p")]
+#[cfg(any(feature = "p2p", feature = "p2p-librqbit"))]
 use crate::http_types::stream_body;
 use crate::http_types::{empty_body, full_body, AppBody};
 use crate::utils::error::{ProxyError, Result};
@@ -22,6 +22,8 @@ pub struct RequestHandler {
     request_limit: Arc<Semaphore>,
     #[cfg(feature = "p2p")]
     p2p_registry: crate::p2p::P2pSourceRegistry,
+    #[cfg(feature = "p2p-librqbit")]
+    rqbit_backend: tokio::sync::RwLock<Option<Arc<crate::rqbit_backend::RqbitBackend>>>,
 }
 
 impl RequestHandler {
@@ -43,13 +45,25 @@ impl RequestHandler {
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
             #[cfg(feature = "p2p")]
             p2p_registry,
+            #[cfg(feature = "p2p-librqbit")]
+            rqbit_backend: tokio::sync::RwLock::new(None),
         }
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    pub async fn set_rqbit_backend(&self, backend: Arc<crate::rqbit_backend::RqbitBackend>) {
+        self.rqbit_backend.write().await.replace(backend);
     }
 
     pub async fn handle_request<B>(&self, req: Request<B>) -> Result<Response<AppBody>> {
         validate_method(req.method())?;
         let is_head = req.method() == Method::HEAD;
         let permit = self.request_limit.clone().acquire_owned().await?;
+        #[cfg(feature = "p2p-librqbit")]
+        if req.uri().path().starts_with("/torrent/") {
+            let response = self.handle_torrent(&req, is_head).await?;
+            return Ok(guard_response(response, permit));
+        }
         #[cfg(feature = "p2p")]
         if req.uri().path().starts_with("/p2p/") {
             let response = self.handle_p2p(&req, is_head)?;
@@ -88,6 +102,77 @@ impl RequestHandler {
         // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
         // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
         Ok(guard_response(response, permit))
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    async fn handle_torrent<B>(
+        &self,
+        req: &Request<B>,
+        is_head: bool,
+    ) -> Result<Response<AppBody>> {
+        use crate::utils::range::{parse_range_spec, resolve_range, OPEN_ENDED};
+
+        let (torrent_id, file_id) = parse_torrent_path(req.uri().path())?;
+        let backend = self
+            .rqbit_backend
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ProxyError::Request("librqbit backend is not configured".into()))?;
+        let total = backend
+            .files(torrent_id)
+            .await?
+            .into_iter()
+            .find(|file| file.file_id == file_id)
+            .ok_or_else(|| ProxyError::Request("librqbit file ID not found".into()))?
+            .length;
+        let range_header = req.headers().get(hyper::header::RANGE);
+        let (start, requested_end) = match range_header {
+            Some(value) => parse_range_spec(value.to_str()?)?.endpoints(Some(total))?,
+            None => (0, OPEN_ENDED),
+        };
+        let (start, end) = resolve_range(start, requested_end, Some(total))?;
+        let length = end - start + 1;
+        let mut builder = Response::builder()
+            .status(if range_header.is_some() {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            })
+            .header(ACCEPT_RANGES, "bytes")
+            .header(hyper::header::CONTENT_LENGTH, length);
+        if range_header.is_some() {
+            builder = builder.header(CONTENT_RANGE, format!("bytes {start}-{end}/{total}"));
+        }
+        if is_head {
+            return builder.body(empty_body()).map_err(ProxyError::from);
+        }
+        let stream = futures_util::stream::unfold(
+            (backend, torrent_id, file_id, start, end),
+            |state| async move {
+                let (backend, torrent_id, file_id, current, end) = state;
+                if current > end {
+                    return None;
+                }
+                let chunk_end = end.min(current.saturating_add(8 * 1024 * 1024 - 1));
+                let length = (chunk_end - current + 1) as usize;
+                let result = backend
+                    .read_file_range(torrent_id, file_id, current, length)
+                    .await
+                    .map(bytes::Bytes::from);
+                Some((
+                    result,
+                    (
+                        backend,
+                        torrent_id,
+                        file_id,
+                        chunk_end.saturating_add(1),
+                        end,
+                    ),
+                ))
+            },
+        );
+        builder.body(stream_body(stream)).map_err(ProxyError::from)
     }
 
     #[cfg(feature = "p2p")]
@@ -143,6 +228,33 @@ impl RequestHandler {
         });
         builder.body(stream_body(stream)).map_err(ProxyError::from)
     }
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn parse_torrent_path(path: &str) -> Result<(usize, usize)> {
+    let mut parts = path
+        .strip_prefix("/torrent/")
+        .ok_or_else(|| ProxyError::Request("librqbit path is invalid".into()))?
+        .split('/');
+    let torrent_id = parse_numeric_path_part(parts.next(), "torrent")?;
+    let file_id = parse_numeric_path_part(parts.next(), "file")?;
+    if parts.next().is_some() {
+        return Err(ProxyError::Request("librqbit path is invalid".into()));
+    }
+    Ok((torrent_id, file_id))
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn parse_numeric_path_part(value: Option<&str>, label: &str) -> Result<usize> {
+    let value = value.unwrap_or_default();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ProxyError::Request(format!(
+            "librqbit {label} ID is invalid"
+        )));
+    }
+    value
+        .parse()
+        .map_err(|_| ProxyError::Request(format!("librqbit {label} ID is invalid")))
 }
 
 #[cfg(feature = "p2p")]
@@ -332,6 +444,22 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(!response.headers().contains_key(ACCEPT_RANGES));
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[test]
+    fn torrent_route_requires_exact_numeric_ids() {
+        assert_eq!(parse_torrent_path("/torrent/12/34").unwrap(), (12, 34));
+        for path in [
+            "/torrent/",
+            "/torrent/1",
+            "/torrent/a/2",
+            "/torrent/1/-2",
+            "/torrent/1/2/3",
+            "/torrent/1/2/",
+        ] {
+            assert!(parse_torrent_path(path).is_err(), "accepted {path}");
+        }
     }
 
     #[tokio::test]

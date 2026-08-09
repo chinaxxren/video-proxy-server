@@ -205,6 +205,11 @@ impl ProxyServer {
         self.p2p_registry.clone()
     }
 
+    #[cfg(feature = "p2p-librqbit")]
+    pub async fn set_rqbit_backend(&self, backend: Arc<crate::rqbit_backend::RqbitBackend>) {
+        self.handler.set_rqbit_backend(backend).await;
+    }
+
     /// 发送优雅停止信号。`start()` 会完成所有进行中的请求后关闭监听器。
     /// 可从任意线程安全调用；多次调用幂等。
     pub fn stop(&self) {
