@@ -2,13 +2,31 @@
 
 use crate::utils::error::{ProxyError, Result};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
+    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
+    Session, SessionOptions,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RqbitFileInfo {
+    pub file_id: usize,
+    pub relative_path: String,
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RqbitTorrentStatus {
+    pub state: String,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub finished: bool,
+    pub error: Option<String>,
+}
 
 pub struct RqbitBackend {
     session: Arc<Session>,
@@ -117,7 +135,90 @@ impl RqbitBackend {
         Ok(bytes)
     }
 
+    pub async fn files(&self, torrent_id: usize) -> Result<Vec<RqbitFileInfo>> {
+        let handle = self.torrent(torrent_id).await?;
+        handle
+            .with_metadata(|metadata| {
+                metadata
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    .map(|(file_id, file)| RqbitFileInfo {
+                        file_id,
+                        relative_path: file.relative_filename.to_string_lossy().into_owned(),
+                        length: file.len,
+                    })
+                    .collect()
+            })
+            .map_err(|error| {
+                ProxyError::Request(format!("read librqbit metadata failed: {error:#}"))
+            })
+    }
+
+    pub async fn status(&self, torrent_id: usize) -> Result<RqbitTorrentStatus> {
+        let stats = self.torrent(torrent_id).await?.stats();
+        Ok(RqbitTorrentStatus {
+            state: stats.state.to_string(),
+            total_bytes: stats.total_bytes,
+            downloaded_bytes: stats.progress_bytes,
+            uploaded_bytes: stats.uploaded_bytes,
+            finished: stats.finished,
+            error: stats.error,
+        })
+    }
+
+    pub async fn remove(&self, torrent_id: usize, delete_files: bool) -> Result<()> {
+        if !self.torrents.read().await.contains_key(&torrent_id) {
+            return Err(ProxyError::Request("unknown librqbit torrent ID".into()));
+        }
+        self.session
+            .delete(TorrentIdOrHash::Id(torrent_id), delete_files)
+            .await
+            .map_err(|error| {
+                ProxyError::Storage(format!("remove librqbit torrent failed: {error:#}"))
+            })?;
+        self.torrents.write().await.remove(&torrent_id);
+        Ok(())
+    }
+
+    async fn torrent(&self, torrent_id: usize) -> Result<Arc<ManagedTorrent>> {
+        self.torrents
+            .read()
+            .await
+            .get(&torrent_id)
+            .cloned()
+            .ok_or_else(|| ProxyError::Request("unknown librqbit torrent ID".into()))
+    }
+
     pub fn shutdown(&self) {
         self.session.cancellation_token().cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_relative_cache_directory() {
+        let error = RqbitBackend::new(PathBuf::from("relative-cache"))
+            .await
+            .err()
+            .expect("relative directory must be rejected");
+        assert!(error.to_string().contains("must be absolute"));
+    }
+
+    #[tokio::test]
+    async fn unknown_torrent_operations_return_errors() {
+        let cache = tempfile::tempdir().expect("create temporary cache");
+        let backend = RqbitBackend::new(cache.path().to_path_buf())
+            .await
+            .expect("create backend");
+
+        assert!(backend.files(404).await.is_err());
+        assert!(backend.status(404).await.is_err());
+        assert!(backend.remove(404, false).await.is_err());
+
+        backend.shutdown();
     }
 }
