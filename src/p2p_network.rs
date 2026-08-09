@@ -1022,6 +1022,7 @@ pub struct PieceScheduler {
     availability: Vec<u32>,
     failures: Vec<u8>,
     max_failures: u8,
+    priorities: Vec<u8>,
 }
 
 impl PieceScheduler {
@@ -1034,6 +1035,7 @@ impl PieceScheduler {
             availability: vec![0; piece_count],
             failures: vec![0; piece_count],
             max_failures,
+            priorities: vec![0; piece_count],
         })
     }
 
@@ -1065,7 +1067,14 @@ impl PieceScheduler {
                     && self.states[*index] == PieceState::Missing
                     && self.failures[*index] < self.max_failures
             })
-            .min_by_key(|index| (self.availability[*index], self.failures[*index], *index));
+            .min_by_key(|index| {
+                (
+                    u8::MAX - self.priorities[*index],
+                    self.availability[*index],
+                    self.failures[*index],
+                    *index,
+                )
+            });
         if let Some(index) = candidate {
             self.states[index] = PieceState::InFlight;
             return Ok(Some(index as u32));
@@ -1103,6 +1112,35 @@ impl PieceScheduler {
         self.states
             .iter()
             .all(|state| *state == PieceState::Complete)
+    }
+
+    pub fn prioritize_byte_range(
+        &mut self,
+        metadata: &TorrentMetadata,
+        start: u64,
+        end: u64,
+        priority: u8,
+    ) -> Result<()> {
+        if start > end
+            || end >= metadata.total_length
+            || metadata.piece_sha1.len() != self.states.len()
+        {
+            return Err(ProxyError::Request(
+                "invalid playback priority range".into(),
+            ));
+        }
+        let first = usize::try_from(start / metadata.piece_length as u64)
+            .map_err(|_| ProxyError::Request("priority piece index overflow".into()))?;
+        let last = usize::try_from(end / metadata.piece_length as u64)
+            .map_err(|_| ProxyError::Request("priority piece index overflow".into()))?;
+        for index in first..=last {
+            self.priorities[index] = self.priorities[index].max(priority);
+        }
+        Ok(())
+    }
+
+    pub fn clear_priorities(&mut self) {
+        self.priorities.fill(0);
     }
 }
 
@@ -2193,5 +2231,27 @@ mod tests {
         assert_eq!(torrent_piece_length(&metadata, 0).unwrap(), 4);
         assert_eq!(torrent_piece_length(&metadata, 2).unwrap(), 2);
         assert!(torrent_piece_length(&metadata, 3).is_err());
+    }
+
+    #[test]
+    fn playback_range_overrides_rarest_first_priority() {
+        let metadata = TorrentMetadata {
+            info_hash: [0; 20],
+            name: "x".into(),
+            total_length: 12,
+            piece_length: 4,
+            piece_sha1: vec![[0; 20]; 3],
+            files: vec![TorrentFile {
+                path: vec!["x".into()],
+                length: 12,
+            }],
+        };
+        let mut scheduler = PieceScheduler::new(3, 2).unwrap();
+        scheduler.observe_bitfield(&[0b1110_0000]).unwrap();
+        scheduler
+            .prioritize_byte_range(&metadata, 8, 11, 100)
+            .unwrap();
+        assert_eq!(scheduler.claim_next(&[0b1110_0000]).unwrap(), Some(2));
+        scheduler.clear_priorities();
     }
 }
