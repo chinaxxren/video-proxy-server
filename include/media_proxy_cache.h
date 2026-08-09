@@ -95,6 +95,11 @@ size_t proxy_torrent_status_json(
     uint8_t *buffer,
     size_t capacity
 );
+uint8_t proxy_torrent_set_paused(
+    ProxyServerHandle *handle,
+    int64_t torrent_id,
+    uint8_t paused
+);
 #endif
 
 #ifdef __cplusplus

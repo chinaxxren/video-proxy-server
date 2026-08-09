@@ -32,6 +32,11 @@ enum RqbitCommand {
         torrent_id: usize,
         reply: mpsc::SyncSender<Option<String>>,
     },
+    SetPaused {
+        torrent_id: usize,
+        paused: bool,
+        reply: mpsc::SyncSender<bool>,
+    },
 }
 
 pub struct ProxyServerHandle {
@@ -291,6 +296,47 @@ pub unsafe extern "C" fn proxy_torrent_status_json(
         return 0;
     };
     write_ffi_json(&json, buffer, capacity)
+}
+
+/// Pauses or resumes an initialized torrent. Returns 1 on success.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_set_paused(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    paused: u8,
+) -> u8 {
+    let (Some(handle), Ok(torrent_id)) = (handle.as_ref(), usize::try_from(torrent_id)) else {
+        return 0;
+    };
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return 0;
+    };
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::SetPaused {
+            torrent_id,
+            paused: paused == 1,
+            reply,
+        })
+        .is_err()
+    {
+        return 0;
+    }
+    u8::from(
+        response
+            .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+            .unwrap_or(false),
+    )
 }
 
 #[cfg(feature = "p2p-librqbit")]
@@ -619,6 +665,18 @@ async fn run_rqbit_commands(
                     None => None,
                 };
                 let _ = reply.send(json);
+            }
+            RqbitCommand::SetPaused {
+                torrent_id,
+                paused,
+                reply,
+            } => {
+                let changed = match &backend {
+                    Some(backend) if paused => backend.pause(torrent_id).await.is_ok(),
+                    Some(backend) => backend.resume(torrent_id).await.is_ok(),
+                    None => false,
+                };
+                let _ = reply.send(changed);
             }
         }
     }

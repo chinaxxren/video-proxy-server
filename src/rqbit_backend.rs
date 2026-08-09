@@ -167,6 +167,20 @@ impl RqbitBackend {
         })
     }
 
+    pub async fn pause(&self, torrent_id: usize) -> Result<()> {
+        let handle = self.torrent(torrent_id).await?;
+        self.session.pause(&handle).await.map_err(|error| {
+            ProxyError::Network(format!("pause librqbit torrent failed: {error:#}"))
+        })
+    }
+
+    pub async fn resume(&self, torrent_id: usize) -> Result<()> {
+        let handle = self.torrent(torrent_id).await?;
+        self.session.unpause(&handle).await.map_err(|error| {
+            ProxyError::Network(format!("resume librqbit torrent failed: {error:#}"))
+        })
+    }
+
     pub async fn remove(&self, torrent_id: usize, delete_files: bool) -> Result<()> {
         if !self.torrents.read().await.contains_key(&torrent_id) {
             return Err(ProxyError::Request("unknown librqbit torrent ID".into()));
@@ -217,6 +231,8 @@ mod tests {
 
         assert!(backend.files(404).await.is_err());
         assert!(backend.status(404).await.is_err());
+        assert!(backend.pause(404).await.is_err());
+        assert!(backend.resume(404).await.is_err());
         assert!(backend.remove(404, false).await.is_err());
 
         backend.shutdown();
