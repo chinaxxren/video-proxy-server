@@ -13,6 +13,13 @@ pub struct MagnetRequest {
     pub trackers: Vec<Url>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackerResponse {
+    pub interval_secs: u64,
+    pub min_interval_secs: Option<u64>,
+    pub peers: Vec<std::net::SocketAddr>,
+}
+
 pub fn parse_magnet_uri(input: &str) -> Result<MagnetRequest> {
     let url = Url::parse(input).map_err(|_| ProxyError::Parse("invalid magnet URI".into()))?;
     if url.scheme() != "magnet" || url.host().is_some() || url.path() != "" {
@@ -115,6 +122,175 @@ fn base32_decode(input: &str) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Parses a bencoded HTTP/UDP tracker response without allocating arbitrary
+/// nested structures. Compact IPv4 and IPv6 peer lists are supported.
+pub fn parse_tracker_response(input: &[u8]) -> Result<TrackerResponse> {
+    let mut parser = BencodeParser {
+        input,
+        offset: 0,
+        depth: 0,
+    };
+    let root = parser.value()?;
+    if parser.offset != input.len() {
+        return Err(ProxyError::Parse(
+            "tracker response has trailing bytes".into(),
+        ));
+    }
+    let BValue::Dict(entries) = root else {
+        return Err(ProxyError::Parse(
+            "tracker response must be a dictionary".into(),
+        ));
+    };
+    if let Some(BValue::Bytes(reason)) = entries.get(b"failure reason" as &[u8]) {
+        return Err(ProxyError::Request(
+            String::from_utf8_lossy(reason).into_owned(),
+        ));
+    }
+    let interval_secs = entries
+        .get(b"interval" as &[u8])
+        .and_then(BValue::integer)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ProxyError::Parse("tracker response has invalid interval".into()))?;
+    let min_interval_secs = entries
+        .get(b"min interval" as &[u8])
+        .and_then(BValue::integer)
+        .filter(|value| *value > 0);
+    let mut peers = Vec::new();
+    if let Some(BValue::Bytes(compact)) = entries.get(b"peers" as &[u8]) {
+        if compact.len() % 6 != 0 {
+            return Err(ProxyError::Parse("invalid compact IPv4 peers".into()));
+        }
+        for chunk in compact.chunks_exact(6) {
+            peers.push(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
+                u16::from_be_bytes([chunk[4], chunk[5]]),
+            )));
+        }
+    }
+    if let Some(BValue::Bytes(compact)) = entries.get(b"peers6" as &[u8]) {
+        if compact.len() % 18 != 0 {
+            return Err(ProxyError::Parse("invalid compact IPv6 peers".into()));
+        }
+        for chunk in compact.chunks_exact(18) {
+            let mut address = [0u8; 16];
+            address.copy_from_slice(&chunk[..16]);
+            peers.push(std::net::SocketAddr::from((
+                std::net::Ipv6Addr::from(address),
+                u16::from_be_bytes([chunk[16], chunk[17]]),
+            )));
+        }
+    }
+    Ok(TrackerResponse {
+        interval_secs,
+        min_interval_secs,
+        peers,
+    })
+}
+
+#[derive(Debug)]
+enum BValue {
+    Integer(i64),
+    Bytes(Vec<u8>),
+    Dict(std::collections::BTreeMap<Vec<u8>, BValue>),
+    List,
+}
+
+impl BValue {
+    fn integer(&self) -> Option<u64> {
+        match self {
+            Self::Integer(value) => (*value).try_into().ok(),
+            _ => None,
+        }
+    }
+}
+
+struct BencodeParser<'a> {
+    input: &'a [u8],
+    offset: usize,
+    depth: usize,
+}
+
+impl<'a> BencodeParser<'a> {
+    fn value(&mut self) -> Result<BValue> {
+        if self.depth >= 32 {
+            return Err(ProxyError::Parse(
+                "tracker response nesting is too deep".into(),
+            ));
+        }
+        self.depth += 1;
+        let result = match self.input.get(self.offset).copied() {
+            Some(b'i') => self.integer(),
+            Some(b'l') => self.list(),
+            Some(b'd') => self.dict(),
+            Some(b'0'..=b'9') => self.bytes(),
+            _ => Err(ProxyError::Parse("invalid bencode value".into())),
+        };
+        self.depth -= 1;
+        result
+    }
+
+    fn integer(&mut self) -> Result<BValue> {
+        self.offset += 1;
+        let end = self.input[self.offset..]
+            .iter()
+            .position(|byte| *byte == b'e')
+            .ok_or_else(|| ProxyError::Parse("unterminated bencode integer".into()))?
+            + self.offset;
+        let value = std::str::from_utf8(&self.input[self.offset..end])
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| ProxyError::Parse("invalid bencode integer".into()))?;
+        self.offset = end + 1;
+        Ok(BValue::Integer(value))
+    }
+
+    fn bytes(&mut self) -> Result<BValue> {
+        let colon = self.input[self.offset..]
+            .iter()
+            .position(|byte| *byte == b':')
+            .ok_or_else(|| ProxyError::Parse("invalid bencode byte string".into()))?
+            + self.offset;
+        let length: usize = std::str::from_utf8(&self.input[self.offset..colon])
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| ProxyError::Parse("invalid bencode byte length".into()))?;
+        self.offset = colon + 1;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| ProxyError::Parse("bencode byte string is too large".into()))?;
+        let bytes = self
+            .input
+            .get(self.offset..end)
+            .ok_or_else(|| ProxyError::Parse("truncated bencode byte string".into()))?
+            .to_vec();
+        self.offset = end;
+        Ok(BValue::Bytes(bytes))
+    }
+
+    fn list(&mut self) -> Result<BValue> {
+        self.offset += 1;
+        while self.input.get(self.offset) != Some(&b'e') {
+            self.value()?;
+        }
+        self.offset += 1;
+        Ok(BValue::List)
+    }
+
+    fn dict(&mut self) -> Result<BValue> {
+        self.offset += 1;
+        let mut values = std::collections::BTreeMap::new();
+        while self.input.get(self.offset) != Some(&b'e') {
+            let BValue::Bytes(key) = self.bytes()? else {
+                unreachable!()
+            };
+            values.insert(key, self.value()?);
+        }
+        self.offset += 1;
+        Ok(BValue::Dict(values))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +319,19 @@ mod tests {
         ] {
             assert!(parse_magnet_uri(value).is_err(), "accepted {value}");
         }
+    }
+
+    #[test]
+    fn parses_compact_tracker_peers() {
+        let response =
+            parse_tracker_response(b"d8:intervali30e5:peers6:\x7f\x00\x00\x01\x1a\xe1e").unwrap();
+        assert_eq!(response.interval_secs, 30);
+        assert_eq!(response.peers, vec!["127.0.0.1:6881".parse().unwrap()]);
+    }
+
+    #[test]
+    fn rejects_tracker_failure_and_malformed_peers() {
+        assert!(parse_tracker_response(b"d14:failure reason4:faile").is_err());
+        assert!(parse_tracker_response(b"d8:intervali30e5:peers2:xxe").is_err());
     }
 }
