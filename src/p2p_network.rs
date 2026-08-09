@@ -88,6 +88,131 @@ pub fn encode_ut_metadata_request(extension_id: u8, piece: u32) -> Result<PeerMe
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataExtensionResponse {
+    Data {
+        piece: u32,
+        total_size: usize,
+        bytes: Vec<u8>,
+    },
+    Reject {
+        piece: u32,
+    },
+}
+
+pub fn parse_ut_metadata_response(payload: &[u8]) -> Result<MetadataExtensionResponse> {
+    let mut parser = BencodeParser {
+        input: payload,
+        offset: 0,
+        depth: 0,
+    };
+    let header = parser.value()?;
+    let BValue::Dict(header) = header else {
+        return Err(ProxyError::Parse("ut_metadata header is invalid".into()));
+    };
+    let message_type = header
+        .get(b"msg_type" as &[u8])
+        .and_then(BValue::integer)
+        .ok_or_else(|| ProxyError::Parse("ut_metadata msg_type is missing".into()))?;
+    let piece = header
+        .get(b"piece" as &[u8])
+        .and_then(BValue::integer)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| ProxyError::Parse("ut_metadata piece is invalid".into()))?;
+    match message_type {
+        1 => {
+            let total_size = header
+                .get(b"total_size" as &[u8])
+                .and_then(BValue::integer)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0 && *value <= 4 * 1024 * 1024)
+                .ok_or_else(|| ProxyError::Parse("ut_metadata total_size is invalid".into()))?;
+            let bytes = payload[parser.offset..].to_vec();
+            if bytes.is_empty() || bytes.len() > 16 * 1024 {
+                return Err(ProxyError::Parse(
+                    "ut_metadata piece length is invalid".into(),
+                ));
+            }
+            Ok(MetadataExtensionResponse::Data {
+                piece,
+                total_size,
+                bytes,
+            })
+        }
+        2 if parser.offset == payload.len() => Ok(MetadataExtensionResponse::Reject { piece }),
+        _ => Err(ProxyError::Parse("unsupported ut_metadata response".into())),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MetadataAssembler {
+    info_hash: [u8; 20],
+    total_size: usize,
+    pieces: Vec<Option<Vec<u8>>>,
+}
+
+impl MetadataAssembler {
+    pub fn new(info_hash: [u8; 20], total_size: usize) -> Result<Self> {
+        if total_size == 0 || total_size > 4 * 1024 * 1024 {
+            return Err(ProxyError::Request("invalid metadata size".into()));
+        }
+        Ok(Self {
+            info_hash,
+            total_size,
+            pieces: vec![None; total_size.div_ceil(16 * 1024)],
+        })
+    }
+
+    pub fn insert(&mut self, response: MetadataExtensionResponse) -> Result<bool> {
+        let MetadataExtensionResponse::Data {
+            piece,
+            total_size,
+            bytes,
+        } = response
+        else {
+            return Err(ProxyError::Request("metadata piece was rejected".into()));
+        };
+        if total_size != self.total_size {
+            return Err(ProxyError::Request("metadata total size changed".into()));
+        }
+        let index = piece as usize;
+        let expected = if index + 1 == self.pieces.len() {
+            self.total_size - index * 16 * 1024
+        } else {
+            16 * 1024
+        };
+        let slot = self
+            .pieces
+            .get_mut(index)
+            .ok_or_else(|| ProxyError::Request("metadata piece index out of range".into()))?;
+        if bytes.len() != expected {
+            return Err(ProxyError::Request(
+                "metadata piece has wrong length".into(),
+            ));
+        }
+        if let Some(existing) = slot {
+            if existing != &bytes {
+                return Err(ProxyError::Request("metadata piece changed".into()));
+            }
+        } else {
+            *slot = Some(bytes);
+        }
+        Ok(self.pieces.iter().all(Option::is_some))
+    }
+
+    pub fn finish(self) -> Result<Vec<u8>> {
+        if self.pieces.iter().any(Option::is_none) {
+            return Err(ProxyError::Request("metadata is incomplete".into()));
+        }
+        let metadata: Vec<u8> = self.pieces.into_iter().flatten().flatten().collect();
+        let digest: [u8; 20] = Sha1::digest(&metadata).into();
+        if digest != self.info_hash {
+            return Err(ProxyError::Request("metadata InfoHash mismatch".into()));
+        }
+        Ok(metadata)
+    }
+}
+
 pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
     if input.is_empty() || input.len() > 4 * 1024 * 1024 {
         return Err(ProxyError::Parse("invalid torrent metadata size".into()));
@@ -1465,6 +1590,19 @@ mod tests {
             parse_peer_message(&encode_peer_message(&message).unwrap()).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn parses_and_assembles_metadata_extension_data() {
+        let metadata = b"d4:name4:test6:lengthi1ee".to_vec();
+        let hash: [u8; 20] = Sha1::digest(&metadata).into();
+        let mut payload =
+            format!("d8:msg_typei1e5:piecei0e10:total_sizei{}ee", metadata.len()).into_bytes();
+        payload.extend_from_slice(&metadata);
+        let response = parse_ut_metadata_response(&payload).unwrap();
+        let mut assembler = MetadataAssembler::new(hash, metadata.len()).unwrap();
+        assert!(assembler.insert(response).unwrap());
+        assert_eq!(assembler.finish().unwrap(), metadata);
     }
 
     #[test]
