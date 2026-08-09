@@ -38,7 +38,7 @@ AVPlayer / Media3 / HarmonyOS AVPlayer
 
 原生压缩包会在 `adapter/` 下包含当前平台模板。Swift 直接封装 C ABI；Kotlin 由 Rust
 `android-jni` feature 提供实现，鸿蒙声明由 Rust `harmony-napi` feature 提供实现。
-Android AAR 和 HarmonyOS HAR 仍待实际验证。
+Android AAR 仍待运行时验证。鸿蒙 HAR 已使用真实 Rust OHOS 库完成组装验证，设备运行时验证仍待完成。
 
 建议支持的架构：
 
@@ -233,16 +233,16 @@ await avPlayer.setUrl(playbackUrl)
 - 验证 debug/release 构建中的 HAR 加载与符号可见性。
 
 `scripts/package-harmony-har.sh` 会暂存两个原生 ABI，启用 ArkTS type check 运行 Hvigor，
-构建 `MediaProxyCache.har`，并校验声明文件和原生库条目。当前已使用 DevEco Hvigor 6.24.3
-和 OHOS ELF stub 验证结构；Rust OHOS 原生库仍需 CI 实际验证。
+构建 `MediaProxyCache.har`，并校验声明文件和原生库条目。ARM64、ARMv7 Rust 库及最终
+HAR 已使用 Rust 1.94、DevEco Hvigor 6.24.3 和 OpenHarmony API 24 完成构建验证。
 
 ### 鸿蒙 AVPlayer POC
 
 `examples/harmony-player-poc` 中的应用使用 Host 沙箱缓存目录启动 N-API Adapter，
 通过 `XComponent` Surface 渲染视频，并向 `AVPlayer` 传入源站地址和稳定缓存身份请求头。
-暂存真实 OHOS 原生库后可运行 `scripts/build-harmony-player-poc.sh`。该工程已在 macOS
-使用 DevEco Hvigor 6.24.3 和 OpenHarmony API 24 通过 ArkTS 类型检查并组装 unsigned
-HAP。验证时没有连接鸿蒙设备或模拟器，暂存 ELF 也是结构验证 stub，因此原生库加载、
+运行 `scripts/build-harmony-player-poc.sh` 会交叉编译两套真实 OHOS 原生库、打包 HAR
+并组装 unsigned HAP。该工程已在 macOS 使用 DevEco Hvigor 6.24.3 和 OpenHarmony
+API 24 通过 ArkTS 类型检查及组装。验证时没有连接鸿蒙设备或模拟器，因此原生库加载、
 播放、Range、Seek、HLS 和缓存行为仍属于真机验收项。
 
 ## 安全要求

@@ -27,8 +27,8 @@ if [[ "$P2P_ENABLED" == "1" ]]; then
   CARGO_FEATURES+=(p2p)
 fi
 if [[ "$TEST_ALLOW_PRIVATE_UPSTREAM" == "1" ]]; then
-  [[ "${PLATFORM:-all}" == "ios" || "${PLATFORM:-all}" == "android" ]] || {
-    echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit iOS or Android test builds" >&2
+  [[ "${PLATFORM:-all}" == "ios" || "${PLATFORM:-all}" == "android" || "${PLATFORM:-all}" == "harmony" ]] || {
+    echo "TEST_ALLOW_PRIVATE_UPSTREAM is restricted to explicit mobile POC builds" >&2
     exit 2
   }
   CARGO_FEATURES+=(allow-private-upstream)
@@ -115,13 +115,30 @@ build_target() {
   fi
   mkdir -p "$OUT_DIR/$platform/$target"
   local copied=0
-  for artifact in \
-    "target/$target/$PROFILE/libproxy_server.a" \
-    "target/$target/$PROFILE/libproxy_server.dylib" \
-    "target/$target/$PROFILE/libproxy_server.so" \
-    "target/$target/$PROFILE/proxy_server.dll" \
-    "target/$target/$PROFILE/proxy_server.dll.a" \
-    "target/$target/$PROFILE/proxy_server.lib"; do
+  local artifacts=()
+  case "$crate_type" in
+    staticlib)
+      artifacts=("target/$target/$PROFILE/libproxy_server.a")
+      ;;
+    cdylib)
+      artifacts=(
+        "target/$target/$PROFILE/libproxy_server.dylib"
+        "target/$target/$PROFILE/libproxy_server.so"
+        "target/$target/$PROFILE/proxy_server.dll"
+      )
+      ;;
+    *)
+      artifacts=(
+        "target/$target/$PROFILE/libproxy_server.a"
+        "target/$target/$PROFILE/libproxy_server.dylib"
+        "target/$target/$PROFILE/libproxy_server.so"
+        "target/$target/$PROFILE/proxy_server.dll"
+        "target/$target/$PROFILE/proxy_server.dll.a"
+        "target/$target/$PROFILE/proxy_server.lib"
+      )
+      ;;
+  esac
+  for artifact in "${artifacts[@]}"; do
     if [[ -f "$artifact" ]]; then
       verify_native_symbols "$artifact" "$platform"
       cp "$artifact" "$OUT_DIR/$platform/$target/"

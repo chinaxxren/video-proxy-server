@@ -39,7 +39,8 @@ The same Rust source is compiled separately for each CPU ABI. A single binary is
 Native archives include the current platform templates under `adapter/`.
 Swift directly wraps the C ABI; Kotlin is backed by the Rust `android-jni`
 feature, and the HarmonyOS declaration is backed by the Rust `harmony-napi`
-feature. Android AAR and HarmonyOS HAR validation remain pending.
+feature. Android AAR runtime validation remains pending. HarmonyOS HAR assembly
+with real Rust OHOS libraries is validated, while device runtime validation is pending.
 
 Expected architecture targets:
 
@@ -238,20 +239,20 @@ HarmonyOS work items:
 
 `scripts/package-harmony-har.sh` stages both native ABIs, runs Hvigor with
 ArkTS type checking, builds `MediaProxyCache.har`, and verifies its declaration
-and native library entries. The structure has been validated with DevEco Hvigor
-6.24.3 and OHOS ELF stubs; the Rust OHOS libraries still require CI validation.
+and native library entries. ARM64 and ARMv7 Rust libraries and the resulting HAR
+have been built with Rust 1.94, DevEco Hvigor 6.24.3, and OpenHarmony API 24.
 
 ### HarmonyOS AVPlayer POC
 
 The application in `examples/harmony-player-poc` starts the N-API adapter with a
 Host sandbox cache directory, renders video through an `XComponent` surface, and
 passes the source and stable cache identity headers to `AVPlayer`. Run
-`scripts/build-harmony-player-poc.sh` after staging real OHOS native libraries.
-On macOS it has passed ArkTS type checking and unsigned HAP assembly with DevEco
-Hvigor 6.24.3 and OpenHarmony API 24. No HarmonyOS device or emulator was
-connected during this validation, and the staged ELF files were structural
-stubs, so native loading, playback, Range, seek, HLS, and cache behavior remain
-real-device acceptance items.
+`scripts/build-harmony-player-poc.sh`; it cross-compiles both real OHOS native
+libraries, packages the HAR, and assembles the unsigned HAP. On macOS it has
+passed ArkTS type checking and assembly with DevEco Hvigor 6.24.3 and
+OpenHarmony API 24. No HarmonyOS device or emulator was connected during this
+validation, so native loading, playback, Range, seek, HLS, and cache behavior
+remain real-device acceptance items.
 
 ## Security Requirements
 
