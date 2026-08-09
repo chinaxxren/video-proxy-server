@@ -196,7 +196,9 @@ native libraries on GitHub-hosted runners and publishes them as Release assets
 for tagged pushes. HarmonyOS builds are opt-in: set repository variable
 `ENABLE_HARMONY_BUILD=true`, secret `OHOS_NDK_URL` to a downloadable OHOS NDK
 archive, and `OHOS_HVIGOR_URL` to a downloadable archive containing executable
-`hvigorw`. Without that configuration the HarmonyOS job is skipped.
+`hvigorw`. Set `OHOS_NDK_SHA256` and `OHOS_HVIGOR_SHA256` to the lowercase or
+uppercase SHA-256 digest of the corresponding immutable archive. Without that
+configuration the HarmonyOS job is skipped or fails before extracting tools.
 
 On macOS, `./scripts/test-ffi-macos.sh` builds a small C program against the
 release dylib and exercises the complete create/start/stop/destroy lifecycle.

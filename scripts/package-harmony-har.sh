@@ -40,6 +40,37 @@ for required in \
     exit 1
   }
 done
+llvm_bin="${OHOS_NDK_HOME:-}/native/llvm/bin"
+readelf="${LLVM_READELF:-$llvm_bin/llvm-readelf}"
+objcopy="${LLVM_OBJCOPY:-$llvm_bin/llvm-objcopy}"
+test -x "$readelf" && test -x "$objcopy" || {
+  echo "Set OHOS_NDK_HOME or LLVM_READELF/LLVM_OBJCOPY for HAR verification" >&2
+  exit 1
+}
+verify_dir="$(mktemp -d)"
+trap 'rm -rf "$verify_dir"' EXIT
+verify_packaged_abi() {
+  local abi="$1" target="$2" machine="$3" packaged input
+  packaged="$verify_dir/$abi.so"
+  input="$INPUT_DIR/$target/libproxy_server.so"
+  tar -xOzf "$har" "package/libs/$abi/libproxy_server.so" > "$packaged"
+  "$readelf" -h "$packaged" | grep -Fq "Machine:                           $machine" || {
+    echo "HarmonyOS HAR contains the wrong machine type for $abi" >&2
+    exit 1
+  }
+  "$readelf" --dyn-syms "$packaged" | grep -Fq 'napi_register_module_v1' || {
+    echo "HarmonyOS HAR is missing its N-API entry point for $abi" >&2
+    exit 1
+  }
+  "$objcopy" --dump-section ".text=$verify_dir/$abi-input.text" "$input"
+  "$objcopy" --dump-section ".text=$verify_dir/$abi-packaged.text" "$packaged"
+  cmp -s "$verify_dir/$abi-input.text" "$verify_dir/$abi-packaged.text" || {
+    echo "HarmonyOS HAR contains stale or modified code for $abi" >&2
+    exit 1
+  }
+}
+verify_packaged_abi arm64-v8a aarch64-unknown-linux-ohos AArch64
+verify_packaged_abi armeabi-v7a armv7-unknown-linux-ohos ARM
 mkdir -p "$OUTPUT_DIR"
 cp "$har" "$OUTPUT_DIR/MediaProxyCache.har"
 echo "$OUTPUT_DIR/MediaProxyCache.har"

@@ -128,7 +128,9 @@ macOS/Linux 可运行 `shasum -a 256 -c <归档>.sha256` 校验，Windows 可运
 独立的 `.github/workflows/mobile.yml` 会在 GitHub runner 上构建 iOS 和 Android
 原生库，并在 tag 推送时作为 Release 资产发布。鸿蒙构建默认不启用；需要设置仓库变量
 `ENABLE_HARMONY_BUILD=true`，通过 Secret `OHOS_NDK_URL` 提供可下载的 OHOS NDK，
-并通过 `OHOS_HVIGOR_URL` 提供包含可执行 `hvigorw` 的工具归档。未配置时鸿蒙任务会跳过。
+并通过 `OHOS_HVIGOR_URL` 提供包含可执行 `hvigorw` 的工具归档。还必须将两个不可变归档
+各自的 SHA-256 配置为 `OHOS_NDK_SHA256` 和 `OHOS_HVIGOR_SHA256` Secret。未启用时
+鸿蒙任务会跳过；缺少 URL 或摘要时会在解压工具前失败。
 
 在 macOS 上运行 `./scripts/test-ffi-macos.sh`，会构建一个链接 Release dylib 的小型
 C 程序，并真实执行 create/start/stop/destroy 完整生命周期。

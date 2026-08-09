@@ -103,15 +103,21 @@ jobs:
       - name: Install OHOS NDK toolchain
         env:
           OHOS_NDK_URL: ${{ secrets.OHOS_NDK_URL }}
+          OHOS_NDK_SHA256: ${{ secrets.OHOS_NDK_SHA256 }}
           OHOS_HVIGOR_URL: ${{ secrets.OHOS_HVIGOR_URL }}
+          OHOS_HVIGOR_SHA256: ${{ secrets.OHOS_HVIGOR_SHA256 }}
         run: |
           test -n "$OHOS_NDK_URL" || { echo "Configure repository secret OHOS_NDK_URL" >&2; exit 1; }
+          test -n "$OHOS_NDK_SHA256" || { echo "Configure repository secret OHOS_NDK_SHA256" >&2; exit 1; }
           test -n "$OHOS_HVIGOR_URL" || { echo "Configure repository secret OHOS_HVIGOR_URL" >&2; exit 1; }
+          test -n "$OHOS_HVIGOR_SHA256" || { echo "Configure repository secret OHOS_HVIGOR_SHA256" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/ohos-ndk"
           curl --fail --location "$OHOS_NDK_URL" --output "$RUNNER_TEMP/ohos-ndk.tar.gz"
+          echo "$OHOS_NDK_SHA256  $RUNNER_TEMP/ohos-ndk.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/ohos-ndk.tar.gz" -C "$RUNNER_TEMP/ohos-ndk" --strip-components=1
           mkdir -p "$RUNNER_TEMP/ohos-hvigor"
           curl --fail --location "$OHOS_HVIGOR_URL" --output "$RUNNER_TEMP/ohos-hvigor.tar.gz"
+          echo "$OHOS_HVIGOR_SHA256  $RUNNER_TEMP/ohos-hvigor.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/ohos-hvigor.tar.gz" -C "$RUNNER_TEMP/ohos-hvigor" --strip-components=1
           HVIGORW_PATH="$(find "$RUNNER_TEMP/ohos-hvigor" -type f -name hvigorw -print -quit)"
           test -n "$HVIGORW_PATH" && test -x "$HVIGORW_PATH"
@@ -122,9 +128,16 @@ jobs:
           LLVM_BIN="$OHOS_NDK_HOME/native/llvm/bin"
           AARCH64_CLANG="$(find "$LLVM_BIN" -maxdepth 1 -type f \( -name aarch64-unknown-linux-ohos-clang -o -name aarch64-linux-ohos-clang \) -print -quit)"
           ARMV7_CLANG="$(find "$LLVM_BIN" -maxdepth 1 -type f -name armv7-unknown-linux-ohos-clang -print -quit)"
-          test -x "$AARCH64_CLANG" && test -x "$ARMV7_CLANG"
+          LLVM_AR="$LLVM_BIN/llvm-ar"
+          LLVM_NM="$LLVM_BIN/llvm-nm"
+          test -x "$AARCH64_CLANG" && test -x "$ARMV7_CLANG" && test -x "$LLVM_AR" && test -x "$LLVM_NM"
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$AARCH64_CLANG"
           export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_OHOS_LINKER="$ARMV7_CLANG"
+          export CC_aarch64_unknown_linux_ohos="$AARCH64_CLANG"
+          export CC_armv7_unknown_linux_ohos="$ARMV7_CLANG"
+          export AR_aarch64_unknown_linux_ohos="$LLVM_AR"
+          export AR_armv7_unknown_linux_ohos="$LLVM_AR"
+          export NM="$LLVM_NM"
           PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
       - name: Package HarmonyOS HAR
         run: ./scripts/package-harmony-har.sh dist/mobile/harmony dist/mobile/harmony
