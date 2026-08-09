@@ -1497,6 +1497,47 @@ impl PeerConnection {
         }
         Ok(metadata)
     }
+
+    #[cfg(feature = "p2p-upload")]
+    pub async fn serve_upload_requests(
+        &mut self,
+        upload: &mut UploadSession,
+        metadata: &TorrentMetadata,
+        store: &TorrentPieceStore,
+        max_requests: usize,
+    ) -> Result<usize> {
+        if max_requests == 0 || max_requests > 100_000 {
+            return Err(ProxyError::Request("invalid upload request limit".into()));
+        }
+        self.send(&PeerMessage::Unchoke).await?;
+        let mut served = 0usize;
+        while served < max_requests {
+            match self.receive().await? {
+                PeerMessage::Request {
+                    index,
+                    begin,
+                    length,
+                } => {
+                    let block = upload.serve_block(metadata, store, index, begin, length)?;
+                    self.send(&PeerMessage::Piece {
+                        index,
+                        begin,
+                        block,
+                    })
+                    .await?;
+                    served += 1;
+                }
+                PeerMessage::Cancel { .. } | PeerMessage::KeepAlive | PeerMessage::Interested => {}
+                PeerMessage::NotInterested => break,
+                _ => {
+                    return Err(ProxyError::Request(
+                        "unexpected message during upload session".into(),
+                    ))
+                }
+            }
+        }
+        Ok(served)
+    }
 }
 
 const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
