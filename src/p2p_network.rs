@@ -293,6 +293,71 @@ pub fn parse_peer_message(input: &[u8]) -> Result<PeerMessage> {
     }
 }
 
+pub fn encode_peer_message(message: &PeerMessage) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    match message {
+        PeerMessage::KeepAlive => return Ok(vec![0, 0, 0, 0]),
+        PeerMessage::Choke => payload.push(0),
+        PeerMessage::Unchoke => payload.push(1),
+        PeerMessage::Interested => payload.push(2),
+        PeerMessage::NotInterested => payload.push(3),
+        PeerMessage::Have(index) => {
+            payload.push(4);
+            payload.extend_from_slice(&index.to_be_bytes());
+        }
+        PeerMessage::Bitfield(bits) => {
+            if bits.len() > MAX_PEER_MESSAGE_BYTES - 1 {
+                return Err(ProxyError::Request("peer bitfield is too large".into()));
+            }
+            payload.push(5);
+            payload.extend_from_slice(bits);
+        }
+        PeerMessage::Request {
+            index,
+            begin,
+            length,
+        } => {
+            payload.push(6);
+            payload.extend_from_slice(&index.to_be_bytes());
+            payload.extend_from_slice(&begin.to_be_bytes());
+            payload.extend_from_slice(&length.to_be_bytes());
+        }
+        PeerMessage::Piece {
+            index,
+            begin,
+            block,
+        } => {
+            if block.len() > MAX_PEER_MESSAGE_BYTES - 9 {
+                return Err(ProxyError::Request("peer block is too large".into()));
+            }
+            payload.push(7);
+            payload.extend_from_slice(&index.to_be_bytes());
+            payload.extend_from_slice(&begin.to_be_bytes());
+            payload.extend_from_slice(block);
+        }
+        PeerMessage::Cancel {
+            index,
+            begin,
+            length,
+        } => {
+            payload.push(8);
+            payload.extend_from_slice(&index.to_be_bytes());
+            payload.extend_from_slice(&begin.to_be_bytes());
+            payload.extend_from_slice(&length.to_be_bytes());
+        }
+        PeerMessage::Port(port) => {
+            payload.push(9);
+            payload.extend_from_slice(&port.to_be_bytes());
+        }
+    }
+    let length = u32::try_from(payload.len())
+        .map_err(|_| ProxyError::Request("peer message is too large".into()))?;
+    let mut output = Vec::with_capacity(payload.len() + 4);
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(&payload);
+    Ok(output)
+}
+
 pub fn parse_magnet_uri(input: &str) -> Result<MagnetRequest> {
     let url = Url::parse(input).map_err(|_| ProxyError::Parse("invalid magnet URI".into()))?;
     if url.scheme() != "magnet" || url.host().is_some() || url.path() != "" {
@@ -626,6 +691,15 @@ mod tests {
         assert_eq!(
             parse_peer_message(b"\0\0\0\x01\x01").unwrap(),
             PeerMessage::Unchoke
+        );
+        let piece = PeerMessage::Piece {
+            index: 1,
+            begin: 2,
+            block: b"abc".to_vec(),
+        };
+        assert_eq!(
+            parse_peer_message(&encode_peer_message(&piece).unwrap()).unwrap(),
+            piece
         );
         assert_eq!(
             parse_peer_message(b"\0\0\0\x0d\x06\0\0\0\x01\0\0\0\x02\0\0\0\x03").unwrap(),
