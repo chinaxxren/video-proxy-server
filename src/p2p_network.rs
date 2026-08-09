@@ -40,6 +40,42 @@ pub const UDP_TRACKER_PROTOCOL_ID: u64 = 0x0000_0417_2710_1980;
 pub const UDP_ACTION_CONNECT: u32 = 0;
 pub const UDP_ACTION_ANNOUNCE: u32 = 1;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtNode {
+    pub id: [u8; 20],
+    pub address: std::net::SocketAddr,
+}
+
+pub fn encode_dht_ping(transaction: &[u8]) -> Result<Vec<u8>> {
+    if transaction.is_empty() || transaction.len() > 32 {
+        return Err(ProxyError::Parse("invalid DHT transaction ID".into()));
+    }
+    let mut output = b"d1:ad2:id20:".to_vec();
+    output.extend_from_slice(&[0; 20]);
+    output.extend_from_slice(b"1:q4:ping1:t");
+    output.extend_from_slice(transaction.len().to_string().as_bytes());
+    output.push(b':');
+    output.extend_from_slice(transaction);
+    output.extend_from_slice(b"1:y1:qe");
+    Ok(output)
+}
+
+pub fn parse_dht_compact_nodes(input: &[u8]) -> Result<Vec<DhtNode>> {
+    if input.len() % 26 != 0 {
+        return Err(ProxyError::Parse("invalid compact DHT node list".into()));
+    }
+    let mut nodes = Vec::with_capacity(input.len() / 26);
+    for chunk in input.chunks_exact(26) {
+        let id = chunk[..20].try_into().unwrap();
+        let address = std::net::SocketAddr::from((
+            std::net::Ipv4Addr::new(chunk[20], chunk[21], chunk[22], chunk[23]),
+            u16::from_be_bytes([chunk[24], chunk[25]]),
+        ));
+        nodes.push(DhtNode { id, address });
+    }
+    Ok(nodes)
+}
+
 pub fn encode_udp_connect_request(transaction_id: u32) -> [u8; 16] {
     let mut output = [0u8; 16];
     output[..8].copy_from_slice(&UDP_TRACKER_PROTOCOL_ID.to_be_bytes());
@@ -776,5 +812,18 @@ mod tests {
             1
         );
         assert_eq!(&announce[96..98], &6881u16.to_be_bytes());
+    }
+
+    #[test]
+    fn builds_dht_ping_and_parses_compact_nodes() {
+        let ping = encode_dht_ping(b"aa").unwrap();
+        assert!(ping.starts_with(b"d1:ad2:id20:"));
+        assert!(ping.ends_with(b"1:q4:ping1:t2:aa1:y1:qe"));
+        let mut compact = vec![7u8; 20];
+        compact.extend_from_slice(&[127, 0, 0, 1, 0x1a, 0xe1]);
+        let nodes = parse_dht_compact_nodes(&compact).unwrap();
+        assert_eq!(nodes[0].id, [7; 20]);
+        assert_eq!(nodes[0].address, "127.0.0.1:6881".parse().unwrap());
+        assert!(parse_dht_compact_nodes(&[0; 25]).is_err());
     }
 }
