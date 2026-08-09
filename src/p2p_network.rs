@@ -29,6 +29,65 @@ pub struct TorrentMetadata {
     pub piece_sha1: Vec<[u8; 20]>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtendedHandshake {
+    pub ut_metadata_id: u8,
+    pub metadata_size: usize,
+}
+
+pub fn parse_extended_handshake(payload: &[u8]) -> Result<ExtendedHandshake> {
+    let mut parser = BencodeParser {
+        input: payload,
+        offset: 0,
+        depth: 0,
+    };
+    let root = parser.value()?;
+    if parser.offset != payload.len() {
+        return Err(ProxyError::Parse(
+            "extended handshake has trailing bytes".into(),
+        ));
+    }
+    let BValue::Dict(root) = root else {
+        return Err(ProxyError::Parse(
+            "extended handshake must be a dictionary".into(),
+        ));
+    };
+    let metadata_size = root
+        .get(b"metadata_size" as &[u8])
+        .and_then(BValue::integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0 && *value <= 4 * 1024 * 1024)
+        .ok_or_else(|| ProxyError::Parse("invalid metadata_size".into()))?;
+    let BValue::Dict(extensions) = root
+        .get(b"m" as &[u8])
+        .ok_or_else(|| ProxyError::Parse("extended handshake is missing m".into()))?
+    else {
+        return Err(ProxyError::Parse("extended handshake m is invalid".into()));
+    };
+    let ut_metadata_id = extensions
+        .get(b"ut_metadata" as &[u8])
+        .and_then(BValue::integer)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or_else(|| ProxyError::Parse("extended handshake lacks ut_metadata".into()))?;
+    Ok(ExtendedHandshake {
+        ut_metadata_id,
+        metadata_size,
+    })
+}
+
+pub fn encode_ut_metadata_request(extension_id: u8, piece: u32) -> Result<PeerMessage> {
+    if extension_id == 0 {
+        return Err(ProxyError::Request(
+            "invalid ut_metadata extension ID".into(),
+        ));
+    }
+    Ok(PeerMessage::Extended {
+        extension_id,
+        payload: format!("d8:msg_typei0e5:piecei{piece}ee").into_bytes(),
+    })
+}
+
 pub fn parse_torrent_metadata(input: &[u8]) -> Result<TorrentMetadata> {
     if input.is_empty() || input.len() > 4 * 1024 * 1024 {
         return Err(ProxyError::Parse("invalid torrent metadata size".into()));
@@ -649,6 +708,10 @@ pub enum PeerMessage {
         length: u32,
     },
     Port(u16),
+    Extended {
+        extension_id: u8,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Debug)]
@@ -1000,6 +1063,10 @@ pub fn parse_peer_message(input: &[u8]) -> Result<PeerMessage> {
         9 if body.len() == 2 => Ok(PeerMessage::Port(u16::from_be_bytes(
             body.try_into().unwrap(),
         ))),
+        20 if !body.is_empty() => Ok(PeerMessage::Extended {
+            extension_id: body[0],
+            payload: body[1..].to_vec(),
+        }),
         _ => Err(ProxyError::Parse(
             "unsupported or malformed peer message".into(),
         )),
@@ -1061,6 +1128,19 @@ pub fn encode_peer_message(message: &PeerMessage) -> Result<Vec<u8>> {
         PeerMessage::Port(port) => {
             payload.push(9);
             payload.extend_from_slice(&port.to_be_bytes());
+        }
+        PeerMessage::Extended {
+            extension_id,
+            payload: extension_payload,
+        } => {
+            if extension_payload.len() > MAX_PEER_MESSAGE_BYTES - 2 {
+                return Err(ProxyError::Request(
+                    "extended peer message is too large".into(),
+                ));
+            }
+            payload.push(20);
+            payload.push(*extension_id);
+            payload.extend_from_slice(extension_payload);
         }
     }
     let length = u32::try_from(payload.len())
@@ -1372,6 +1452,19 @@ mod tests {
         assert_eq!(metadata.total_length, 3);
         assert_eq!(metadata.piece_sha1, vec![[7; 20]]);
         assert!(parse_torrent_metadata(b"d4:info3:bade").is_err());
+    }
+
+    #[test]
+    fn parses_extended_handshake_and_metadata_request() {
+        let handshake =
+            parse_extended_handshake(b"d1:md11:ut_metadatai3ee13:metadata_sizei32768ee").unwrap();
+        assert_eq!(handshake.ut_metadata_id, 3);
+        assert_eq!(handshake.metadata_size, 32768);
+        let message = encode_ut_metadata_request(3, 1).unwrap();
+        assert_eq!(
+            parse_peer_message(&encode_peer_message(&message).unwrap()).unwrap(),
+            message
+        );
     }
 
     #[test]
