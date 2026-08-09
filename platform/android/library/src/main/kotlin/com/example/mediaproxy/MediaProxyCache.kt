@@ -69,6 +69,31 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         return "http://127.0.0.1:$boundPort/p2p/$sourceId"
     }
 
+    /** Requires a native artifact built with the p2p-librqbit feature. */
+    @Synchronized
+    fun addAuthorizedTorrent(magnetUri: String): Long {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        check(boundPort != 0) { "MediaProxyCache is not running" }
+        require(magnetUri.startsWith("magnet:?"))
+        return nativeAddAuthorizedTorrent(handle, magnetUri).also {
+            check(it >= 0L) { "torrent registration failed" }
+        }
+    }
+
+    @Synchronized
+    fun removeTorrent(torrentId: Long, deleteFiles: Boolean = false): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(torrentId >= 0L)
+        return nativeRemoveTorrent(handle, torrentId, deleteFiles)
+    }
+
+    @Synchronized
+    fun torrentPlaybackUrl(torrentId: Long, fileId: Long): String {
+        require(torrentId >= 0L && fileId >= 0L)
+        check(boundPort != 0) { "MediaProxyCache is not running" }
+        return "http://127.0.0.1:$boundPort/torrent/$torrentId/$fileId"
+    }
+
     @Synchronized override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -87,4 +112,10 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     ): Long
     private external fun nativeVerifyP2PSource(handle: Long, sourceId: Long): Boolean
     private external fun nativeRemoveP2PSource(handle: Long, sourceId: Long): Boolean
+    private external fun nativeAddAuthorizedTorrent(handle: Long, magnetUri: String): Long
+    private external fun nativeRemoveTorrent(
+        handle: Long,
+        torrentId: Long,
+        deleteFiles: Boolean,
+    ): Boolean
 }

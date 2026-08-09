@@ -8,6 +8,8 @@ use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
     ProxyServerHandle,
 };
+#[cfg(feature = "p2p-librqbit")]
+use crate::ffi::{proxy_torrent_add_authorized, proxy_torrent_remove};
 use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned};
@@ -226,6 +228,47 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveP
             })
             .unwrap_or(false);
         Ok(removed)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeAddAuthorizedTorrent<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    magnet_uri: JString<'local>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let magnet_uri = magnet_uri.try_to_string(env)?;
+        let Ok(magnet_uri) = CString::new(magnet_uri) else {
+            return Ok(-1);
+        };
+        Ok(with_handle(handle, |handle| unsafe {
+            proxy_torrent_add_authorized(handle, magnet_uri.as_ptr(), 1)
+        })
+        .unwrap_or(-1))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent<'local>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+    torrent_id: jlong,
+    delete_files: jboolean,
+) -> jboolean {
+    env.with_env(|_| -> jni::errors::Result<jboolean> {
+        Ok(with_handle(handle, |handle| unsafe {
+            proxy_torrent_remove(handle, torrent_id, u8::from(delete_files)) != 0
+        })
+        .unwrap_or(false))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

@@ -91,6 +91,38 @@ public final class MediaProxyCache: @unchecked Sendable {
     }
 #endif
 
+#if MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT
+    public func addAuthorizedTorrent(magnetURI: String) throws -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, boundPort != 0, magnetURI.hasPrefix("magnet:?") else {
+            throw NSError(domain: "MediaProxyCache", code: 6)
+        }
+        let torrentID = magnetURI.withCString {
+            proxy_torrent_add_authorized(handle, $0, 1)
+        }
+        guard torrentID >= 0 else { throw NSError(domain: "MediaProxyCache", code: 7) }
+        return torrentID
+    }
+
+    public func removeTorrent(_ torrentID: Int64, deleteFiles: Bool = false) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, torrentID >= 0 else { return false }
+        return proxy_torrent_remove(handle, torrentID, deleteFiles ? 1 : 0) == 1
+    }
+
+    public func torrentPlaybackURL(torrentID: Int64, fileID: Int) throws -> URL {
+        lock.lock()
+        defer { lock.unlock() }
+        guard torrentID >= 0, fileID >= 0, boundPort != 0,
+              let url = URL(string: "http://127.0.0.1:\(boundPort)/torrent/\(torrentID)/\(fileID)") else {
+            throw NSError(domain: "MediaProxyCache", code: 8)
+        }
+        return url
+    }
+#endif
+
     public func close() {
         lock.lock()
         defer { lock.unlock() }
