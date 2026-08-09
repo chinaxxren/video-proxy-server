@@ -20,6 +20,114 @@ pub struct TrackerResponse {
     pub peers: Vec<std::net::SocketAddr>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BitTorrentHandshake {
+    pub reserved: [u8; 8],
+    pub info_hash: [u8; 20],
+    pub peer_id: [u8; 20],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerMessage {
+    KeepAlive,
+    Choke,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have(u32),
+    Bitfield(Vec<u8>),
+    Request {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Piece {
+        index: u32,
+        begin: u32,
+        block: Vec<u8>,
+    },
+    Cancel {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Port(u16),
+}
+
+const MAX_PEER_MESSAGE_BYTES: usize = 1024 * 1024;
+
+pub fn encode_handshake(handshake: &BitTorrentHandshake) -> [u8; 68] {
+    let mut output = [0u8; 68];
+    output[0] = 19;
+    output[1..20].copy_from_slice(b"BitTorrent protocol");
+    output[20..28].copy_from_slice(&handshake.reserved);
+    output[28..48].copy_from_slice(&handshake.info_hash);
+    output[48..68].copy_from_slice(&handshake.peer_id);
+    output
+}
+
+pub fn parse_handshake(input: &[u8]) -> Result<BitTorrentHandshake> {
+    if input.len() != 68 || input[0] != 19 || &input[1..20] != b"BitTorrent protocol" {
+        return Err(ProxyError::Parse("invalid BitTorrent handshake".into()));
+    }
+    Ok(BitTorrentHandshake {
+        reserved: input[20..28].try_into().unwrap(),
+        info_hash: input[28..48].try_into().unwrap(),
+        peer_id: input[48..68].try_into().unwrap(),
+    })
+}
+
+pub fn parse_peer_message(input: &[u8]) -> Result<PeerMessage> {
+    if input.len() < 4 {
+        return Err(ProxyError::Parse("truncated peer message length".into()));
+    }
+    let length = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
+    if length > MAX_PEER_MESSAGE_BYTES || input.len() != length + 4 {
+        return Err(ProxyError::Parse("invalid peer message length".into()));
+    }
+    if length == 0 {
+        return Ok(PeerMessage::KeepAlive);
+    }
+    let payload = &input[4..];
+    let id = payload[0];
+    let body = &payload[1..];
+    let u32_at = |bytes: &[u8]| -> Result<u32> {
+        if bytes.len() != 4 {
+            return Err(ProxyError::Parse("invalid peer message fields".into()));
+        }
+        Ok(u32::from_be_bytes(bytes.try_into().unwrap()))
+    };
+    match id {
+        0 if body.is_empty() => Ok(PeerMessage::Choke),
+        1 if body.is_empty() => Ok(PeerMessage::Unchoke),
+        2 if body.is_empty() => Ok(PeerMessage::Interested),
+        3 if body.is_empty() => Ok(PeerMessage::NotInterested),
+        4 => Ok(PeerMessage::Have(u32_at(body)?)),
+        5 => Ok(PeerMessage::Bitfield(body.to_vec())),
+        6 if body.len() == 12 => Ok(PeerMessage::Request {
+            index: u32_at(&body[..4])?,
+            begin: u32_at(&body[4..8])?,
+            length: u32_at(&body[8..])?,
+        }),
+        7 if body.len() >= 8 => Ok(PeerMessage::Piece {
+            index: u32_at(&body[..4])?,
+            begin: u32_at(&body[4..8])?,
+            block: body[8..].to_vec(),
+        }),
+        8 if body.len() == 12 => Ok(PeerMessage::Cancel {
+            index: u32_at(&body[..4])?,
+            begin: u32_at(&body[4..8])?,
+            length: u32_at(&body[8..])?,
+        }),
+        9 if body.len() == 2 => Ok(PeerMessage::Port(u16::from_be_bytes(
+            body.try_into().unwrap(),
+        ))),
+        _ => Err(ProxyError::Parse(
+            "unsupported or malformed peer message".into(),
+        )),
+    }
+}
+
 pub fn parse_magnet_uri(input: &str) -> Result<MagnetRequest> {
     let url = Url::parse(input).map_err(|_| ProxyError::Parse("invalid magnet URI".into()))?;
     if url.scheme() != "magnet" || url.host().is_some() || url.path() != "" {
@@ -333,5 +441,40 @@ mod tests {
     fn rejects_tracker_failure_and_malformed_peers() {
         assert!(parse_tracker_response(b"d14:failure reason4:faile").is_err());
         assert!(parse_tracker_response(b"d8:intervali30e5:peers2:xxe").is_err());
+    }
+
+    #[test]
+    fn round_trips_handshake_and_peer_messages() {
+        let handshake = BitTorrentHandshake {
+            reserved: [1; 8],
+            info_hash: [2; 20],
+            peer_id: [3; 20],
+        };
+        assert_eq!(
+            parse_handshake(&encode_handshake(&handshake)).unwrap(),
+            handshake
+        );
+        assert_eq!(
+            parse_peer_message(b"\0\0\0\0").unwrap(),
+            PeerMessage::KeepAlive
+        );
+        assert_eq!(
+            parse_peer_message(b"\0\0\0\x01\x01").unwrap(),
+            PeerMessage::Unchoke
+        );
+        assert_eq!(
+            parse_peer_message(b"\0\0\0\x0d\x06\0\0\0\x01\0\0\0\x02\0\0\0\x03").unwrap(),
+            PeerMessage::Request {
+                index: 1,
+                begin: 2,
+                length: 3
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_handshake_and_oversized_peer_message() {
+        assert!(parse_handshake(&[0; 68]).is_err());
+        assert!(parse_peer_message(&[0x00, 0x20, 0x00, 0x01]).is_err());
     }
 }
