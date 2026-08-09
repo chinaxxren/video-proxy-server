@@ -143,6 +143,40 @@ fn is_public_socket(address: std::net::SocketAddr) -> bool {
     }
 }
 
+pub async fn send_dht_udp_query(target: std::net::SocketAddr, request: &[u8]) -> Result<Vec<u8>> {
+    if !is_public_socket(target) {
+        return Err(ProxyError::Request(
+            "DHT target must be a public address".into(),
+        ));
+    }
+    if request.is_empty() || request.len() > 4096 {
+        return Err(ProxyError::Request("invalid DHT request size".into()));
+    }
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = tokio::net::UdpSocket::bind(bind)
+        .await
+        .map_err(|error| ProxyError::Network(format!("DHT UDP bind failed: {error}")))?;
+    socket
+        .connect(target)
+        .await
+        .map_err(|error| ProxyError::Network(format!("DHT UDP connect failed: {error}")))?;
+    tokio::time::timeout(Duration::from_secs(3), socket.send(request))
+        .await
+        .map_err(|_| ProxyError::Network("DHT UDP send timed out".into()))?
+        .map_err(|error| ProxyError::Network(format!("DHT UDP send failed: {error}")))?;
+    let mut response = vec![0u8; 65_507];
+    let length = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut response))
+        .await
+        .map_err(|_| ProxyError::Network("DHT UDP response timed out".into()))?
+        .map_err(|error| ProxyError::Network(format!("DHT UDP receive failed: {error}")))?;
+    response.truncate(length);
+    Ok(response)
+}
+
 pub fn encode_dht_get_peers(
     transaction: &[u8],
     node_id: &[u8; 20],
@@ -1068,5 +1102,13 @@ mod tests {
         let closest = table.closest(&[0; 20], 2);
         assert_eq!(closest[0].id, [1; 20]);
         assert_eq!(closest[1].id, [2; 20]);
+    }
+
+    #[tokio::test]
+    async fn dht_udp_query_rejects_private_targets_before_network_io() {
+        let error = send_dht_udp_query("127.0.0.1:6881".parse().unwrap(), b"query")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("public"));
     }
 }
