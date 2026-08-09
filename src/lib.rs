@@ -13,6 +13,8 @@ pub mod hls;
 pub mod http_types;
 #[cfg(feature = "p2p")]
 pub mod p2p;
+#[cfg(feature = "p2p-network")]
+pub mod p2p_network;
 pub mod request_handler;
 pub mod server;
 pub mod source_registry;

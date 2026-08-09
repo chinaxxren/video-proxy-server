@@ -9,6 +9,10 @@ client. It does not accept magnet links and does not implement DHT, public
 trackers, peer discovery, upload, or seeding. Keep it disabled unless the Host
 has an authorized source for the exact media content.
 
+The separate `p2p-network` feature currently parses Magnet metadata only. It
+does not make network requests or implement trackers, DHT, peer wire sessions,
+automatic downloading, uploading, or seeding.
+
 ## Build
 
 ```bash

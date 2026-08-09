@@ -58,6 +58,9 @@ Host 将已授权分片写入 `<分片目录>/<index>.piece`。播放器使用�
 读取并校验请求分片，将校验后的字节写入共享缓存并立即返回。播放期间 Host 可以继续填充后续
 分片。Core 不负责发现 Peer 或从 P2P 网络下载，分片获取和授权由 Host 负责。
 
+独立的 `p2p-network` feature 当前只提供不联网的 Magnet 元数据解析。Tracker 请求、DHT、Peer
+wire 连接、自动下载、上传和做种仍保持关闭，待对应的受控模块完成并验证后再开放。
+
 ### 依赖安全
 
 CI 会在每次 push 和 pull request 时运行 RustSec 审计。本地可用以下命令复现：

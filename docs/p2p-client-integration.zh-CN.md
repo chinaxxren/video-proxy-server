@@ -8,6 +8,9 @@
 magnet，不实现 DHT、公共 tracker、peer discovery、上传或做种。只有 Host 对目标
 媒体拥有明确授权来源时才能启用。
 
+独立的 `p2p-network` feature 当前仅解析 Magnet 元数据，不会发起网络请求，也不实现 Tracker、
+DHT、Peer wire 会话、自动下载、上传或做种。
+
 ## 构建
 
 ```bash

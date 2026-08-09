@@ -63,6 +63,11 @@ Host can continue filling later pieces while playback proceeds. Core does not
 discover peers or download from a P2P network; the Host owns acquisition and
 authorization.
 
+The separate `p2p-network` feature currently provides only network-free Magnet
+metadata parsing. Tracker requests, DHT, peer wire sessions, automatic
+downloads, uploads, and seeding remain disabled until their gated modules are
+implemented and validated.
+
 ### Dependency security
 
 CI runs the RustSec audit on every push and pull request. The same checks can be

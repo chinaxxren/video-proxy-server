@@ -28,6 +28,9 @@ allow-private-upstream = []
 # Optional, protocol-neutral P2P integration boundary. Disabled by default.
 # This does not enable magnet links, DHT, public trackers, or peer discovery.
 p2p = []
+# Magnet parsing and future BitTorrent networking are separately gated.
+# Parsing alone performs no tracker, DHT, peer, upload, or seeding activity.
+p2p-network = []
 android-jni = ["dep:jni"]
 harmony-napi = ["dep:napi", "dep:napi-derive"]
 
