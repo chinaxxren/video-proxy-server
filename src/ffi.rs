@@ -12,12 +12,28 @@ use std::ptr;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 
+#[cfg(feature = "p2p-librqbit")]
+enum RqbitCommand {
+    Add {
+        magnet: String,
+        authorized: bool,
+        reply: mpsc::SyncSender<Option<usize>>,
+    },
+    Remove {
+        torrent_id: usize,
+        delete_files: bool,
+        reply: mpsc::SyncSender<bool>,
+    },
+}
+
 pub struct ProxyServerHandle {
     config: Mutex<Option<ProxyConfig>>,
     server: Arc<Mutex<Option<Arc<ProxyServer>>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "p2p")]
     p2p_sources: crate::p2p::P2pSourceRegistry,
+    #[cfg(feature = "p2p-librqbit")]
+    rqbit_commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<RqbitCommand>>>>,
 }
 
 /// # Safety
@@ -101,7 +117,100 @@ fn create_handle(
         thread: Mutex::new(None),
         #[cfg(feature = "p2p")]
         p2p_sources,
+        #[cfg(feature = "p2p-librqbit")]
+        rqbit_commands: Arc::new(Mutex::new(None)),
     }))
+}
+
+#[cfg(feature = "p2p-librqbit")]
+const RQBIT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Adds an explicitly authorized Magnet URI. Returns the non-negative torrent
+/// ID, or -1 when validation, initialization, or command dispatch fails.
+///
+/// # Safety
+///
+/// `handle` must be null or live, and `magnet` must be a valid NUL-terminated
+/// UTF-8 string for the duration of this call.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_add_authorized(
+    handle: *mut ProxyServerHandle,
+    magnet: *const c_char,
+    explicitly_authorized: u8,
+) -> i64 {
+    let (Some(handle), Some(magnet)) = (handle.as_ref(), read_string(magnet)) else {
+        return -1;
+    };
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return -1;
+    };
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::Add {
+            magnet,
+            authorized: explicitly_authorized == 1,
+            reply,
+        })
+        .is_err()
+    {
+        return -1;
+    }
+    response
+        .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+        .ok()
+        .flatten()
+        .and_then(|id| i64::try_from(id).ok())
+        .unwrap_or(-1)
+}
+
+/// Forgets a torrent and optionally removes its downloaded files.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by a create function.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_remove(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    delete_files: u8,
+) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let Ok(torrent_id) = usize::try_from(torrent_id) else {
+        return 0;
+    };
+    let Some(commands) = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())
+    else {
+        return 0;
+    };
+    let (reply, response) = mpsc::sync_channel(1);
+    if commands
+        .send(RqbitCommand::Remove {
+            torrent_id,
+            delete_files: delete_files == 1,
+            reply,
+        })
+        .is_err()
+    {
+        return 0;
+    }
+    u8::from(
+        response
+            .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+            .unwrap_or(false),
+    )
 }
 
 #[cfg(feature = "p2p")]
@@ -297,6 +406,8 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     let published = handle.server.clone();
     #[cfg(feature = "p2p")]
     let p2p_registry = handle.p2p_sources.clone();
+    #[cfg(feature = "p2p-librqbit")]
+    let rqbit_commands = handle.rqbit_commands.clone();
     let thread = std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -309,6 +420,8 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             }
         };
         let result = runtime.block_on(async {
+            #[cfg(feature = "p2p-librqbit")]
+            let rqbit_cache_directory = config.cache_dir.join("torrent");
             #[cfg(not(feature = "p2p"))]
             let server = Arc::new(ProxyServer::with_config(config));
             #[cfg(feature = "p2p")]
@@ -318,6 +431,18 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
             ));
             if let Ok(mut value) = published.lock() {
                 *value = Some(server.clone());
+            }
+            #[cfg(feature = "p2p-librqbit")]
+            {
+                let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+                if let Ok(mut slot) = rqbit_commands.lock() {
+                    *slot = Some(commands);
+                }
+                tokio::spawn(run_rqbit_commands(
+                    receiver,
+                    server.clone(),
+                    rqbit_cache_directory,
+                ));
             }
             let start = tokio::spawn({
                 let server = server.clone();
@@ -333,6 +458,58 @@ pub unsafe extern "C" fn proxy_server_start(handle: *mut ProxyServerHandle) -> u
     *slot = Some(thread);
     drop(slot);
     rx.recv().unwrap_or(0)
+}
+
+#[cfg(feature = "p2p-librqbit")]
+async fn run_rqbit_commands(
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<RqbitCommand>,
+    server: Arc<ProxyServer>,
+    cache_directory: PathBuf,
+) {
+    let mut backend: Option<Arc<crate::rqbit_backend::RqbitBackend>> = None;
+    while let Some(command) = commands.recv().await {
+        match command {
+            RqbitCommand::Add {
+                magnet,
+                authorized,
+                reply,
+            } => {
+                let valid_request =
+                    authorized && crate::p2p_network::parse_magnet_uri(&magnet).is_ok();
+                if backend.is_none() && valid_request {
+                    if let Ok(created) =
+                        crate::rqbit_backend::RqbitBackend::new(cache_directory.clone()).await
+                    {
+                        let created = Arc::new(created);
+                        server.set_rqbit_backend(created.clone()).await;
+                        backend = Some(created);
+                    }
+                }
+                let result = match &backend {
+                    Some(backend) if valid_request => backend
+                        .add_authorized_magnet(&magnet, authorized)
+                        .await
+                        .ok(),
+                    _ => None,
+                };
+                let _ = reply.send(result);
+            }
+            RqbitCommand::Remove {
+                torrent_id,
+                delete_files,
+                reply,
+            } => {
+                let removed = match &backend {
+                    Some(backend) => backend.remove(torrent_id, delete_files).await.is_ok(),
+                    None => false,
+                };
+                let _ = reply.send(removed);
+            }
+        }
+    }
+    if let Some(backend) = backend {
+        backend.shutdown();
+    }
 }
 
 /// Stops the running server. Idempotent, and a no-op on a null handle.
@@ -456,6 +633,31 @@ mod tests {
                 ["media.example.com", "cdn.example.com"]
             );
             drop(config);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[test]
+    fn ffi_torrent_commands_require_running_server_and_explicit_authorization() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let magnet =
+            CString::new("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567").unwrap();
+        unsafe {
+            assert_eq!(
+                proxy_torrent_add_authorized(ptr::null_mut(), magnet.as_ptr(), 1),
+                -1
+            );
+            assert_eq!(proxy_torrent_remove(ptr::null_mut(), 0, 0), 0);
+
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert!(!handle.is_null());
+            assert_eq!(proxy_torrent_add_authorized(handle, magnet.as_ptr(), 1), -1);
+            assert_ne!(proxy_server_start(handle), 0);
+            assert_eq!(proxy_torrent_add_authorized(handle, magnet.as_ptr(), 0), -1);
+            assert_eq!(proxy_torrent_remove(handle, -1, 0), 0);
+            proxy_server_stop(handle);
             proxy_server_destroy(handle);
         }
     }

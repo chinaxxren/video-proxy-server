@@ -67,6 +67,22 @@ uint8_t proxy_p2p_source_verify_complete(ProxyServerHandle *handle, uint64_t sou
 uint8_t proxy_p2p_source_remove(ProxyServerHandle *handle, uint64_t source_id);
 #endif
 
+#ifdef MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT
+// P2P network activity begins only after this explicitly authorized call.
+// Returns a non-negative torrent ID, or -1 on failure.
+int64_t proxy_torrent_add_authorized(
+    ProxyServerHandle *handle,
+    const char *magnet_uri,
+    uint8_t explicitly_authorized
+);
+// delete_files=0 forgets the session but preserves downloaded files.
+uint8_t proxy_torrent_remove(
+    ProxyServerHandle *handle,
+    int64_t torrent_id,
+    uint8_t delete_files
+);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
