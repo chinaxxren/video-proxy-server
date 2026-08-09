@@ -4,6 +4,11 @@
 //! perform DHT lookups, connect to peers, download, upload, or seed content.
 
 use crate::utils::error::{ProxyError, Result};
+use crate::utils::network_policy::NetworkPolicy;
+use futures_util::StreamExt;
+use http_body_util::{BodyExt, Full};
+use hyper::Request;
+use std::time::Duration;
 use url::Url;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +58,45 @@ pub fn build_tracker_announce_url(tracker: &Url, request: &TrackerAnnounce) -> R
     }
     url.set_query(Some(&query));
     Ok(url)
+}
+
+/// Announces to an HTTP(S) tracker using the Core's public-only shared client.
+/// UDP trackers are intentionally left to a separate transport implementation.
+pub async fn announce_http_tracker(
+    tracker: &Url,
+    request: &TrackerAnnounce,
+    policy: &NetworkPolicy,
+) -> Result<TrackerResponse> {
+    let announce_url = build_tracker_announce_url(tracker, request)?;
+    policy.validate(announce_url.as_str()).await?;
+    let http_request = Request::get(announce_url.as_str())
+        .header("User-Agent", "MediaProxyCache/0.3")
+        .body(Full::new(bytes::Bytes::new()))
+        .map_err(|_| ProxyError::Request("unable to construct tracker request".into()))?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        crate::data_source::net_source::shared_client_v1().request(http_request),
+    )
+    .await
+    .map_err(|_| ProxyError::Network("tracker request timed out".into()))?
+    .map_err(|error| ProxyError::Network(format!("tracker request failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(ProxyError::Network(format!(
+            "tracker returned {}",
+            response.status()
+        )));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| ProxyError::Network(format!("tracker body failed: {error}")))?;
+        if body.len().saturating_add(chunk.len()) > 1024 * 1024 {
+            return Err(ProxyError::Request("tracker response is too large".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_tracker_response(&body)
 }
 
 fn percent_encode_bytes(bytes: &[u8]) -> String {
