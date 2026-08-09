@@ -46,6 +46,121 @@ pub struct DhtNode {
     pub address: std::net::SocketAddr,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtGetPeersResponse {
+    pub token: Vec<u8>,
+    pub nodes: Vec<DhtNode>,
+    pub peers: Vec<std::net::SocketAddr>,
+}
+
+pub fn encode_dht_get_peers(
+    transaction: &[u8],
+    node_id: &[u8; 20],
+    info_hash: &[u8; 20],
+) -> Result<Vec<u8>> {
+    if transaction.is_empty() || transaction.len() > 32 {
+        return Err(ProxyError::Parse("invalid DHT transaction ID".into()));
+    }
+    let mut output = b"d1:ad2:id20:".to_vec();
+    output.extend_from_slice(node_id);
+    output.extend_from_slice(b"9:info_hash20:");
+    output.extend_from_slice(info_hash);
+    output.extend_from_slice(b"1:q9:get_peers1:t");
+    output.extend_from_slice(transaction.len().to_string().as_bytes());
+    output.push(b':');
+    output.extend_from_slice(transaction);
+    output.extend_from_slice(b"1:y1:qe");
+    Ok(output)
+}
+
+pub fn parse_dht_get_peers_response(
+    input: &[u8],
+    transaction: &[u8],
+) -> Result<DhtGetPeersResponse> {
+    let mut parser = BencodeParser {
+        input,
+        offset: 0,
+        depth: 0,
+    };
+    let root = parser.value()?;
+    if parser.offset != input.len() {
+        return Err(ProxyError::Parse("DHT response has trailing bytes".into()));
+    }
+    let BValue::Dict(entries) = root else {
+        return Err(ProxyError::Parse(
+            "DHT response must be a dictionary".into(),
+        ));
+    };
+    if entries.get(b"y" as &[u8]).and_then(|v| match v {
+        BValue::Bytes(value) => Some(value.as_slice()),
+        _ => None,
+    }) != Some(b"r")
+    {
+        return Err(ProxyError::Parse("DHT response is not a response".into()));
+    }
+    if entries.get(b"t" as &[u8]).and_then(|v| match v {
+        BValue::Bytes(value) => Some(value.as_slice()),
+        _ => None,
+    }) != Some(transaction)
+    {
+        return Err(ProxyError::Parse("DHT transaction mismatch".into()));
+    }
+    let BValue::Dict(response) = entries
+        .get(b"r" as &[u8])
+        .ok_or_else(|| ProxyError::Parse("DHT response is missing r".into()))?
+    else {
+        return Err(ProxyError::Parse("DHT response r is invalid".into()));
+    };
+    let token = match response.get(b"token" as &[u8]) {
+        Some(BValue::Bytes(value)) if !value.is_empty() && value.len() <= 256 => value.clone(),
+        _ => return Err(ProxyError::Parse("DHT response token is invalid".into())),
+    };
+    let mut nodes = response
+        .get(b"nodes" as &[u8])
+        .and_then(|value| match value {
+            BValue::Bytes(value) => Some(parse_dht_compact_nodes(value)),
+            _ => None,
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(BValue::Bytes(value)) = response.get(b"nodes6" as &[u8]) {
+        if value.len() % 38 != 0 {
+            return Err(ProxyError::Parse("invalid compact IPv6 DHT nodes".into()));
+        }
+        for chunk in value.chunks_exact(38) {
+            nodes.push(DhtNode {
+                id: chunk[..20].try_into().unwrap(),
+                address: std::net::SocketAddr::from((
+                    std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&chunk[20..36]).unwrap()),
+                    u16::from_be_bytes([chunk[36], chunk[37]]),
+                )),
+            });
+        }
+    }
+    let mut peers = Vec::new();
+    if let Some(BValue::List(values)) = response.get(b"values" as &[u8]) {
+        for value in values {
+            let BValue::Bytes(value) = value else {
+                return Err(ProxyError::Parse("DHT peer value is invalid".into()));
+            };
+            if value.len() != 6 {
+                return Err(ProxyError::Parse(
+                    "DHT peer value is not compact IPv4".into(),
+                ));
+            }
+            peers.push(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::new(value[0], value[1], value[2], value[3]),
+                u16::from_be_bytes([value[4], value[5]]),
+            )));
+        }
+    }
+    Ok(DhtGetPeersResponse {
+        token,
+        nodes,
+        peers,
+    })
+}
+
 pub fn encode_dht_ping(transaction: &[u8]) -> Result<Vec<u8>> {
     if transaction.is_empty() || transaction.len() > 32 {
         return Err(ProxyError::Parse("invalid DHT transaction ID".into()));
@@ -566,7 +681,7 @@ enum BValue {
     Integer(i64),
     Bytes(Vec<u8>),
     Dict(std::collections::BTreeMap<Vec<u8>, BValue>),
-    List,
+    List(Vec<BValue>),
 }
 
 impl BValue {
@@ -644,11 +759,12 @@ impl<'a> BencodeParser<'a> {
 
     fn list(&mut self) -> Result<BValue> {
         self.offset += 1;
+        let mut values = Vec::new();
         while self.input.get(self.offset) != Some(&b'e') {
-            self.value()?;
+            values.push(self.value()?);
         }
         self.offset += 1;
-        Ok(BValue::List)
+        Ok(BValue::List(values))
     }
 
     fn dict(&mut self) -> Result<BValue> {
@@ -825,5 +941,18 @@ mod tests {
         assert_eq!(nodes[0].id, [7; 20]);
         assert_eq!(nodes[0].address, "127.0.0.1:6881".parse().unwrap());
         assert!(parse_dht_compact_nodes(&[0; 25]).is_err());
+    }
+
+    #[test]
+    fn builds_and_parses_dht_get_peers() {
+        let query = encode_dht_get_peers(b"aa", &[1; 20], &[2; 20]).unwrap();
+        assert!(query
+            .windows(b"9:get_peers".len())
+            .any(|window| window == b"9:get_peers"));
+        let response = b"d1:rd5:nodes26:\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x7f\x00\x00\x01\x1a\xe15:token2:ok6:valuesl6:\x7f\x00\x00\x01\x1a\xe1ee1:t2:aa1:y1:re";
+        let parsed = parse_dht_get_peers_response(response, b"aa").unwrap();
+        assert_eq!(parsed.token, b"ok");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.peers.len(), 1);
     }
 }
