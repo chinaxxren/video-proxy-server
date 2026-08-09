@@ -557,6 +557,103 @@ pub struct PeerConnection {
     pub remote_handshake: BitTorrentHandshake,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PieceState {
+    Missing,
+    InFlight,
+    Complete,
+}
+
+#[derive(Clone, Debug)]
+pub struct PieceScheduler {
+    states: Vec<PieceState>,
+    availability: Vec<u32>,
+    failures: Vec<u8>,
+    max_failures: u8,
+}
+
+impl PieceScheduler {
+    pub fn new(piece_count: usize, max_failures: u8) -> Result<Self> {
+        if piece_count == 0 || piece_count > 1_000_000 || max_failures == 0 {
+            return Err(ProxyError::Request("invalid piece scheduler limits".into()));
+        }
+        Ok(Self {
+            states: vec![PieceState::Missing; piece_count],
+            availability: vec![0; piece_count],
+            failures: vec![0; piece_count],
+            max_failures,
+        })
+    }
+
+    pub fn observe_bitfield(&mut self, bitfield: &[u8]) -> Result<()> {
+        if bitfield.len() != self.states.len().div_ceil(8) {
+            return Err(ProxyError::Parse("peer bitfield length mismatch".into()));
+        }
+        for index in 0..self.states.len() {
+            if bitfield[index / 8] & (0x80 >> (index % 8)) != 0 {
+                self.availability[index] = self.availability[index].saturating_add(1);
+            }
+        }
+        let spare_bits = bitfield.len() * 8 - self.states.len();
+        if spare_bits > 0
+            && bitfield.last().copied().unwrap_or_default() & ((1u8 << spare_bits) - 1) != 0
+        {
+            return Err(ProxyError::Parse("peer bitfield sets spare bits".into()));
+        }
+        Ok(())
+    }
+
+    pub fn claim_next(&mut self, peer_bitfield: &[u8]) -> Result<Option<u32>> {
+        if peer_bitfield.len() != self.states.len().div_ceil(8) {
+            return Err(ProxyError::Parse("peer bitfield length mismatch".into()));
+        }
+        let candidate = (0..self.states.len())
+            .filter(|index| {
+                peer_bitfield[index / 8] & (0x80 >> (index % 8)) != 0
+                    && self.states[*index] == PieceState::Missing
+                    && self.failures[*index] < self.max_failures
+            })
+            .min_by_key(|index| (self.availability[*index], self.failures[*index], *index));
+        if let Some(index) = candidate {
+            self.states[index] = PieceState::InFlight;
+            return Ok(Some(index as u32));
+        }
+        Ok(None)
+    }
+
+    pub fn complete(&mut self, index: u32) -> Result<()> {
+        let state = self
+            .states
+            .get_mut(index as usize)
+            .ok_or_else(|| ProxyError::Request("piece index out of range".into()))?;
+        if *state != PieceState::InFlight {
+            return Err(ProxyError::Request("piece is not in flight".into()));
+        }
+        *state = PieceState::Complete;
+        Ok(())
+    }
+
+    pub fn fail(&mut self, index: u32) -> Result<()> {
+        let index = index as usize;
+        let state = self
+            .states
+            .get_mut(index)
+            .ok_or_else(|| ProxyError::Request("piece index out of range".into()))?;
+        if *state != PieceState::InFlight {
+            return Err(ProxyError::Request("piece is not in flight".into()));
+        }
+        self.failures[index] = self.failures[index].saturating_add(1);
+        *state = PieceState::Missing;
+        Ok(())
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.states
+            .iter()
+            .all(|state| *state == PieceState::Complete)
+    }
+}
+
 impl PeerConnection {
     pub async fn connect(
         target: std::net::SocketAddr,
@@ -1396,5 +1493,20 @@ mod tests {
         let expected: [u8; 20] = Sha1::digest(b"abc").into();
         assert!(verify_piece_sha1(b"abc", &expected).is_ok());
         assert!(verify_piece_sha1(b"abd", &expected).is_err());
+    }
+
+    #[test]
+    fn scheduler_selects_rarest_and_bounds_retries() {
+        let mut scheduler = PieceScheduler::new(3, 2).unwrap();
+        scheduler.observe_bitfield(&[0b1110_0000]).unwrap();
+        scheduler.observe_bitfield(&[0b1100_0000]).unwrap();
+        assert_eq!(scheduler.claim_next(&[0b1110_0000]).unwrap(), Some(2));
+        scheduler.fail(2).unwrap();
+        assert_eq!(scheduler.claim_next(&[0b1110_0000]).unwrap(), Some(2));
+        scheduler.fail(2).unwrap();
+        assert_eq!(scheduler.claim_next(&[0b1110_0000]).unwrap(), Some(0));
+        scheduler.complete(0).unwrap();
+        assert!(!scheduler.is_complete());
+        assert!(scheduler.observe_bitfield(&[0b1110_0001]).is_err());
     }
 }
