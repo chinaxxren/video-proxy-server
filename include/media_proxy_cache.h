@@ -2,6 +2,7 @@
 #define MEDIA_PROXY_CACHE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,7 +37,6 @@ uint8_t proxy_source_set_refresh_callback(
 );
 
 #ifdef MEDIA_PROXY_CACHE_ENABLE_P2P
-#include <stddef.h>
 typedef size_t (*ProxyP2pPieceCallback)(
     void *context,
     size_t piece_index,
@@ -80,6 +80,20 @@ uint8_t proxy_torrent_remove(
     ProxyServerHandle *handle,
     int64_t torrent_id,
     uint8_t delete_files
+);
+// JSON buffer APIs return required capacity including trailing NUL. Pass NULL
+// to query capacity. They return 0 for an unknown ID or unavailable backend.
+size_t proxy_torrent_files_json(
+    ProxyServerHandle *handle,
+    int64_t torrent_id,
+    uint8_t *buffer,
+    size_t capacity
+);
+size_t proxy_torrent_status_json(
+    ProxyServerHandle *handle,
+    int64_t torrent_id,
+    uint8_t *buffer,
+    size_t capacity
 );
 #endif
 

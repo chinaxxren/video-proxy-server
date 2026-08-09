@@ -24,6 +24,14 @@ enum RqbitCommand {
         delete_files: bool,
         reply: mpsc::SyncSender<bool>,
     },
+    Files {
+        torrent_id: usize,
+        reply: mpsc::SyncSender<Option<String>>,
+    },
+    Status {
+        torrent_id: usize,
+        reply: mpsc::SyncSender<Option<String>>,
+    },
 }
 
 pub struct ProxyServerHandle {
@@ -124,6 +132,8 @@ fn create_handle(
 
 #[cfg(feature = "p2p-librqbit")]
 const RQBIT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(feature = "p2p-librqbit")]
+const MAX_RQBIT_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 /// Adds an explicitly authorized Magnet URI. Returns the non-negative torrent
 /// ID, or -1 when validation, initialization, or command dispatch fails.
@@ -211,6 +221,89 @@ pub unsafe extern "C" fn proxy_torrent_remove(
             .recv_timeout(RQBIT_COMMAND_TIMEOUT)
             .unwrap_or(false),
     )
+}
+
+#[cfg(feature = "p2p-librqbit")]
+fn query_rqbit_json(
+    handle: &ProxyServerHandle,
+    command: impl FnOnce(mpsc::SyncSender<Option<String>>) -> RqbitCommand,
+) -> Option<String> {
+    let commands = handle
+        .rqbit_commands
+        .lock()
+        .ok()
+        .and_then(|commands| commands.clone())?;
+    let (reply, response) = mpsc::sync_channel(1);
+    commands.send(command(reply)).ok()?;
+    response
+        .recv_timeout(RQBIT_COMMAND_TIMEOUT)
+        .ok()
+        .flatten()
+        .filter(|json| json.len() <= MAX_RQBIT_JSON_BYTES)
+}
+
+/// Writes the torrent file list as UTF-8 JSON. The return value is the required
+/// capacity including the trailing NUL. Pass a null buffer to query capacity.
+/// Returns zero on failure. No partial output is written.
+///
+/// # Safety
+///
+/// `handle` must be null or live. A non-null `buffer` must reference at least
+/// `capacity` writable bytes for the duration of this call.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_files_json(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
+    let (Some(handle), Ok(torrent_id)) = (handle.as_ref(), usize::try_from(torrent_id)) else {
+        return 0;
+    };
+    let Some(json) = query_rqbit_json(handle, |reply| RqbitCommand::Files { torrent_id, reply })
+    else {
+        return 0;
+    };
+    write_ffi_json(&json, buffer, capacity)
+}
+
+/// Writes torrent progress/status as UTF-8 JSON. Uses the same capacity-query
+/// contract as `proxy_torrent_files_json`.
+///
+/// # Safety
+///
+/// `handle` must be null or live. A non-null `buffer` must reference at least
+/// `capacity` writable bytes for the duration of this call.
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+pub unsafe extern "C" fn proxy_torrent_status_json(
+    handle: *mut ProxyServerHandle,
+    torrent_id: i64,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
+    let (Some(handle), Ok(torrent_id)) = (handle.as_ref(), usize::try_from(torrent_id)) else {
+        return 0;
+    };
+    let Some(json) = query_rqbit_json(handle, |reply| RqbitCommand::Status { torrent_id, reply })
+    else {
+        return 0;
+    };
+    write_ffi_json(&json, buffer, capacity)
+}
+
+#[cfg(feature = "p2p-librqbit")]
+unsafe fn write_ffi_json(json: &str, buffer: *mut u8, capacity: usize) -> usize {
+    let Some(required) = json.len().checked_add(1) else {
+        return 0;
+    };
+    if buffer.is_null() || capacity < required {
+        return required;
+    }
+    ptr::copy_nonoverlapping(json.as_ptr(), buffer, json.len());
+    buffer.add(json.len()).write(0);
+    required
 }
 
 #[cfg(feature = "p2p")]
@@ -505,6 +598,28 @@ async fn run_rqbit_commands(
                 };
                 let _ = reply.send(removed);
             }
+            RqbitCommand::Files { torrent_id, reply } => {
+                let json = match &backend {
+                    Some(backend) => backend
+                        .files(torrent_id)
+                        .await
+                        .ok()
+                        .and_then(|files| serde_json::to_string(&files).ok()),
+                    None => None,
+                };
+                let _ = reply.send(json);
+            }
+            RqbitCommand::Status { torrent_id, reply } => {
+                let json = match &backend {
+                    Some(backend) => backend
+                        .status(torrent_id)
+                        .await
+                        .ok()
+                        .and_then(|status| serde_json::to_string(&status).ok()),
+                    None => None,
+                };
+                let _ = reply.send(json);
+            }
         }
     }
     if let Some(backend) = backend {
@@ -660,6 +775,29 @@ mod tests {
             proxy_server_stop(handle);
             proxy_server_destroy(handle);
         }
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[test]
+    fn ffi_json_writer_reports_capacity_and_never_writes_partial_output() {
+        let json = r#"[{"file_id":0}]"#;
+        let required = unsafe { write_ffi_json(json, ptr::null_mut(), 0) };
+        assert_eq!(required, json.len() + 1);
+
+        let mut short = vec![0xaa; required - 1];
+        assert_eq!(
+            unsafe { write_ffi_json(json, short.as_mut_ptr(), short.len()) },
+            required
+        );
+        assert!(short.iter().all(|byte| *byte == 0xaa));
+
+        let mut output = vec![0xaa; required];
+        assert_eq!(
+            unsafe { write_ffi_json(json, output.as_mut_ptr(), output.len()) },
+            required
+        );
+        assert_eq!(&output[..json.len()], json.as_bytes());
+        assert_eq!(output[json.len()], 0);
     }
 
     #[cfg(feature = "p2p")]

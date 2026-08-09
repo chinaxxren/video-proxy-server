@@ -11,14 +11,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct RqbitFileInfo {
     pub file_id: usize,
     pub relative_path: String,
     pub length: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct RqbitTorrentStatus {
     pub state: String,
     pub total_bytes: u64,
