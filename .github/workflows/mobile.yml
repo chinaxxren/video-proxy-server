@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   ios:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       P2P_ENABLED: ${{ inputs.include_p2p && '1' || '0' }}
       P2P_SUFFIX: ${{ inputs.include_p2p && '-p2p' || '' }}
@@ -33,6 +33,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Inspect Apple toolchain
+        run: |
+          rustc --version
+          cargo --version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
       - name: Build iOS libraries
         run: PLATFORM=ios ./scripts/build-mobile.sh dist/mobile
       - name: Archive iOS artifacts
@@ -65,7 +72,7 @@ jobs:
       - name: Install Android NDK
         run: |
           yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --channel=3 "platforms;android-37" "build-tools;36.0.0" "ndk;29.0.14206865"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
       - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.7.0"
@@ -74,7 +81,8 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - name: Build Android libraries
         run: |
-          export NDK_HOME="$ANDROID_SDK_ROOT/ndk/29.0.14206865"
+          export NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+          test -x "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
           export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang"
