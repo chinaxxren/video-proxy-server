@@ -6,7 +6,7 @@ use crate::ffi::{
 };
 use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    ProxyServerHandle,
+    proxy_source_refresh, proxy_source_register, proxy_source_remove, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -232,6 +232,71 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveP
             })
             .unwrap_or(false);
         Ok(removed)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRegisterSource(
+    mut env: EnvUnowned<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    identity: JString<'_>,
+    url: JString<'_>,
+) -> jlong {
+    env.with_env(|env| -> jni::errors::Result<jlong> {
+        let identity = CString::new(identity.try_to_string(env)?).ok();
+        let url = CString::new(url.try_to_string(env)?).ok();
+        Ok(match (identity, url) {
+            (Some(identity), Some(url)) => with_handle(handle, |handle| unsafe {
+                proxy_source_register(handle, identity.as_ptr(), url.as_ptr())
+            })
+            .and_then(|id| jlong::try_from(id).ok())
+            .unwrap_or(0),
+            _ => 0,
+        })
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRefreshSource(
+    mut env: EnvUnowned<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    source_id: jlong,
+    url: JString<'_>,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let url = CString::new(url.try_to_string(env)?).ok();
+        Ok(url
+            .and_then(|url| u64::try_from(source_id).ok().map(|id| (url, id)))
+            .and_then(|(url, id)| {
+                with_handle(handle, |handle| unsafe {
+                    proxy_source_refresh(handle, id, url.as_ptr()) != 0
+                })
+            })
+            .unwrap_or(false))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveSource(
+    mut env: EnvUnowned<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    source_id: jlong,
+) -> jboolean {
+    env.with_env(|_| -> jni::errors::Result<jboolean> {
+        Ok(u64::try_from(source_id)
+            .ok()
+            .and_then(|id| {
+                with_handle(handle, |handle| unsafe {
+                    proxy_source_remove(handle, id) != 0
+                })
+            })
+            .unwrap_or(false))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

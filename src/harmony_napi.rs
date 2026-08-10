@@ -6,7 +6,7 @@ use crate::ffi::{
 };
 use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    ProxyServerHandle,
+    proxy_source_refresh, proxy_source_register, proxy_source_remove, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -166,6 +166,56 @@ impl MediaProxyCache {
             unsafe { proxy_server_stop(handle as *mut ProxyServerHandle) }
         }
         Ok(())
+    }
+
+    #[napi]
+    pub fn register_source(&self, identity: String, url: String) -> Result<String> {
+        let identity = CString::new(identity)
+            .map_err(|_| Error::new(Status::InvalidArg, "invalid source identity"))?;
+        let url =
+            CString::new(url).map_err(|_| Error::new(Status::InvalidArg, "invalid source URL"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        let id = unsafe {
+            proxy_source_register(
+                handle as *mut ProxyServerHandle,
+                identity.as_ptr(),
+                url.as_ptr(),
+            )
+        };
+        if id == 0 {
+            return Err(Error::new(Status::InvalidArg, "source registration failed"));
+        }
+        Ok(id.to_string())
+    }
+
+    #[napi]
+    pub fn refresh_source(&self, source_id: String, url: String) -> Result<bool> {
+        let source_id = parse_source_id(&source_id)?;
+        let url =
+            CString::new(url).map_err(|_| Error::new(Status::InvalidArg, "invalid source URL"))?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(unsafe {
+            proxy_source_refresh(handle as *mut ProxyServerHandle, source_id, url.as_ptr()) != 0
+        })
+    }
+
+    #[napi]
+    pub fn remove_source(&self, source_id: String) -> Result<bool> {
+        let source_id = parse_source_id(&source_id)?;
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(unsafe { proxy_source_remove(handle as *mut ProxyServerHandle, source_id) != 0 })
     }
 
     #[napi]

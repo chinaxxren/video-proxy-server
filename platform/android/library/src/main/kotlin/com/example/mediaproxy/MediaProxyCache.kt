@@ -47,6 +47,30 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         boundPort = 0
     }
 
+    @Synchronized fun registerSource(identity: String, url: String): Long {
+        check(handle != 0L && boundPort != 0) { "MediaProxyCache is not running" }
+        require(identity.isNotBlank() && (url.startsWith("https://") || url.startsWith("http://")))
+        return nativeRegisterSource(handle, identity, url).also { check(it > 0L) { "source registration failed" } }
+    }
+
+    @Synchronized fun refreshSource(sourceId: Long, url: String): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(sourceId > 0L && (url.startsWith("https://") || url.startsWith("http://")))
+        return nativeRefreshSource(handle, sourceId, url)
+    }
+
+    @Synchronized fun removeSource(sourceId: Long): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        require(sourceId > 0L)
+        return nativeRemoveSource(handle, sourceId)
+    }
+
+    @Synchronized fun playbackUrl(sourceId: Long): String {
+        require(sourceId > 0L)
+        check(boundPort != 0) { "MediaProxyCache is not running" }
+        return "http://127.0.0.1:$boundPort/media/$sourceId"
+    }
+
     /** Requires a native artifact built with P2P_ENABLED=1. */
     @Synchronized
     fun registerP2PDirectory(manifestJson: String, pieceDirectory: String): Long {
@@ -180,6 +204,9 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     private external fun nativeStart(handle: Long): Int
     private external fun nativeStop(handle: Long)
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeRegisterSource(handle: Long, identity: String, url: String): Long
+    private external fun nativeRefreshSource(handle: Long, sourceId: Long, url: String): Boolean
+    private external fun nativeRemoveSource(handle: Long, sourceId: Long): Boolean
     private external fun nativeRegisterP2PDirectory(
         handle: Long,
         manifestJson: String,

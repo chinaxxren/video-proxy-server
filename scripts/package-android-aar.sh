@@ -53,6 +53,10 @@ trap 'rm -rf "$verify_dir"' EXIT
 unzip -p "$aar" classes.jar > "$verify_dir/classes.jar"
 api="$(javap -public -classpath "$verify_dir/classes.jar" com.example.mediaproxy.MediaProxyCache)"
 for method in \
+  registerSource \
+  refreshSource \
+  removeSource \
+  playbackUrl \
   addAuthorizedTorrent \
   addAuthorizedTorrentFile \
   torrentFiles \

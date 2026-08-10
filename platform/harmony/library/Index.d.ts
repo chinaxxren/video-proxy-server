@@ -7,6 +7,10 @@ export declare class MediaProxyCache {
   static create(port: number, cacheDirectory: string, allowedHosts: string[]): MediaProxyCache;
   start(): number;
   stop(): void;
+  registerSource(identity: string, url: string): string;
+  refreshSource(sourceId: string, url: string): boolean;
+  removeSource(sourceId: string): boolean;
+  playbackUrl(sourceId: string): string;
   close(): void;
   registerP2PDirectory(manifestJson: string, pieceDirectory: string): string;
   verifyP2PSource(sourceId: string): boolean;

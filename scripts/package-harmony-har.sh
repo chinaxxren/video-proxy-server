@@ -43,6 +43,10 @@ for required in \
 done
 declarations="$(tar -xOzf "$har" package/Index.d.ts)"
 for api in \
+  registerSource \
+  refreshSource \
+  removeSource \
+  playbackUrl \
   addAuthorizedTorrent \
   addAuthorizedTorrentFile \
   torrentFiles \

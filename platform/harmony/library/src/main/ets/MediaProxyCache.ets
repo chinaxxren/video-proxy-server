@@ -3,6 +3,9 @@ import nativeModule from 'libproxy_server.so';
 interface NativeMediaProxyCache {
   start(): number;
   stop(): void;
+  registerSource(identity: string, url: string): string;
+  refreshSource(sourceId: string, url: string): boolean;
+  removeSource(sourceId: string): boolean;
   close(): void;
   registerP2pDirectory(manifestJson: string, pieceDirectory: string): string;
   verifyP2pSource(sourceId: string): boolean;
@@ -62,6 +65,30 @@ export class MediaProxyCache {
   stop(): void {
     this.core.stop();
     this.boundPort = 0;
+  }
+
+  registerSource(identity: string, url: string): string {
+    if (identity.trim().length === 0 || (!url.startsWith('https://') && !url.startsWith('http://'))) {
+      throw new Error('Invalid media source');
+    }
+    return this.core.registerSource(identity, url);
+  }
+
+  refreshSource(sourceId: string, url: string): boolean {
+    if (!/^[1-9][0-9]*$/.test(sourceId) || (!url.startsWith('https://') && !url.startsWith('http://'))) {
+      throw new Error('Invalid media source refresh');
+    }
+    return this.core.refreshSource(sourceId, url);
+  }
+
+  removeSource(sourceId: string): boolean {
+    if (!/^[1-9][0-9]*$/.test(sourceId)) throw new Error('Invalid media source ID');
+    return this.core.removeSource(sourceId);
+  }
+
+  playbackUrl(sourceId: string): string {
+    if (this.boundPort === 0 || !/^[1-9][0-9]*$/.test(sourceId)) throw new Error('Invalid media playback request');
+    return `http://127.0.0.1:${this.boundPort}/media/${sourceId}`;
   }
 
   close(): void {

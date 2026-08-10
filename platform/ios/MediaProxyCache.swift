@@ -63,6 +63,46 @@ public final class MediaProxyCache: @unchecked Sendable {
         boundPort = 0
     }
 
+    public func registerSource(identity: String, url: URL) throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, boundPort != 0, !identity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              url.scheme == "https" || url.scheme == "http" else {
+            throw NSError(domain: "MediaProxyCache", code: 14)
+        }
+        let sourceID = identity.withCString { identityValue in
+            url.absoluteString.withCString { urlValue in
+                proxy_source_register(handle, identityValue, urlValue)
+            }
+        }
+        guard sourceID != 0 else { throw NSError(domain: "MediaProxyCache", code: 15) }
+        return sourceID
+    }
+
+    public func refreshSource(_ sourceID: UInt64, url: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, sourceID != 0, url.scheme == "https" || url.scheme == "http" else { return false }
+        return url.absoluteString.withCString { proxy_source_refresh(handle, sourceID, $0) == 1 }
+    }
+
+    public func removeSource(_ sourceID: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, sourceID != 0 else { return false }
+        return proxy_source_remove(handle, sourceID) == 1
+    }
+
+    public func playbackURL(sourceID: UInt64) throws -> URL {
+        lock.lock()
+        defer { lock.unlock() }
+        guard sourceID != 0, boundPort != 0,
+              let url = URL(string: "http://127.0.0.1:\(boundPort)/media/\(sourceID)") else {
+            throw NSError(domain: "MediaProxyCache", code: 16)
+        }
+        return url
+    }
+
 #if MEDIA_PROXY_CACHE_ENABLE_P2P
     /// Registers `<pieceIndex>.piece` files from a Host-owned sandbox directory.
     public func registerP2PDirectory(manifestJSON: Data, pieceDirectory: URL) throws -> UInt64 {
