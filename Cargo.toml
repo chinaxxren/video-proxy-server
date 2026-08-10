@@ -34,7 +34,10 @@ p2p-network = ["dep:sha1"]
 p2p-upload = ["p2p-network"]
 p2p-librqbit = ["p2p-network", "dep:librqbit"]
 android-jni = ["dep:jni"]
-harmony-napi = ["dep:napi", "dep:napi-derive"]
+# The N-API class exposes the torrent JSON/control methods in the same impl;
+# keep librqbit enabled for standalone Harmony builds so napi-derive sees the
+# complete method set instead of generating an incomplete class.
+harmony-napi = ["p2p-librqbit", "dep:napi", "dep:napi-derive"]
 
 # feature 按实际用到的收窄，不用 "full"。
 #
