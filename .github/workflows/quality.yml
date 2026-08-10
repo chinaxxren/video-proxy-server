@@ -42,7 +42,15 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo clippy --locked --lib --features '${{ matrix.features }}' -- -D warnings
+      - name: Clippy (${{ matrix.features }})
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo clippy --locked --lib --features '${{ matrix.features }}' -- -D warnings 2>&1 | tee clippy.log; then
+            details="$(tail -n 40 clippy.log | perl -pe 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')"
+            echo "::error title=Clippy failed (${{ matrix.features }})::$details"
+            exit 1
+          fi
       # Platform runtimes provide JNI/N-API symbols when loading the final library.
       # A host-side lib test validates Rust code without linking a macOS/Linux cdylib.
       - run: cargo test --locked --lib --features '${{ matrix.features }}'
