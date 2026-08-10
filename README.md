@@ -345,9 +345,7 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed
-- A request without a `Range` header answers `206` rather than `200`. Most players tolerate it, but it is not what RFC 7233 specifies
 - DNS policy validation and the connector's DNS lookup are two separate lookups, so they are not pinned to the same address. Both filter to public addresses, so rebinding cannot reach `connect`. For IP-literal upstreams the connector skips the resolver entirely, which makes `NetworkPolicy::validate` the only line of defense; every new upstream path must therefore call it
-- The dependency graph still contains overlapping HTTP clients and broad Tokio features
 
 ## Client Integration
 
