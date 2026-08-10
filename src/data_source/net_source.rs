@@ -20,7 +20,7 @@ use crate::utils::range::{parse_range, OPEN_ENDED};
 ///
 /// 解析器固定为 [`PublicOnlyResolver`]，让「只连公网地址」成为连接池的类型
 /// 约束而非调用方的自觉：任何拿到 `SharedClient` 的代码都无法绕开它。
-pub type SharedClientV1 =
+pub(crate) type SharedClientV1 =
     Arc<ClientV1<HttpsConnector<HttpConnectorV1<PublicOnlyResolverV1>>, Full<bytes::Bytes>>>;
 pub type UpstreamByteStream =
     Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes>> + Send>>;
@@ -60,7 +60,9 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
 static SHARED_CLIENT_V1: OnceLock<SharedClientV1> = OnceLock::new();
 
-pub fn shared_client_v1() -> SharedClientV1 {
+/// Internal-only so Rust consumers cannot bypass [`NetworkPolicy::validate`]
+/// and send an IP-literal URL directly through Hyper's connector.
+pub(crate) fn shared_client_v1() -> SharedClientV1 {
     SHARED_CLIENT_V1
         .get_or_init(|| {
             let mut http = HttpConnectorV1::new_with_resolver(PublicOnlyResolverV1::new());
