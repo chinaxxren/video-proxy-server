@@ -4,7 +4,7 @@ English | [简体中文](mobile-client-integration.zh-CN.md)
 
 This document describes the proposed integration of Media Proxy Cache into iOS, Android, and HarmonyOS applications.
 
-> Status: design target, not a released SDK. The repository currently provides a localhost Rust proxy executable and core cache components. The FFI layers, mobile packages, and lifecycle APIs described below still need to be implemented and verified on real devices.
+> Status: integration preview, not a platform-certified SDK. The repository provides the Rust core, C ABI, lifecycle APIs, and iOS/Android/HarmonyOS adapter templates and package builders. Package assembly is automated; real-device playback remains host-specific validation.
 
 ## Goal
 

@@ -104,7 +104,7 @@ MediaSource 解码，以及重复请求首分片时的缓存命中。
 该 crate 现在同时构建 `staticlib` 和 `cdylib` 产物。移动端 Adapter 可包含
 [`include/media_proxy_cache.h`](include/media_proxy_cache.h)，传入由 Host 管理的缓存目录，
 在固定端口或端口 `0` 上启动服务，并通过 `stop`/`destroy` 释放资源。这仍是预览 ABI。
-项目已提供构建和 Releases 打包脚本，平台专用的 JNI、Swift 和 N-API 封装仍需由宿主工程完成接入。
+项目已提供构建和 Releases 打包脚本，以及 Android JNI、iOS Swift 和鸿蒙 N-API Adapter 模板；宿主工程仍需按平台链接产物、配置播放器并完成真机验收。
 
 访问真实上游必须调用 `proxy_server_create_with_hosts` 并传入逗号分隔的域名白名单。
 简化版 `proxy_server_create` 会有意使用拒绝全部上游的策略。
@@ -123,8 +123,8 @@ PLATFORM=windows ./scripts/build-mobile.sh dist/desktop
 Kotlin 工程应将生成的 `.so` 放入 Android Library 模块使用。
 
 三端 Adapter 的所有权接口模板位于 `platform/android`、`platform/ios` 和
-`platform/harmony`。这些文件目前是 API 合同，宿主工程仍需链接原生库并提供对应的
-JNI、Swift module map 或 N-API 桥接实现。
+`platform/harmony`。这些文件提供生命周期和所有权封装，宿主工程仍需链接原生库并配置对应的
+JNI、Swift module map 或 N-API 工程设置。
 
 同一个 Core 也支持桌面端构建。macOS 会构建 Apple Silicon 和 Intel 目标；Windows
 默认使用 `x86_64-pc-windows-gnu`，构建机需要安装 MinGW linker。桌面程序可以直接
@@ -261,7 +261,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 
 ## 已知限制
 
-- 尚无生产验证的三 ABI Android AAR、生产级 iOS Swift 或 HarmonyOS HAR 包；ARM64 Android Media3 与 iOS 模拟器播放器 POC 已验证
+- Android AAR、iOS XCFramework 和 HarmonyOS HAR 已完成组装验证；真机播放器和后台生命周期仍需宿主应用验收
 - Core 已提供动态端口、readiness 等待和生命周期状态；仍需在三端 Adapter 中验证前后台切换时的实例所有权
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖

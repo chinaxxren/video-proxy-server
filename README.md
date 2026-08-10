@@ -170,8 +170,9 @@ The crate also builds `staticlib` and `cdylib` artifacts. Mobile adapters can
 include [`include/media_proxy_cache.h`](include/media_proxy_cache.h), create a
 server with a host-owned cache directory, start it on a fixed port or port `0`,
 and release it with `stop`/`destroy`. This is a preview ABI. Build and release
-packaging scripts are provided; platform-specific JNI, Swift, and N-API wrappers
-still require integration in the host projects.
+packaging scripts and Android JNI, iOS Swift, and HarmonyOS N-API adapter
+templates are provided. Host projects still need to link the artifacts,
+configure their players, and complete real-device validation.
 
 Real upstream access must use `proxy_server_create_with_hosts` and pass the
 comma-separated host allowlist. The simpler `proxy_server_create` intentionally
@@ -192,9 +193,9 @@ platform's native artifacts. Android Kotlin packaging should consume the
 generated `.so` files through an Android library module.
 
 Adapter ownership templates are under `platform/android`, `platform/ios`, and
-`platform/harmony`. They are API contracts only until each host project links
-the generated native library and supplies its JNI, Swift module map, or N-API
-bridge.
+`platform/harmony`. They provide lifecycle and ownership wrappers; each host
+project still needs to link the generated native library and configure its JNI,
+Swift module map, or N-API build settings.
 
 The same Core also supports desktop builds. macOS uses Apple Silicon and Intel
 targets; Windows uses the GNU x86_64 target by default and requires a MinGW
@@ -340,7 +341,7 @@ During startup recovery, the cache removes interrupted sidecar temporary files a
 
 ## Known Limitations
 
-- No production-validated three-ABI Android AAR, production iOS Swift, or HarmonyOS HAR package; ARM64 Android Media3 and iOS Simulator player POCs are validated
+- Android AAR, iOS XCFramework, and HarmonyOS HAR assembly is validated; real-device playback and background lifecycle behavior still require host-app acceptance testing
 - The Core exposes dynamic port assignment, readiness waiting, and lifecycle states; platform-specific ownership across app background/foreground transitions still needs adapter validation
 - Concurrent identical ranges are coalesced through the single-flight path; cache-side backpressure is abandoned after a one-second grace period rather than blocking playback
 - Range, HLS, process-restart, and corruption-recovery behavior have focused unit/E2E coverage; broader mobile-player coverage is still needed
