@@ -67,7 +67,9 @@ authorization.
 For real Magnet, Tracker, DHT, peer discovery, and automatic piece downloading,
 use the separately gated `p2p-librqbit` backend. See
 [BitTorrent Client Integration](docs/torrent-client-integration.md). Upload and
-seeding are disabled in the librqbit production backend.
+seeding are disabled in the librqbit production backend. The client integration
+also supports enumerating torrent files and selecting a bounded set of file IDs
+before playback, so unrelated files are not downloaded.
 
 ### Dependency security
 
