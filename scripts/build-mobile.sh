@@ -155,7 +155,8 @@ verify_native_symbols() {
       proxy_torrent_files_json \
       proxy_torrent_status_json \
       proxy_torrent_set_paused \
-      proxy_torrent_set_download_limit; do
+      proxy_torrent_set_download_limit \
+      proxy_torrent_select_files; do
       rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
         echo "Missing librqbit ABI symbol $symbol in $artifact" >&2
         return 1

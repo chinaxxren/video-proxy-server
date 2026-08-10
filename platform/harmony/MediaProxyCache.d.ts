@@ -18,6 +18,7 @@ export declare class MediaProxyCache {
   removeTorrent(torrentId: string, deleteFiles?: boolean): boolean;
   torrentPlaybackUrl(torrentId: string, fileId: number): string;
   torrentFiles(torrentId: string): TorrentFile[];
+  selectTorrentFiles(torrentId: string, fileIds: number[]): boolean;
   torrentStatus(torrentId: string): TorrentStatus;
   pauseTorrent(torrentId: string): boolean;
   resumeTorrent(torrentId: string): boolean;

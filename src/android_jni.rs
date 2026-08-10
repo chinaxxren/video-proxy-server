@@ -11,8 +11,8 @@ use crate::ffi::{
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
     proxy_torrent_add_authorized, proxy_torrent_add_file_authorized, proxy_torrent_files_json,
-    proxy_torrent_remove, proxy_torrent_set_download_limit, proxy_torrent_set_paused,
-    proxy_torrent_status_json,
+    proxy_torrent_remove, proxy_torrent_select_files, proxy_torrent_set_download_limit,
+    proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use jni::objects::{JByteArray, JClass, JObject, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
@@ -377,6 +377,31 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeSetTorr
     env.with_env(|_| -> jni::errors::Result<jboolean> {
         Ok(with_handle(handle, |handle| unsafe {
             proxy_torrent_set_paused(handle, torrent_id, u8::from(paused)) != 0
+        })
+        .unwrap_or(false))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[cfg(feature = "p2p-librqbit")]
+#[no_mangle]
+#[allow(deprecated)]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeSelectTorrentFiles(
+    mut env: EnvUnowned<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    torrent_id: jlong,
+    file_ids: jni::objects::JIntArray<'_>,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let mut ids = vec![0i32; env.get_array_length(&file_ids)? as usize];
+        env.get_int_array_region(&file_ids, 0, &mut ids)?;
+        let ids: Vec<u32> = ids
+            .into_iter()
+            .filter_map(|id| u32::try_from(id).ok())
+            .collect();
+        Ok(with_handle(handle, |handle| unsafe {
+            proxy_torrent_select_files(handle, torrent_id, ids.as_ptr(), ids.len()) != 0
         })
         .unwrap_or(false))
     })

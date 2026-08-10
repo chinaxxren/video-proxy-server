@@ -166,6 +166,17 @@ public final class MediaProxyCache: @unchecked Sendable {
         try torrentJSON(torrentID: torrentID, query: proxy_torrent_files_json, as: [TorrentFile].self)
     }
 
+    public func selectTorrentFiles(torrentID: Int64, fileIDs: [Int]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, torrentID >= 0, !fileIDs.isEmpty, fileIDs.count <= 4096,
+              fileIDs.allSatisfy({ $0 >= 0 && UInt64($0) <= UInt64(UInt32.max) }) else { return false }
+        let ids = fileIDs.map { UInt32($0) }
+        return ids.withUnsafeBufferPointer { buffer in
+            proxy_torrent_select_files(handle, torrentID, buffer.baseAddress, buffer.count) == 1
+        }
+    }
+
     public func torrentStatus(torrentID: Int64) throws -> TorrentStatus {
         try torrentJSON(torrentID: torrentID, query: proxy_torrent_status_json, as: TorrentStatus.self)
     }

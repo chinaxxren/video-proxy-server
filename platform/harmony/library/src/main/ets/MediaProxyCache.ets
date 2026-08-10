@@ -11,6 +11,7 @@ interface NativeMediaProxyCache {
   addAuthorizedTorrentFile(torrentBytes: Uint8Array): string;
   removeTorrent(torrentId: string, deleteFiles: boolean): boolean;
   torrentFilesJson(torrentId: string): string;
+  selectTorrentFiles(torrentId: string, fileIds: number[]): boolean;
   torrentStatusJson(torrentId: string): string;
   setTorrentPaused(torrentId: string, paused: boolean): boolean;
   setTorrentDownloadLimit(bytesPerSecond: number): boolean;
@@ -124,6 +125,14 @@ export class MediaProxyCache {
   torrentFiles(torrentId: string): TorrentFile[] {
     if (!/^[0-9]+$/.test(torrentId)) throw new Error('Invalid torrent ID');
     return JSON.parse(this.core.torrentFilesJson(torrentId)) as TorrentFile[];
+  }
+
+  selectTorrentFiles(torrentId: string, fileIds: number[]): boolean {
+    if (!/^[0-9]+$/.test(torrentId) || fileIds.length === 0 || fileIds.length > 4096 ||
+      fileIds.some((id: number) => !Number.isInteger(id) || id < 0 || id > 4294967295)) {
+      throw new Error('Invalid torrent file selection');
+    }
+    return this.core.selectTorrentFiles(torrentId, fileIds);
   }
 
   torrentStatus(torrentId: string): TorrentStatus {

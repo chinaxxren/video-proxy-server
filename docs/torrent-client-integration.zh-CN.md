@@ -37,7 +37,7 @@ LIBRQBIT_ENABLED=1 PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
 1. 创建并启动 `MediaProxyCache`。
 2. 调用 `addAuthorizedTorrent(magnetUri)`，或通过 `addAuthorizedTorrentFile` 传入最大
    4 MiB 的已授权 `.torrent` 元数据。解析元数据可能阻塞，应离开 UI 线程执行。
-3. 调用 `torrentFiles` 选择文件 ID，使用 `torrentStatus` 查询下载进度。
+3. 调用 `torrentFiles` 查看文件，调用 `selectTorrentFiles(torrentId, fileIds)` 限制仅下载指定文件，使用 `torrentStatus` 查询下载进度。
 4. 播放 `http://127.0.0.1:<端口>/torrent/<torrentId>/<fileId>`。
 5. 使用 `pauseTorrent` 和 `resumeTorrent` 控制网络下载。
 6. `removeTorrent(id, false)` 仅移除会话并保留数据；传 `true` 会删除下载文件。
@@ -52,9 +52,9 @@ HTTP 端点支持 `GET`、`HEAD`、开放 Range、有限 Range 和后缀 Range�
 
 ## 三端接口
 
-- Android/Kotlin：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
-- iOS/Swift：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackURL`
-- HarmonyOS/ArkTS：`addAuthorizedTorrent`、`torrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
+- Android/Kotlin：`addAuthorizedTorrent`、`torrentFiles`、`selectTorrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
+- iOS/Swift：`addAuthorizedTorrent`、`torrentFiles`、`selectTorrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackURL`
+- HarmonyOS/ArkTS：`addAuthorizedTorrent`、`torrentFiles`、`selectTorrentFiles`、`torrentStatus`、`removeTorrent`、`torrentPlaybackUrl`
 
 torrent ID 允许为 `0`。HarmonyOS 使用十进制字符串传递 ID，避免 JavaScript 整数精度
 丢失。若默认原生包未启用 `p2p-librqbit`，调用这些接口会明确失败。

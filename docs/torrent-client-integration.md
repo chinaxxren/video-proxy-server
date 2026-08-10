@@ -43,7 +43,7 @@ and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
 2. Call `addAuthorizedTorrent(magnetUri)` or pass up to 4 MiB of authorized
    `.torrent` metadata to `addAuthorizedTorrentFile`. This is a blocking operation and
    should run away from the UI thread while metadata is resolved.
-3. Call `torrentFiles` to select a file ID. `torrentStatus` reports progress.
+3. Call `torrentFiles` to inspect files. Call `selectTorrentFiles(torrentId, fileIds)` to restrict downloading to selected files. `torrentStatus` reports progress.
 4. Play `http://127.0.0.1:<port>/torrent/<torrentId>/<fileId>`.
 5. Use `pauseTorrent` and `resumeTorrent` to control network downloading.
 6. Call `removeTorrent(id, false)` to forget the session while preserving data,
@@ -60,9 +60,9 @@ and validates bencode structure, paths, piece metadata, and info-hash.
 
 ## Platform APIs
 
-- Android/Kotlin: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
-- iOS/Swift: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackURL`
-- HarmonyOS/ArkTS: `addAuthorizedTorrent`, `torrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
+- Android/Kotlin: `addAuthorizedTorrent`, `torrentFiles`, `selectTorrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
+- iOS/Swift: `addAuthorizedTorrent`, `torrentFiles`, `selectTorrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackURL`
+- HarmonyOS/ArkTS: `addAuthorizedTorrent`, `torrentFiles`, `selectTorrentFiles`, `torrentStatus`, `removeTorrent`, `torrentPlaybackUrl`
 
 Torrent IDs may be zero. HarmonyOS represents IDs as decimal strings to avoid
 JavaScript integer precision loss. Calling these methods with a default native

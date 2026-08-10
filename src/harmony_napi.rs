@@ -11,8 +11,8 @@ use crate::ffi::{
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
     proxy_torrent_add_authorized, proxy_torrent_add_file_authorized, proxy_torrent_files_json,
-    proxy_torrent_remove, proxy_torrent_set_download_limit, proxy_torrent_set_paused,
-    proxy_torrent_status_json,
+    proxy_torrent_remove, proxy_torrent_select_files, proxy_torrent_set_download_limit,
+    proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use crate::harmony_config::HarmonyConfiguration;
 #[cfg(feature = "p2p-librqbit")]
@@ -330,6 +330,32 @@ impl MediaProxyCache {
     #[napi]
     pub fn torrent_status_json(&self, torrent_id: String) -> Result<String> {
         self.torrent_json(&torrent_id, proxy_torrent_status_json)
+    }
+
+    #[cfg(feature = "p2p-librqbit")]
+    #[napi]
+    pub fn select_torrent_files(&self, torrent_id: String, file_ids: Vec<u32>) -> Result<bool> {
+        let torrent_id = torrent_id
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id >= 0)
+            .ok_or_else(|| Error::new(Status::InvalidArg, "invalid torrent ID"))?;
+        if file_ids.is_empty() || file_ids.len() > 4096 {
+            return Err(Error::new(Status::InvalidArg, "invalid file selection"));
+        }
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        Ok(unsafe {
+            proxy_torrent_select_files(
+                handle as *mut ProxyServerHandle,
+                torrent_id,
+                file_ids.as_ptr(),
+                file_ids.len(),
+            ) != 0
+        })
     }
 
     #[napi]
