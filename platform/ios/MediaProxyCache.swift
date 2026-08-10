@@ -1,6 +1,32 @@
 import Foundation
 import MediaProxyCacheCore
 
+private final class SourceRefreshContext: @unchecked Sendable {
+    let provider: @Sendable (UInt64) -> URL?
+    private let lock = NSLock()
+    private var buffers: [UnsafeMutablePointer<CChar>] = []
+
+    init(provider: @escaping @Sendable (UInt64) -> URL?) { self.provider = provider }
+
+    func resolve(_ sourceID: UInt64) -> UnsafePointer<CChar>? {
+        guard let value = provider(sourceID)?.absoluteString, let buffer = strdup(value) else { return nil }
+        lock.lock()
+        buffers.append(buffer)
+        lock.unlock()
+        return UnsafePointer(buffer)
+    }
+
+    deinit { buffers.forEach { free($0) } }
+}
+
+private func sourceRefreshBridge(
+    context: UnsafeMutableRawPointer?,
+    sourceID: UInt64
+) -> UnsafePointer<CChar>? {
+    guard let context else { return nil }
+    return Unmanaged<SourceRefreshContext>.fromOpaque(context).takeUnretainedValue().resolve(sourceID)
+}
+
 public struct TorrentFile: Codable, Equatable, Sendable {
     public let fileId: Int
     public let relativePath: String
@@ -28,6 +54,7 @@ public final class MediaProxyCache: @unchecked Sendable {
     private let lock = NSLock()
     private var handle: OpaquePointer?
     private var boundPort: UInt16 = 0
+    private var refreshContexts: [Unmanaged<SourceRefreshContext>] = []
 
     public init?(port: UInt16, cacheDirectory: String, allowedHosts: [String]) {
         guard !cacheDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -84,6 +111,21 @@ public final class MediaProxyCache: @unchecked Sendable {
         defer { lock.unlock() }
         guard let handle, sourceID != 0, url.scheme == "https" || url.scheme == "http" else { return false }
         return url.absoluteString.withCString { proxy_source_refresh(handle, sourceID, $0) == 1 }
+    }
+
+    public func setSourceRefreshProvider(
+        _ provider: @escaping @Sendable (UInt64) -> URL?
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return false }
+        let retained = Unmanaged.passRetained(SourceRefreshContext(provider: provider))
+        guard proxy_source_set_refresh_callback(handle, sourceRefreshBridge, retained.toOpaque()) == 1 else {
+            retained.release()
+            return false
+        }
+        refreshContexts.append(retained)
+        return true
     }
 
     public func removeSource(_ sourceID: UInt64) -> Bool {
@@ -271,6 +313,8 @@ public final class MediaProxyCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let handle { proxy_server_destroy(handle); self.handle = nil }
+        refreshContexts.forEach { $0.release() }
+        refreshContexts.removeAll()
         boundPort = 0
     }
 }

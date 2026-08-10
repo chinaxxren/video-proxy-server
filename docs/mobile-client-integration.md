@@ -162,6 +162,9 @@ The iOS archive also includes `adapter/MediaProxyCache.swift` as the ownership
 wrapper. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
 runs `swiftc -typecheck` against the packaged header and module map. The template
 serializes handle access so concurrent start, stop, and close calls cannot race.
+`setSourceRefreshProvider` bridges the synchronous C callback to a `@Sendable`
+Swift closure. Callback contexts and returned UTF-8 buffers remain alive until
+Core destruction completes, preventing concurrent refresh use-after-free.
 
 Recommended shape:
 
