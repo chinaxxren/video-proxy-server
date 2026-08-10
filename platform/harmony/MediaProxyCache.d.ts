@@ -4,10 +4,15 @@ export interface TorrentStatus {
   state: string; total_bytes: number; downloaded_bytes: number;
   uploaded_bytes: number; finished: boolean; error?: string | null;
 }
+export interface ProxyMetrics {
+  requests: number; active_requests: number; request_errors: number;
+  response_bytes: number; authorization_refreshes: number;
+}
 export declare class MediaProxyCache {
   static create(port: number, cacheDirectory: string, allowedHosts: string[]): MediaProxyCache;
   start(): number;
   stop(): void;
+  metricsJson(): string;
   registerSource(identity: string, url: string): string;
   refreshSource(sourceId: string, url: string): boolean;
   removeSource(sourceId: string): boolean;

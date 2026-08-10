@@ -182,6 +182,25 @@ pub fn clamp_end_to_upstream_length(start: u64, end: u64, upstream_length: u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn arbitrary_range_text_never_panics(value in ".{0,256}") {
+            if let Ok(spec) = parse_range_spec(&value) {
+                match spec {
+                    RangeSpec::Offset { start, end } => prop_assert!(end == OPEN_ENDED || start <= end),
+                    RangeSpec::Suffix { length } => prop_assert!(length > 0),
+                }
+            }
+        }
+
+        #[test]
+        fn formatted_closed_ranges_round_trip(start in any::<u64>(), span in 0u64..=1_000_000) {
+            let end = start.saturating_add(span);
+            prop_assert_eq!(parse_range(&format_range(start, end)).unwrap(), (start, end));
+        }
+    }
 
     #[test]
     fn parses_closed_and_open_ended_ranges() {

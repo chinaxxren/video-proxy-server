@@ -57,6 +57,21 @@ public struct TorrentStatus: Codable, Equatable, Sendable {
     }
 }
 
+public struct ProxyMetrics: Codable, Equatable, Sendable {
+    public let requests: UInt64
+    public let activeRequests: UInt64
+    public let requestErrors: UInt64
+    public let responseBytes: UInt64
+    public let authorizationRefreshes: UInt64
+    enum CodingKeys: String, CodingKey {
+        case requests
+        case activeRequests = "active_requests"
+        case requestErrors = "request_errors"
+        case responseBytes = "response_bytes"
+        case authorizationRefreshes = "authorization_refreshes"
+    }
+}
+
 /// Swift ownership wrapper for the shared Rust C ABI.
 public final class MediaProxyCache: @unchecked Sendable {
     private let lock = NSLock()
@@ -96,6 +111,24 @@ public final class MediaProxyCache: @unchecked Sendable {
         defer { lock.unlock() }
         if let handle { proxy_server_stop(handle) }
         boundPort = 0
+    }
+
+    public func metrics() throws -> ProxyMetrics {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { throw NSError(domain: "MediaProxyCache", code: 17) }
+        let required = proxy_server_metrics_json(handle, nil, 0)
+        guard required > 1, required <= 4097 else {
+            throw NSError(domain: "MediaProxyCache", code: 18)
+        }
+        var bytes = [UInt8](repeating: 0, count: required)
+        let written = bytes.withUnsafeMutableBufferPointer {
+            proxy_server_metrics_json(handle, $0.baseAddress, $0.count)
+        }
+        guard written == required, bytes.removeLast() == 0 else {
+            throw NSError(domain: "MediaProxyCache", code: 19)
+        }
+        return try JSONDecoder().decode(ProxyMetrics.self, from: Data(bytes))
     }
 
     public func registerSource(identity: String, url: URL) throws -> UInt64 {

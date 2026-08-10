@@ -5,9 +5,9 @@ use crate::ffi::{
     proxy_p2p_source_register_directory, proxy_p2p_source_remove, proxy_p2p_source_verify_complete,
 };
 use crate::ffi::{
-    proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    proxy_source_refresh, proxy_source_register, proxy_source_remove,
-    proxy_source_set_refresh_callback, ProxyServerHandle,
+    proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_metrics_json,
+    proxy_server_start, proxy_server_stop, proxy_source_refresh, proxy_source_register,
+    proxy_source_remove, proxy_source_set_refresh_callback, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -211,6 +211,29 @@ impl MediaProxyCache {
             unsafe { proxy_server_stop(handle as *mut ProxyServerHandle) }
         }
         Ok(())
+    }
+
+    #[napi]
+    pub fn metrics_json(&self) -> Result<String> {
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?
+            .ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        unsafe {
+            let handle = handle as *mut ProxyServerHandle;
+            let required = proxy_server_metrics_json(handle, std::ptr::null_mut(), 0);
+            if required <= 1 || required > 4097 {
+                return Err(Error::new(Status::GenericFailure, "metrics unavailable"));
+            }
+            let mut bytes = vec![0u8; required];
+            if proxy_server_metrics_json(handle, bytes.as_mut_ptr(), bytes.len()) != required {
+                return Err(Error::new(Status::GenericFailure, "metrics unavailable"));
+            }
+            bytes.pop();
+            String::from_utf8(bytes)
+                .map_err(|_| Error::new(Status::GenericFailure, "invalid metrics JSON"))
+        }
     }
 
     #[napi]

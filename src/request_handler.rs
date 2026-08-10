@@ -4,6 +4,7 @@ use crate::hls::{DefaultHlsHandler, HlsHandler};
 #[cfg(any(feature = "p2p", feature = "p2p-librqbit"))]
 use crate::http_types::stream_body;
 use crate::http_types::{empty_body, full_body, AppBody};
+use crate::metrics::RuntimeMetrics;
 use crate::utils::error::{ProxyError, Result};
 use http_body_util::BodyExt;
 use hyper::header::{HeaderValue, ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE};
@@ -37,6 +38,7 @@ pub struct RequestHandler {
     hls_handler: Arc<DefaultHlsHandler>,
     request_limit: Arc<Semaphore>,
     source_registry: crate::source_registry::SourceRegistry,
+    metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "p2p")]
     p2p_registry: crate::p2p::P2pSourceRegistry,
     #[cfg(feature = "p2p-librqbit")]
@@ -50,11 +52,12 @@ impl RequestHandler {
     /// 这里不再提供一个「默认上限」的构造函数：默认值只应有一处来源，就是
     /// `ProxyConfig::default()`，它已经带了 64。再放一个同义常量在这一层，
     /// 只会让以后改默认值时漏掉一处。
-    pub fn with_limit(
+    pub(crate) fn with_limit(
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
         max_concurrent_requests: usize,
         source_registry: crate::source_registry::SourceRegistry,
+        metrics: Arc<RuntimeMetrics>,
         #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
     ) -> Self {
         Self {
@@ -62,6 +65,7 @@ impl RequestHandler {
             hls_handler,
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
             source_registry,
+            metrics,
             #[cfg(feature = "p2p")]
             p2p_registry,
             #[cfg(feature = "p2p-librqbit")]
@@ -105,6 +109,7 @@ impl RequestHandler {
                 let source_id = data_request.source_id().expect("guarded source ID");
                 self.source_registry
                     .refresh_from_provider_if_current(source_id, data_request.get_url())?;
+                self.metrics.record_authorization_refresh();
                 let source = self.source_registry.resolve(source_id).ok_or_else(|| {
                     ProxyError::Request("registered media source does not exist".into())
                 })?;

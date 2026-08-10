@@ -37,6 +37,9 @@ cargo build --locked
 cargo test --locked
 ```
 
+Parser property tests run as part of the normal test suite through `proptest`;
+no separate fuzzing tool is required for the release gate.
+
 ### Optional P2P boundary
 
 Build and test the optional module with:
@@ -177,6 +180,12 @@ configure their players, and complete real-device validation.
 Real upstream access must use `proxy_server_create_with_hosts` and pass the
 comma-separated host allowlist. The simpler `proxy_server_create` intentionally
 uses the deny-all policy.
+
+`proxy_server_metrics_json` exposes only aggregate counters: total and active
+requests, request errors, response bytes, and authorization refreshes. It never
+contains URLs, source IDs, cache identities, paths, or request headers. Pass a
+null buffer first to query the required capacity. Swift exposes `metrics()`,
+Kotlin exposes `metrics()`, and HarmonyOS exposes `metricsJson()`.
 
 The native build helper is available at `scripts/build-mobile.sh`:
 

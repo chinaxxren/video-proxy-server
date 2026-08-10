@@ -85,6 +85,21 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn encoded_utf8_always_round_trips(value in ".{0,512}") {
+            let encoded = encode_component(&value);
+            let decoded = decode_component(&encoded).unwrap();
+            prop_assert_eq!(decoded.as_ref(), value.as_str());
+        }
+
+        #[test]
+        fn arbitrary_utf8_input_never_panics(value in ".{0,512}") {
+            let _ = decode_component(&value);
+        }
+    }
 
     #[test]
     fn component_round_trip_handles_urls_and_unicode() {

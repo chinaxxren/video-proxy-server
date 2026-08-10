@@ -78,6 +78,30 @@ fn source_registry(handle: &ProxyServerHandle) -> Option<crate::source_registry:
         .map(|server| server.source_registry())
 }
 
+fn server(handle: &ProxyServerHandle) -> Option<Arc<ProxyServer>> {
+    handle.server.lock().ok()?.as_ref().cloned()
+}
+
+/// Writes an anonymous aggregate metrics snapshot as JSON.
+///
+/// # Safety
+/// `handle` must be null or live. When non-null, `buffer` must reference
+/// `capacity` writable bytes. The return value includes the trailing NUL.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_server_metrics_json(
+    handle: *mut ProxyServerHandle,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
+    let Some(server) = handle.as_ref().and_then(server) else {
+        return 0;
+    };
+    let Ok(json) = serde_json::to_string(&server.metrics()) else {
+        return 0;
+    };
+    write_ffi_json(&json, buffer, capacity)
+}
+
 /// Registers a signed source URL and returns an opaque ID for `/media/<id>`.
 ///
 /// # Safety
@@ -600,7 +624,6 @@ pub unsafe extern "C" fn proxy_torrent_select_files(
     )
 }
 
-#[cfg(feature = "p2p-librqbit")]
 unsafe fn write_ffi_json(json: &str, buffer: *mut u8, capacity: usize) -> usize {
     let Some(required) = json.len().checked_add(1) else {
         return 0;
@@ -1214,7 +1237,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "p2p-librqbit")]
     #[test]
     fn ffi_json_writer_reports_capacity_and_never_writes_partial_output() {
         let json = r#"[{"file_id":0}]"#;
@@ -1235,6 +1257,59 @@ mod tests {
         );
         assert_eq!(&output[..json.len()], json.as_bytes());
         assert_eq!(output[json.len()], 0);
+    }
+
+    #[test]
+    fn ffi_metrics_json_uses_two_call_contract_and_contains_only_aggregates() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        unsafe {
+            assert_eq!(
+                proxy_server_metrics_json(ptr::null_mut(), ptr::null_mut(), 0),
+                0
+            );
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert!(!handle.is_null());
+            assert_ne!(proxy_server_start(handle), 0);
+
+            let required = proxy_server_metrics_json(handle, ptr::null_mut(), 0);
+            assert!(required > 1);
+            let mut short = vec![0xaa; required - 1];
+            assert_eq!(
+                proxy_server_metrics_json(handle, short.as_mut_ptr(), short.len()),
+                required
+            );
+            assert!(short.iter().all(|byte| *byte == 0xaa));
+
+            let mut output = vec![0u8; required];
+            assert_eq!(
+                proxy_server_metrics_json(handle, output.as_mut_ptr(), output.len()),
+                required
+            );
+            assert_eq!(output[required - 1], 0);
+            let value: serde_json::Value = serde_json::from_slice(&output[..required - 1]).unwrap();
+            let keys: std::collections::BTreeSet<_> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                [
+                    "active_requests",
+                    "authorization_refreshes",
+                    "request_errors",
+                    "requests",
+                    "response_bytes",
+                ]
+                .into_iter()
+                .collect()
+            );
+
+            proxy_server_stop(handle);
+            proxy_server_destroy(handle);
+        }
     }
 
     #[cfg(feature = "p2p")]

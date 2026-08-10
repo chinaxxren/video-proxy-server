@@ -5,9 +5,9 @@ use crate::ffi::{
     proxy_p2p_source_register_directory, proxy_p2p_source_remove, proxy_p2p_source_verify_complete,
 };
 use crate::ffi::{
-    proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    proxy_source_refresh, proxy_source_register, proxy_source_remove,
-    proxy_source_set_refresh_callback, ProxyServerHandle,
+    proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_metrics_json,
+    proxy_server_start, proxy_server_stop, proxy_source_refresh, proxy_source_register,
+    proxy_source_remove, proxy_source_set_refresh_callback, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -19,13 +19,12 @@ use crate::ffi::{
 use jni::objects::JByteArray;
 use jni::objects::{JClass, JObject, JString};
 use jni::refs::Global;
-#[cfg(feature = "p2p-librqbit")]
 use jni::sys::jstring;
 use jni::sys::{jboolean, jint, jlong};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned, JValue, JavaVM};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::ffi::c_void;
+use std::ffi::CString;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
@@ -176,6 +175,34 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeDestroy
             contexts.remove(&handle);
         }
         Ok(())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeMetricsJson<'local>(
+    mut env: EnvUnowned<'local>,
+    _object: JObject<'local>,
+    handle: jlong,
+) -> jstring {
+    env.with_env(|env| -> jni::errors::Result<jstring> {
+        let json = with_handle(handle, |handle| unsafe {
+            let required = proxy_server_metrics_json(handle, std::ptr::null_mut(), 0);
+            if required <= 1 || required > 4097 {
+                return None;
+            }
+            let mut bytes = vec![0u8; required];
+            if proxy_server_metrics_json(handle, bytes.as_mut_ptr(), bytes.len()) != required {
+                return None;
+            }
+            bytes.pop();
+            String::from_utf8(bytes).ok()
+        })
+        .flatten();
+        match json {
+            Some(json) => Ok(env.new_string(json)?.into_raw().cast()),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

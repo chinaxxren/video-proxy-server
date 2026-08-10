@@ -642,6 +642,9 @@ fn is_public_socket(address: std::net::SocketAddr) -> bool {
     if address.port() == 0 {
         return false;
     }
+    if cfg!(feature = "allow-private-upstream") {
+        return true;
+    }
     match address.ip() {
         std::net::IpAddr::V4(ip) => {
             !(ip.is_private()
@@ -2129,6 +2132,91 @@ impl<'a> BencodeParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[cfg(feature = "allow-private-upstream")]
+    async fn spawn_test_peer(
+        handshake: BitTorrentHandshake,
+        piece: Vec<u8>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request_handshake = [0u8; 68];
+            stream.read_exact(&mut request_handshake).await.unwrap();
+            let request_handshake = parse_handshake(&request_handshake).unwrap();
+            assert_eq!(request_handshake.info_hash, handshake.info_hash);
+            stream
+                .write_all(&encode_handshake(&handshake))
+                .await
+                .unwrap();
+            stream
+                .write_all(&encode_peer_message(&PeerMessage::Bitfield(vec![0x80])).unwrap())
+                .await
+                .unwrap();
+
+            loop {
+                let mut prefix = [0u8; 4];
+                if stream.read_exact(&mut prefix).await.is_err() {
+                    break;
+                }
+                let length = u32::from_be_bytes(prefix) as usize;
+                let mut encoded = Vec::with_capacity(length + 4);
+                encoded.extend_from_slice(&prefix);
+                encoded.resize(length + 4, 0);
+                stream.read_exact(&mut encoded[4..]).await.unwrap();
+                match parse_peer_message(&encoded).unwrap() {
+                    PeerMessage::Interested => {
+                        stream
+                            .write_all(&encode_peer_message(&PeerMessage::Unchoke).unwrap())
+                            .await
+                            .unwrap();
+                    }
+                    PeerMessage::Request {
+                        index,
+                        begin,
+                        length,
+                    } => {
+                        let start = begin as usize;
+                        let end = start + length as usize;
+                        stream
+                            .write_all(
+                                &encode_peer_message(&PeerMessage::Piece {
+                                    index,
+                                    begin,
+                                    block: piece[start..end].to_vec(),
+                                })
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (address, task)
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_peer_messages_never_panic(input in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = parse_peer_message(&input);
+        }
+
+        #[test]
+        fn arbitrary_tracker_responses_never_panic(input in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            let _ = parse_tracker_response(&input);
+        }
+
+        #[test]
+        fn arbitrary_magnet_text_never_panics(input in ".{0,1024}") {
+            let _ = parse_magnet_uri(&input);
+        }
+    }
 
     #[test]
     fn parses_hex_magnet_and_deduplicates_trackers() {
@@ -2407,6 +2495,7 @@ mod tests {
     #[test]
     fn routing_table_rejects_private_nodes_and_keeps_closest() {
         let mut table = DhtRoutingTable::new([0; 20], 2).unwrap();
+        #[cfg(not(feature = "allow-private-upstream"))]
         assert!(!table.insert(DhtNode {
             id: [1; 20],
             address: "127.0.0.1:6881".parse().unwrap()
@@ -2428,6 +2517,7 @@ mod tests {
         assert_eq!(closest[1].id, [2; 20]);
     }
 
+    #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
     async fn dht_udp_query_rejects_private_targets_before_network_io() {
         let error = send_dht_udp_query("127.0.0.1:6881".parse().unwrap(), b"query")
@@ -2436,6 +2526,7 @@ mod tests {
         assert!(error.to_string().contains("public"));
     }
 
+    #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
     async fn udp_tracker_rejects_private_target_before_network_io() {
         let request = TrackerAnnounce {
@@ -2453,6 +2544,7 @@ mod tests {
         assert!(error.to_string().contains("public"));
     }
 
+    #[cfg(not(feature = "allow-private-upstream"))]
     #[tokio::test]
     async fn peer_connection_rejects_private_target_before_network_io() {
         let handshake = BitTorrentHandshake {
@@ -2561,5 +2653,90 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "allow-private-upstream")]
+    #[tokio::test]
+    async fn localhost_peer_wire_downloads_and_verifies_a_real_piece() {
+        let bytes = b"verified peer bytes".to_vec();
+        let hash: [u8; 20] = Sha1::digest(&bytes).into();
+        let handshake = BitTorrentHandshake {
+            reserved: [0; 8],
+            info_hash: [7; 20],
+            peer_id: [8; 20],
+        };
+        let remote = BitTorrentHandshake {
+            peer_id: [9; 20],
+            ..handshake.clone()
+        };
+        let (address, peer) = spawn_test_peer(remote, bytes.clone()).await;
+        let metadata = TorrentMetadata {
+            info_hash: handshake.info_hash,
+            name: "test.bin".into(),
+            total_length: bytes.len() as u64,
+            piece_length: bytes.len() as u32,
+            piece_sha1: vec![hash],
+            files: vec![TorrentFile {
+                path: vec!["test.bin".into()],
+                length: bytes.len() as u64,
+            }],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = TorrentPieceStore::new(root.path(), &handshake.info_hash).unwrap();
+        let mut scheduler = PieceScheduler::new(1, 2).unwrap();
+
+        assert_eq!(
+            download_from_peer(address, &handshake, &mut scheduler, &metadata, &store, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.load(0, &hash).unwrap().unwrap(), bytes);
+        assert!(scheduler.is_complete());
+        peer.await.unwrap();
+    }
+
+    #[cfg(feature = "allow-private-upstream")]
+    #[tokio::test]
+    async fn localhost_peer_wire_rejects_corrupt_piece_data() {
+        let expected = b"expected bytes".to_vec();
+        let corrupt = b"corrupted data".to_vec();
+        assert_eq!(expected.len(), corrupt.len());
+        let hash: [u8; 20] = Sha1::digest(&expected).into();
+        let handshake = BitTorrentHandshake {
+            reserved: [0; 8],
+            info_hash: [4; 20],
+            peer_id: [5; 20],
+        };
+        let (address, peer) = spawn_test_peer(
+            BitTorrentHandshake {
+                peer_id: [6; 20],
+                ..handshake.clone()
+            },
+            corrupt,
+        )
+        .await;
+        let metadata = TorrentMetadata {
+            info_hash: handshake.info_hash,
+            name: "test.bin".into(),
+            total_length: expected.len() as u64,
+            piece_length: expected.len() as u32,
+            piece_sha1: vec![hash],
+            files: vec![TorrentFile {
+                path: vec!["test.bin".into()],
+                length: expected.len() as u64,
+            }],
+        };
+        let root = tempfile::tempdir().unwrap();
+        let store = TorrentPieceStore::new(root.path(), &handshake.info_hash).unwrap();
+        let mut scheduler = PieceScheduler::new(1, 2).unwrap();
+
+        assert!(
+            download_from_peer(address, &handshake, &mut scheduler, &metadata, &store, 1)
+                .await
+                .is_err()
+        );
+        assert!(store.load(0, &hash).unwrap().is_none());
+        peer.await.unwrap();
     }
 }

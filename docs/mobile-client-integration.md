@@ -163,8 +163,14 @@ wrapper. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
 runs `swiftc -typecheck` against the packaged header and module map. The template
 serializes handle access so concurrent start, stop, and close calls cannot race.
 `setSourceRefreshProvider` bridges the synchronous C callback to a `@Sendable`
-Swift closure. Callback contexts and returned UTF-8 buffers remain alive until
-Core destruction completes, preventing concurrent refresh use-after-free.
+Swift closure. Core supplies a bounded buffer for every refresh and copies the
+UTF-8 URL immediately. Callback contexts remain alive until Core destruction
+completes, preventing concurrent refresh use-after-free.
+
+All adapters expose anonymous aggregate runtime metrics. The five counters are
+`requests`, `active_requests`, `request_errors`, `response_bytes`, and
+`authorization_refreshes`; metrics must never contain source identifiers,
+cache identities, URLs, paths, or headers.
 
 Recommended shape:
 

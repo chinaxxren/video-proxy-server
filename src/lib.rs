@@ -11,6 +11,7 @@ mod harmony_config;
 mod harmony_napi;
 pub mod hls;
 pub mod http_types;
+pub mod metrics;
 #[cfg(feature = "p2p")]
 pub mod p2p;
 #[cfg(feature = "p2p-network")]

@@ -16,6 +16,8 @@
 
 - 迁移到 Hyper 1 和 Rustls，删除 Core 中重复的 Reqwest 客户端，并收窄 Tokio features。
 - 来源刷新回调改为写入 Core 管理的有界缓冲区，不再把每次返回的 URL 保留到关闭。
+- C、Swift、Kotlin/JNI 和鸿蒙 N-API Adapter 增加脱敏聚合运行指标。
+- Range、百分号解码、Magnet、Tracker 和 Peer Wire 解析器增加属性测试。
 - 移动端和桌面端打包使用可复现的 locked 构建，并为 Release 产物生成校验和。
 
 ### 安全

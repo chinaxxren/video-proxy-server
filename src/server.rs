@@ -3,6 +3,7 @@ use crate::handlers::BackgroundTasks;
 use crate::hls::DefaultHlsHandler;
 use crate::http_types::{empty_body, full_body, AppBody};
 use crate::log_info;
+use crate::metrics::{ActiveRequestGuard, MetricsSnapshot, RuntimeMetrics};
 use crate::request_handler::RequestHandler;
 use crate::storage::StorageManagerConfig;
 use crate::utils::error::{ProxyError, Result};
@@ -18,8 +19,10 @@ use hyper_util::server::graceful::GracefulShutdown;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
@@ -100,6 +103,7 @@ pub struct ProxyServer {
     max_request_headers: usize,
     background_tasks: Arc<BackgroundTasks>,
     source_registry: crate::source_registry::SourceRegistry,
+    metrics: Arc<RuntimeMetrics>,
     #[cfg(feature = "p2p")]
     p2p_registry: crate::p2p::P2pSourceRegistry,
 }
@@ -153,6 +157,7 @@ impl ProxyServer {
     ) -> Self {
         let policy = Arc::new(NetworkPolicy::allow_hosts(&config.allowed_hosts));
         let source_registry = crate::source_registry::SourceRegistry::default();
+        let metrics = Arc::new(RuntimeMetrics::default());
         let cache_dir = config.cache_dir.clone();
 
         // 创建数据源管理器
@@ -182,6 +187,7 @@ impl ProxyServer {
             hls_handler,
             config.max_concurrent_requests,
             source_registry.clone(),
+            Arc::clone(&metrics),
             #[cfg(feature = "p2p")]
             p2p_registry.clone(),
         ));
@@ -199,6 +205,7 @@ impl ProxyServer {
             max_request_headers: config.max_request_headers,
             background_tasks,
             source_registry,
+            metrics,
             #[cfg(feature = "p2p")]
             p2p_registry,
         }
@@ -206,6 +213,10 @@ impl ProxyServer {
 
     pub fn source_registry(&self) -> crate::source_registry::SourceRegistry {
         self.source_registry.clone()
+    }
+
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     #[cfg(feature = "p2p")]
@@ -309,16 +320,22 @@ impl ProxyServer {
                     let (stream, _) = accepted
                         .map_err(|error| ProxyError::IO(format!("接受连接失败: {error}")))?;
                     let handler = self.handler.clone();
+                    let metrics = Arc::clone(&self.metrics);
                     let watcher = graceful.watcher();
                     connections.spawn(async move {
                         let service = service_fn(move |request| {
                             let handler = handler.clone();
+                            let metrics = Arc::clone(&metrics);
                             async move {
+                                let active = metrics.begin_request();
                                 let response = match handler.handle_request(request).await {
                                     Ok(response) => response,
-                                    Err(error) => error_response(error),
+                                    Err(error) => {
+                                        metrics.record_request_error();
+                                        error_response(error)
+                                    }
                                 };
-                                Ok::<_, Infallible>(response)
+                                Ok::<_, Infallible>(metrics_response(response, metrics, active))
                             }
                         });
                         let mut builder = ConnectionBuilder::new();
@@ -358,6 +375,58 @@ impl ProxyServer {
     }
 }
 
+fn metrics_response(
+    response: hyper::Response<AppBody>,
+    metrics: Arc<RuntimeMetrics>,
+    active: ActiveRequestGuard,
+) -> hyper::Response<AppBody> {
+    use http_body_util::BodyExt;
+    let (parts, body) = response.into_parts();
+    hyper::Response::from_parts(
+        parts,
+        MetricsBody {
+            body,
+            metrics,
+            _active: active,
+        }
+        .boxed_unsync(),
+    )
+}
+
+struct MetricsBody {
+    body: AppBody,
+    metrics: Arc<RuntimeMetrics>,
+    _active: ActiveRequestGuard,
+}
+
+impl hyper::body::Body for MetricsBody {
+    type Data = bytes::Bytes;
+    type Error = ProxyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.body).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.metrics.record_response_bytes(data.len());
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
 fn error_response(error: ProxyError) -> hyper::Response<AppBody> {
     log_info!("Server", "请求失败: {}", error);
     let mut builder = hyper::Response::builder().status(error.status_code());
@@ -390,6 +459,31 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn metrics_body_counts_bytes_and_releases_active_request() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let active = metrics.begin_request();
+        let response = metrics_response(
+            hyper::Response::new(full_body("hello")),
+            Arc::clone(&metrics),
+            active,
+        );
+        assert_eq!(metrics.snapshot().active_requests, 1);
+        let bytes = crate::http_types::collect_body(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(bytes, "hello");
+        assert_eq!(
+            metrics.snapshot(),
+            MetricsSnapshot {
+                requests: 1,
+                active_requests: 0,
+                response_bytes: 5,
+                ..Default::default()
+            }
+        );
+    }
 
     #[tokio::test]
     async fn incomplete_request_headers_are_closed_after_timeout() {

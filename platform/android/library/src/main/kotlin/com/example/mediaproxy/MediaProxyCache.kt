@@ -13,6 +13,13 @@ data class TorrentStatus(
     val finished: Boolean,
     val error: String?,
 )
+data class ProxyMetrics(
+    val requests: Long,
+    val activeRequests: Long,
+    val requestErrors: Long,
+    val responseBytes: Long,
+    val authorizationRefreshes: Long,
+)
 
 fun interface SourceRefreshProvider {
     fun refreshSource(sourceId: Long): String?
@@ -49,6 +56,18 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     @Synchronized fun stop() {
         if (handle != 0L) nativeStop(handle)
         boundPort = 0
+    }
+
+    @Synchronized fun metrics(): ProxyMetrics {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        val value = JSONObject(checkNotNull(nativeMetricsJson(handle)) { "metrics unavailable" })
+        return ProxyMetrics(
+            value.getLong("requests"),
+            value.getLong("active_requests"),
+            value.getLong("request_errors"),
+            value.getLong("response_bytes"),
+            value.getLong("authorization_refreshes"),
+        )
     }
 
     @Synchronized fun registerSource(identity: String, url: String): Long {
@@ -213,6 +232,7 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     private external fun nativeStart(handle: Long): Int
     private external fun nativeStop(handle: Long)
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeMetricsJson(handle: Long): String?
     private external fun nativeRegisterSource(handle: Long, identity: String, url: String): Long
     private external fun nativeRefreshSource(handle: Long, sourceId: Long, url: String): Boolean
     private external fun nativeRemoveSource(handle: Long, sourceId: Long): Boolean

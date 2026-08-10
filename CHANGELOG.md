@@ -16,6 +16,8 @@
 
 - Migrated to Hyper 1 and Rustls, removed the duplicate Reqwest client from the Core, and narrowed Tokio features.
 - Source refresh callbacks now write into a Core-owned bounded buffer instead of retaining every returned URL until shutdown.
+- Added redacted aggregate runtime metrics across the C, Swift, Kotlin/JNI, and HarmonyOS N-API adapters.
+- Added property tests for Range, percent-decoding, Magnet, tracker, and peer-wire parsers.
 - Mobile and desktop package workflows use reproducible locked builds and checksum release assets.
 
 ### Security

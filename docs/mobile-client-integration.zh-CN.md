@@ -158,8 +158,13 @@ iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装�
 模板通过 `MediaProxyCacheCore` 导入 C ABI；每次 iOS 构建都会针对打包的头文件和
 module map 执行 `swiftc -typecheck`。模板会串行化 handle 访问，避免并发调用 start、
 stop 和 close 产生竞态。
-`setSourceRefreshProvider` 将同步 C 回调桥接为 `@Sendable` Swift 闭包；回调上下文
-和返回的 UTF-8 缓冲区会保持到 Core 销毁完成，避免并发刷新产生悬空指针。
+`setSourceRefreshProvider` 将同步 C 回调桥接为 `@Sendable` Swift 闭包。每次刷新由
+Core 提供有界缓冲区并立即复制 UTF-8 URL；回调上下文会保持到 Core 销毁完成，避免
+并发刷新产生悬空指针。
+
+三端 Adapter 均提供匿名聚合运行指标，字段只有 `requests`、`active_requests`、
+`request_errors`、`response_bytes` 和 `authorization_refreshes`。指标不得包含来源 ID、
+缓存身份、URL、路径或请求头。
 
 建议接口形态：
 

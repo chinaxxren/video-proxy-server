@@ -25,6 +25,13 @@ ProxyServerHandle *proxy_server_create_with_hosts(
 uint16_t proxy_server_start(ProxyServerHandle *handle);
 void proxy_server_stop(ProxyServerHandle *handle);
 void proxy_server_destroy(ProxyServerHandle *handle);
+// Writes anonymous aggregate runtime metrics as JSON. The returned capacity
+// includes the trailing NUL; pass NULL/0 to query the required capacity.
+size_t proxy_server_metrics_json(
+    ProxyServerHandle *handle,
+    uint8_t *buffer,
+    size_t capacity
+);
 // Returns an opaque ID; identical identity+URL registrations reuse the same ID.
 // Build the player URL as http://127.0.0.1:<port>/media/<id>.
 // Never pass the signed URL directly to a player or include it in logs.

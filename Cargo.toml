@@ -73,3 +73,4 @@ napi-derive = { version = "2.16.13", default-features = false, features = ["stri
 # test-util 提供 tokio::time::pause/advance，TTL 相关的测试靠它免去真实等待。
 tokio = { version = "1.0", default-features = false, features = ["test-util"] }
 tempfile = "3"
+proptest = "1"

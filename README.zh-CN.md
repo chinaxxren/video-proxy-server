@@ -37,6 +37,8 @@ cargo build --locked
 cargo test --locked
 ```
 
+解析器属性测试通过 `proptest` 纳入普通测试套件，发布门禁不需要额外安装模糊测试工具。
+
 ### 可选 P2P 接口
 
 使用以下命令构建和测试可选模块：
@@ -108,6 +110,10 @@ MediaSource 解码，以及重复请求首分片时的缓存命中。
 
 访问真实上游必须调用 `proxy_server_create_with_hosts` 并传入逗号分隔的域名白名单。
 简化版 `proxy_server_create` 会有意使用拒绝全部上游的策略。
+
+`proxy_server_metrics_json` 只输出请求总数、活动请求数、请求错误数、响应字节数和
+授权刷新次数，不包含 URL、来源 ID、缓存身份、路径或请求头。先传空缓冲区可查询所需
+容量。Swift 和 Kotlin Adapter 提供 `metrics()`，鸿蒙 Adapter 提供 `metricsJson()`。
 
 统一原生库构建脚本位于 `scripts/build-mobile.sh`：
 
