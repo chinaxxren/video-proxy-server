@@ -44,6 +44,29 @@ for required in \
     exit 1
   }
 done
+command -v javap >/dev/null 2>&1 || {
+  echo "javap is required to verify the Android AAR API" >&2
+  exit 1
+}
+verify_dir="$(mktemp -d)"
+trap 'rm -rf "$verify_dir"' EXIT
+unzip -p "$aar" classes.jar > "$verify_dir/classes.jar"
+api="$(javap -public -classpath "$verify_dir/classes.jar" com.example.mediaproxy.MediaProxyCache)"
+for method in \
+  addAuthorizedTorrent \
+  addAuthorizedTorrentFile \
+  torrentFiles \
+  selectTorrentFiles \
+  torrentStatus \
+  pauseTorrent \
+  resumeTorrent \
+  setTorrentDownloadLimit \
+  removeTorrent; do
+  grep -Fq " $method(" <<<"$api" || {
+    echo "Android AAR API is missing $method" >&2
+    exit 1
+  }
+done
 mkdir -p "$OUTPUT_DIR"
 cp "$aar" "$OUTPUT_DIR/MediaProxyCache.aar"
 echo "$OUTPUT_DIR/MediaProxyCache.aar"
