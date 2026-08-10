@@ -12,6 +12,12 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: deps
+    ignore:
+      # napi-h 2.16 is a HarmonyOS fork of the N-API 2.x runtime. The 3.x
+      # derive macros generate calls and traits that this runtime does not expose.
+      - dependency-name: napi-derive
+        update-types:
+          - version-update:semver-major
     groups:
       rust-minor-and-patch:
         patterns:
