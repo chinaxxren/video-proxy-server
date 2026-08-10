@@ -23,7 +23,7 @@ jobs:
             name: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --locked --release
       - name: Collect Unix artifacts

@@ -324,7 +324,7 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRefresh
     env.with_env(|env| -> jni::errors::Result<jboolean> {
         let url = CString::new(url.try_to_string(env)?).ok();
         Ok(url
-            .and_then(|url| u64::try_from(source_id).ok().map(|id| (url, id)))
+            .zip(u64::try_from(source_id).ok())
             .and_then(|(url, id)| {
                 with_handle(handle, |handle| unsafe {
                     proxy_source_refresh(handle, id, url.as_ptr()) != 0
