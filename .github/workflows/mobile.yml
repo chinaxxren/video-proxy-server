@@ -28,7 +28,7 @@ jobs:
       LIBRQBIT_ENABLED: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '1' || '0' }}
       LIBRQBIT_SUFFIX: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '-librqbit' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
@@ -55,7 +55,7 @@ jobs:
       LIBRQBIT_ENABLED: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '1' || '0' }}
       LIBRQBIT_SUFFIX: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '-librqbit' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -107,7 +107,7 @@ jobs:
       LIBRQBIT_ENABLED: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '1' || '0' }}
       LIBRQBIT_SUFFIX: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.include_librqbit) && '-librqbit' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-ohos,armv7-unknown-linux-ohos
