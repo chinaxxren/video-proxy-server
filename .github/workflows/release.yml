@@ -25,6 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/verify-release-version.sh
+        shell: bash
       - run: cargo build --locked --release
       - name: Collect Unix artifacts
         if: runner.os != 'Windows'

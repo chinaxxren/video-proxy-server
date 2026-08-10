@@ -68,7 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: bash -n scripts/build-mobile.sh scripts/package-mobile.sh
+      - run: bash -n scripts/*.sh
+      - run: ./scripts/verify-release-version.sh
   ffi-macos:
     runs-on: macos-14
     steps:
