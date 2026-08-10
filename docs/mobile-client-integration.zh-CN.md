@@ -233,7 +233,7 @@ await avPlayer.setUrl(playbackUrl)
 
 - 根据支持的鸿蒙 SDK 版本验证 Rust target 和原生构建链；
 - 根据产品设备矩阵验证打包的 ARM64 和 ARMv7 库；
-- 将可能阻塞的 N-API 生命周期调用迁移到异步任务，并明确回调线程；
+- `setSourceRefreshProvider` 使用同步回调桥接，JS 回调等待上限为 10 秒；生命周期调用保持串行，ArkTS 回调不要返回异步 Promise；
 - 使用应用 Context 提供的沙箱路径；
 - 验证 localhost 网络访问和 cleartext 策略；
 - 测试 AVPlayer 的 Range、Seek、HLS、后台播放和应用恢复；
