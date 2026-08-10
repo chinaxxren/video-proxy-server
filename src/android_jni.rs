@@ -15,9 +15,13 @@ use crate::ffi::{
     proxy_torrent_remove, proxy_torrent_select_files, proxy_torrent_set_download_limit,
     proxy_torrent_set_paused, proxy_torrent_status_json,
 };
-use jni::objects::{JByteArray, JClass, JObject, JString};
+#[cfg(feature = "p2p-librqbit")]
+use jni::objects::JByteArray;
+use jni::objects::{JClass, JObject, JString};
 use jni::refs::Global;
-use jni::sys::{jboolean, jint, jlong, jstring};
+#[cfg(feature = "p2p-librqbit")]
+use jni::sys::jstring;
+use jni::sys::{jboolean, jint, jlong};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned, JValue, JavaVM};
 use std::collections::HashMap;
 use std::ffi::CString;

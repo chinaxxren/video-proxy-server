@@ -28,9 +28,9 @@ jobs:
         include:
           - features: p2p-librqbit
             runner: ubuntu-latest
-          # JNI host tests require a JVM-capable linker environment. The
-          # Android NDK build itself remains enforced by mobile.yml.
-          - features: p2p-librqbit,android-jni
+          # The bridge is checked independently from the already-covered
+          # librqbit graph. The Android NDK build itself is enforced by mobile.yml.
+          - features: android-jni
             runner: macos-14
           - features: p2p-librqbit,harmony-napi
             runner: ubuntu-latest
