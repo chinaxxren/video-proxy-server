@@ -192,6 +192,8 @@ iOS 工作项：
 ARM64 JNI 库、完整三 ABI Release AAR 和 Debug APK 已通过该工具链构建，仍需进行运行时验证。
 JNI 暴露进程内不透明 token，而不是原生指针值。未知、已移除和重复销毁的 token 会在
 访问原生内存前被拒绝，销毁操作也会与活动 JNI 调用串行化。
+`SourceRefreshProvider` 会保存为 JNI 全局引用。Core 工作线程在调用前附加到 JVM，
+回调上下文只会在原生服务器销毁并等待活动任务结束后释放。
 
 建议接口形态：
 

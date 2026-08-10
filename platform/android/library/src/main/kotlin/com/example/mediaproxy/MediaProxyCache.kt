@@ -14,6 +14,10 @@ data class TorrentStatus(
     val error: String?,
 )
 
+fun interface SourceRefreshProvider {
+    fun refreshSource(sourceId: Long): String?
+}
+
 /** Thin Kotlin ownership wrapper around the shared Rust JNI bridge. */
 class MediaProxyCache private constructor(private var handle: Long) : AutoCloseable {
     private var boundPort: Int = 0
@@ -69,6 +73,11 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
         require(sourceId > 0L)
         check(boundPort != 0) { "MediaProxyCache is not running" }
         return "http://127.0.0.1:$boundPort/media/$sourceId"
+    }
+
+    @Synchronized fun setSourceRefreshProvider(provider: SourceRefreshProvider): Boolean {
+        check(handle != 0L) { "MediaProxyCache is closed" }
+        return nativeSetSourceRefreshProvider(handle, provider)
     }
 
     /** Requires a native artifact built with P2P_ENABLED=1. */
@@ -207,6 +216,7 @@ class MediaProxyCache private constructor(private var handle: Long) : AutoClosea
     private external fun nativeRegisterSource(handle: Long, identity: String, url: String): Long
     private external fun nativeRefreshSource(handle: Long, sourceId: Long, url: String): Boolean
     private external fun nativeRemoveSource(handle: Long, sourceId: Long): Boolean
+    private external fun nativeSetSourceRefreshProvider(handle: Long, provider: SourceRefreshProvider): Boolean
     private external fun nativeRegisterP2PDirectory(
         handle: Long,
         manifestJson: String,

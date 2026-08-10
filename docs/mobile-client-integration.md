@@ -200,6 +200,9 @@ built with this toolchain; runtime validation remains a separate step.
 JNI exposes process-local opaque tokens rather than pointer values. Unknown,
 removed, and repeatedly destroyed tokens are rejected before native memory is
 accessed, and destruction is serialized with active JNI calls.
+`SourceRefreshProvider` is retained as a JNI global reference. Core worker
+threads attach to the JVM before invoking it, and callback contexts are released
+only after native server destruction has joined active work.
 
 Recommended shape:
 

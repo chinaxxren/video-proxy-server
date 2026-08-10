@@ -57,6 +57,7 @@ for method in \
   refreshSource \
   removeSource \
   playbackUrl \
+  setSourceRefreshProvider \
   addAuthorizedTorrent \
   addAuthorizedTorrentFile \
   torrentFiles \

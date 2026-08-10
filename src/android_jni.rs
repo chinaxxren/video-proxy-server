@@ -6,7 +6,8 @@ use crate::ffi::{
 };
 use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    proxy_source_refresh, proxy_source_register, proxy_source_remove, ProxyServerHandle,
+    proxy_source_refresh, proxy_source_register, proxy_source_remove,
+    proxy_source_set_refresh_callback, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -15,16 +16,62 @@ use crate::ffi::{
     proxy_torrent_set_paused, proxy_torrent_status_json,
 };
 use jni::objects::{JByteArray, JClass, JObject, JString};
+use jni::refs::Global;
 use jni::sys::{jboolean, jint, jlong, jstring};
-use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned};
+use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned, JValue, JavaVM};
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
 static HANDLES: LazyLock<Mutex<HashMap<jlong, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+// Boxes keep callback context addresses stable when the per-handle vector grows.
+#[allow(clippy::vec_box)]
+static REFRESH_CONTEXTS: LazyLock<Mutex<HashMap<jlong, Vec<Box<AndroidRefreshContext>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct AndroidRefreshContext {
+    vm: JavaVM,
+    provider: Global<JObject<'static>>,
+    buffers: Mutex<Vec<CString>>,
+}
+
+unsafe extern "C" fn android_refresh_callback(
+    context: *mut c_void,
+    source_id: u64,
+) -> *const c_char {
+    let Some(context) = (context as *const AndroidRefreshContext).as_ref() else {
+        return std::ptr::null();
+    };
+    context
+        .vm
+        .attach_current_thread(|env| -> jni::errors::Result<*const c_char> {
+            let value = env.call_method(
+                &context.provider,
+                jni::jni_str!("refreshSource"),
+                jni::jni_sig!("(J)Ljava/lang/String;"),
+                &[JValue::Long(source_id as jlong)],
+            )?;
+            let object = value.into_object()?;
+            if object.as_raw().is_null() {
+                return Ok(std::ptr::null());
+            }
+            let value = JString::cast_local(env, object)?.try_to_string(env)?;
+            let value = CString::new(value)
+                .map_err(|_| jni::errors::Error::NullPtr("refresh URL contains NUL"))?;
+            let pointer = value.as_ptr();
+            context
+                .buffers
+                .lock()
+                .map_err(|_| jni::errors::Error::NullPtr("refresh buffers unavailable"))?
+                .push(value);
+            Ok(pointer)
+        })
+        .unwrap_or(std::ptr::null())
+}
 
 fn register_handle(handle: *mut ProxyServerHandle) -> Option<jlong> {
     let token = NEXT_HANDLE
@@ -122,6 +169,9 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeDestroy
     env.with_env(|_| -> jni::errors::Result<()> {
         if let Some(handle) = remove_handle(handle) {
             unsafe { proxy_server_destroy(handle) }
+        }
+        if let Ok(mut contexts) = REFRESH_CONTEXTS.lock() {
+            contexts.remove(&handle);
         }
         Ok(())
     })
@@ -297,6 +347,43 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveS
                 })
             })
             .unwrap_or(false))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeSetSourceRefreshProvider(
+    mut env: EnvUnowned<'_>,
+    _object: JObject<'_>,
+    handle: jlong,
+    provider: JObject<'_>,
+) -> jboolean {
+    env.with_env(|env| -> jni::errors::Result<jboolean> {
+        let context = Box::new(AndroidRefreshContext {
+            vm: env.get_java_vm()?,
+            provider: env.new_global_ref(&provider)?,
+            buffers: Mutex::new(Vec::new()),
+        });
+        let context_pointer = (&*context as *const AndroidRefreshContext)
+            .cast_mut()
+            .cast();
+        let installed = with_handle(handle, |native_handle| unsafe {
+            proxy_source_set_refresh_callback(
+                native_handle,
+                Some(android_refresh_callback),
+                context_pointer,
+            ) != 0
+        })
+        .unwrap_or(false);
+        if installed {
+            REFRESH_CONTEXTS
+                .lock()
+                .map_err(|_| jni::errors::Error::NullPtr("refresh contexts unavailable"))?
+                .entry(handle)
+                .or_default()
+                .push(context);
+        }
+        Ok(installed)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }

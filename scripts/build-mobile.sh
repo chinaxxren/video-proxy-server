@@ -184,6 +184,7 @@ verify_native_symbols() {
       Java_com_example_mediaproxy_MediaProxyCache_nativeRegisterSource \
       Java_com_example_mediaproxy_MediaProxyCache_nativeRefreshSource \
       Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveSource \
+      Java_com_example_mediaproxy_MediaProxyCache_nativeSetSourceRefreshProvider \
       Java_com_example_mediaproxy_MediaProxyCache_nativeDestroy; do
       rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
         echo "Missing Android JNI symbol $symbol in $artifact" >&2
