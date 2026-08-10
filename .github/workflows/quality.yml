@@ -5,7 +5,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
 
 jobs:
   rust:
@@ -58,14 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: taiki-e/install-action@v2.85.11
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # librqbit 8.1.1 pulls quick-xml 0.37 through librqbit-upnp. The
-          # affected UPnP parser is unreachable because the Core always sets
-          # enable_upnp_port_forwarding=false. Remove these exceptions when a
-          # stable librqbit release upgrades quick-xml to 0.41 or newer.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          tool: cargo-audit
+      # librqbit 8.1.1 pulls quick-xml 0.37 through librqbit-upnp. The affected
+      # UPnP parser is unreachable because enable_upnp_port_forwarding=false.
+      # Remove these exceptions when stable librqbit uses quick-xml >= 0.41.
+      - run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
   scripts:
     runs-on: ubuntu-latest
     steps:
