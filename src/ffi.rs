@@ -4,7 +4,6 @@
 //! the returned handle remains valid until `proxy_server_destroy` is called.
 
 use crate::server::{ProxyConfig, ProxyServer};
-#[cfg(feature = "p2p")]
 use std::ffi::c_void;
 use std::ffi::{c_char, CStr};
 use std::path::PathBuf;
@@ -61,6 +60,104 @@ pub struct ProxyServerHandle {
     p2p_sources: crate::p2p::P2pSourceRegistry,
     #[cfg(feature = "p2p-librqbit")]
     rqbit_commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<RqbitCommand>>>>,
+}
+
+pub type ProxySourceRefreshCallback =
+    unsafe extern "C" fn(context: *mut c_void, source_id: u64) -> *const c_char;
+
+fn source_registry(handle: &ProxyServerHandle) -> Option<crate::source_registry::SourceRegistry> {
+    handle
+        .server
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|server| server.source_registry())
+}
+
+/// Registers a signed source URL and returns an opaque ID for `/media/<id>`.
+///
+/// # Safety
+/// `handle`, `identity`, and `url` must be valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn proxy_source_register(
+    handle: *mut ProxyServerHandle,
+    identity: *const c_char,
+    url: *const c_char,
+) -> u64 {
+    let (Some(handle), Some(identity), Some(url)) =
+        (handle.as_ref(), read_string(identity), read_string(url))
+    else {
+        return 0;
+    };
+    source_registry(handle)
+        .and_then(|registry| registry.register_or_reuse(&identity, &url).ok())
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+///
+/// # Safety
+/// `handle` and `url` must be valid for the duration of the call.
+pub unsafe extern "C" fn proxy_source_refresh(
+    handle: *mut ProxyServerHandle,
+    source_id: u64,
+    url: *const c_char,
+) -> u8 {
+    let (Some(handle), Some(url)) = (handle.as_ref(), read_string(url)) else {
+        return 0;
+    };
+    u8::from(
+        source_registry(handle).is_some_and(|registry| registry.refresh(source_id, &url).is_ok()),
+    )
+}
+
+#[no_mangle]
+///
+/// # Safety
+/// `handle` must be null or a live handle.
+pub unsafe extern "C" fn proxy_source_remove(handle: *mut ProxyServerHandle, source_id: u64) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    u8::from(source_registry(handle).is_some_and(|registry| registry.remove(source_id)))
+}
+
+#[no_mangle]
+///
+/// # Safety
+/// `handle` must be null or a live handle. The callback and context must remain
+/// valid until replaced or cleared.
+pub unsafe extern "C" fn proxy_source_set_refresh_callback(
+    handle: *mut ProxyServerHandle,
+    callback: Option<ProxySourceRefreshCallback>,
+    context: *mut c_void,
+) -> u8 {
+    let Some(handle) = handle.as_ref() else {
+        return 0;
+    };
+    let Some(registry) = source_registry(handle) else {
+        return 0;
+    };
+    let provider = callback.map(|callback| {
+        let context = context as usize;
+        Arc::new(move |source_id| {
+            let value = unsafe { callback(context as *mut c_void, source_id) };
+            if value.is_null() {
+                return Err(crate::utils::error::ProxyError::Request(
+                    "source refresh callback returned no URL".into(),
+                ));
+            }
+            CStr::from_ptr(value)
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| {
+                    crate::utils::error::ProxyError::Request(
+                        "source refresh callback returned invalid UTF-8".into(),
+                    )
+                })
+        }) as crate::source_registry::RefreshProvider
+    });
+    u8::from(registry.set_refresh_provider(provider).is_ok())
 }
 
 /// # Safety
@@ -976,6 +1073,30 @@ mod tests {
             assert_ne!(proxy_server_start(handle), 0);
             assert_eq!(proxy_server_start(handle), 0);
             proxy_server_stop(handle);
+            proxy_server_destroy(handle);
+        }
+    }
+
+    #[test]
+    fn ffi_source_registration_keeps_urls_behind_opaque_ids() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let identity = CString::new("user-1|asset-7|rev-2").unwrap();
+        let first = CString::new("https://media.example/video.mp4?token=one").unwrap();
+        let second = CString::new("https://media.example/video.mp4?token=two").unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert!(!handle.is_null());
+            assert_ne!(proxy_server_start(handle), 0);
+            let id = proxy_source_register(handle, identity.as_ptr(), first.as_ptr());
+            assert_ne!(id, 0);
+            assert_eq!(
+                proxy_source_register(handle, identity.as_ptr(), first.as_ptr()),
+                id
+            );
+            assert_eq!(proxy_source_refresh(handle, id, second.as_ptr()), 1);
+            assert_eq!(proxy_source_remove(handle, id), 1);
+            assert_eq!(proxy_source_remove(handle, id), 0);
             proxy_server_destroy(handle);
         }
     }

@@ -122,6 +122,30 @@ impl DataRequest {
         })
     }
 
+    pub(crate) fn from_registered_source<B>(
+        req: &Request<B>,
+        source_id: u64,
+        source: &crate::source_registry::RegisteredSource,
+    ) -> Result<Self> {
+        let mut request = Request::builder().uri(&source.url).body(())?;
+        *request.headers_mut() = req.headers().clone();
+        request.headers_mut().insert(
+            "X-Original-Url",
+            hyper::header::HeaderValue::from_str(&source.url)
+                .map_err(|_| ProxyError::Request("registered source URL is invalid".into()))?,
+        );
+        request.headers_mut().insert(
+            "X-Cache-Asset-Id",
+            hyper::header::HeaderValue::from_str(&source.identity)
+                .map_err(|_| ProxyError::Request("registered source identity is invalid".into()))?,
+        );
+        request.headers_mut().insert(
+            "X-Cache-Asset-Revision",
+            hyper::header::HeaderValue::from_static("registered"),
+        );
+        Self::with_source_id(&request, Some(source_id))
+    }
+
     /// 构造缓存键。
     ///
     /// 键的第一段永远是**上游规范身份**，后面可选地跟上客户端声明的身份头。

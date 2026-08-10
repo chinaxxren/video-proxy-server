@@ -121,7 +121,6 @@ printf 'android_arm64_only=%s\n' "$ANDROID_ARM64_ONLY" >> "$OUT_DIR/build-featur
 
 verify_native_symbols() {
   local artifact="$1" platform="$2" nm_tool
-  [[ "$P2P_ENABLED" == "1" || "$LIBRQBIT_ENABLED" == "1" || "$platform" == "android" || "$platform" == "harmony" ]] || return 0
   if [[ -n "${NM:-}" ]]; then
     nm_tool="$NM"
   elif command -v llvm-nm >/dev/null 2>&1; then
@@ -135,6 +134,20 @@ verify_native_symbols() {
     echo "Unable to inspect native symbols in $artifact" >&2
     return 1
   }
+  for symbol in \
+    proxy_server_create_with_hosts \
+    proxy_server_start \
+    proxy_server_stop \
+    proxy_server_destroy \
+    proxy_source_register \
+    proxy_source_refresh \
+    proxy_source_remove \
+    proxy_source_set_refresh_callback; do
+    rg -q "[[:space:]]_?${symbol}$" <<<"$symbols" || {
+      echo "Missing Core ABI symbol $symbol in $artifact" >&2
+      return 1
+    }
+  done
   if [[ "$P2P_ENABLED" == "1" ]]; then
     for symbol in \
       proxy_p2p_source_register \

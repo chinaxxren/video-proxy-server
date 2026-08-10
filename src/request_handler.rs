@@ -16,10 +16,27 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[cfg(feature = "p2p")]
 const P2P_PROVIDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn parse_media_path(path: &str) -> Result<Option<u64>> {
+    let Some(id) = path.strip_prefix("/media/") else {
+        return Ok(None);
+    };
+    if id.is_empty() || id.contains('/') {
+        return Err(ProxyError::Request(
+            "registered media path is invalid".into(),
+        ));
+    }
+    id.parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)
+        .map(Some)
+        .ok_or_else(|| ProxyError::Request("registered media ID is invalid".into()))
+}
+
 pub struct RequestHandler {
     source_manager: Arc<DataSourceManager>,
     hls_handler: Arc<DefaultHlsHandler>,
     request_limit: Arc<Semaphore>,
+    source_registry: crate::source_registry::SourceRegistry,
     #[cfg(feature = "p2p")]
     p2p_registry: crate::p2p::P2pSourceRegistry,
     #[cfg(feature = "p2p-librqbit")]
@@ -37,12 +54,14 @@ impl RequestHandler {
         source_manager: Arc<DataSourceManager>,
         hls_handler: Arc<DefaultHlsHandler>,
         max_concurrent_requests: usize,
+        source_registry: crate::source_registry::SourceRegistry,
         #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
     ) -> Self {
         Self {
             source_manager,
             hls_handler,
             request_limit: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
+            source_registry,
             #[cfg(feature = "p2p")]
             p2p_registry,
             #[cfg(feature = "p2p-librqbit")]
@@ -69,7 +88,14 @@ impl RequestHandler {
             let response = self.handle_p2p(&req, is_head)?;
             return Ok(guard_response(response, permit));
         }
-        let data_request = DataRequest::new(&req)?;
+        let data_request = if let Some(id) = parse_media_path(req.uri().path())? {
+            let source = self.source_registry.resolve(id).ok_or_else(|| {
+                ProxyError::Request("registered media source does not exist".into())
+            })?;
+            DataRequest::from_registered_source(&req, id, &source)?
+        } else {
+            DataRequest::new(&req)?
+        };
 
         let response = match (is_head, data_request.get_type()) {
             (true, crate::data_request::RequestType::M3u8) => {

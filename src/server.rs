@@ -99,6 +99,7 @@ pub struct ProxyServer {
     request_header_timeout: Duration,
     max_request_headers: usize,
     background_tasks: Arc<BackgroundTasks>,
+    source_registry: crate::source_registry::SourceRegistry,
     #[cfg(feature = "p2p")]
     p2p_registry: crate::p2p::P2pSourceRegistry,
 }
@@ -151,6 +152,7 @@ impl ProxyServer {
         #[cfg(feature = "p2p")] p2p_registry: crate::p2p::P2pSourceRegistry,
     ) -> Self {
         let policy = Arc::new(NetworkPolicy::allow_hosts(&config.allowed_hosts));
+        let source_registry = crate::source_registry::SourceRegistry::default();
         let cache_dir = config.cache_dir.clone();
 
         // 创建数据源管理器
@@ -171,7 +173,7 @@ impl ProxyServer {
         let hls_handler = Arc::new(DefaultHlsHandler::new(
             cache_dir,
             policy,
-            crate::source_registry::SourceRegistry::default(),
+            source_registry.clone(),
         ));
 
         // 创建请求处理器
@@ -179,6 +181,7 @@ impl ProxyServer {
             source_manager,
             hls_handler,
             config.max_concurrent_requests,
+            source_registry.clone(),
             #[cfg(feature = "p2p")]
             p2p_registry.clone(),
         ));
@@ -195,9 +198,14 @@ impl ProxyServer {
             request_header_timeout: config.request_header_timeout,
             max_request_headers: config.max_request_headers,
             background_tasks,
+            source_registry,
             #[cfg(feature = "p2p")]
             p2p_registry,
         }
+    }
+
+    pub fn source_registry(&self) -> crate::source_registry::SourceRegistry {
+        self.source_registry.clone()
     }
 
     #[cfg(feature = "p2p")]
