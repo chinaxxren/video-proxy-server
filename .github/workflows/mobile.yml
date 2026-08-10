@@ -42,7 +42,7 @@ jobs:
         with:
           name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
@@ -93,7 +93,7 @@ jobs:
         with:
           name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
@@ -160,7 +160,7 @@ jobs:
         with:
           name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
