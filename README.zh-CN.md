@@ -266,6 +266,7 @@ Content-Type，不会把媒体字节标记为已缓存；元数据持久化后�
 - 同一缺失区间已通过 single-flight 合并；缓存侧背压超过 1 秒后会放弃缓存写入，不阻塞播放
 - Range、HLS、损坏恢复和进程重启已有聚焦的单元/E2E 测试，但仍需补充移动端播放器覆盖
 - DNS 策略校验与连接器后续解析尚未固定到同一解析地址，仍存在 DNS rebinding 的检查/使用时间窗口
+- `cargo audit` 报告的 `backoff`、`bincode` 和 `instant` unmaintained 警告仅来自可选 `librqbit` 依赖链。安全门禁仍保持启用；两个 `quick-xml` 公告只作精确豁免，因为 UPnP 端口转发已强制关闭。
 
 ## 客户端接入
 
