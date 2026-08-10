@@ -242,7 +242,7 @@ HarmonyOS work items:
 
 - validate the Rust target and native build chain against the supported HarmonyOS SDK version;
 - validate the packaged ARM64 and ARMv7 libraries against the product device matrix;
-- move potentially blocking N-API lifecycle calls onto async tasks and document callback threads;
+- document that synchronous refresh callbacks use a 10-second bounded wait; lifecycle calls remain serialized;
 - use a sandbox path supplied by the application context;
 - verify localhost networking and cleartext policy;
 - test AVPlayer Range, seek, HLS, background playback, and application recovery;
@@ -335,7 +335,7 @@ Each platform POC should demonstrate:
 
 ## Recommended Delivery Order
 
-1. Add managed-language refresh callback adapters. Core C ABI now performs single-flight refresh and one bounded retry after upstream 401/403; all three adapters expose opaque registration and manual refresh/removal.
+1. Keep managed-language refresh callback adapters aligned with the C ABI. Core and all three adapters now support single-flight refresh and one bounded retry after upstream 401/403.
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
 3. Validate the packaged Android AAR with Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
@@ -345,4 +345,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI and three adapters with create/start/stop/destroy, opaque source registration, manual refresh/removal, dynamic-port discovery, and a Host-provided cache directory. Core C ABI refresh callbacks are single-flight and retry once after upstream 401/403. It also includes build/release scripts, ownership wrappers, validated XCFramework structure, and a type-checked HarmonyOS AVPlayer POC. The AAR, Swift adapter, and HAR still require real-device validation, and managed-language callback adapters remain incomplete. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI and three adapters with create/start/stop/destroy, opaque source registration, manual refresh/removal, dynamic-port discovery, and a Host-provided cache directory. Core and managed-language callbacks are single-flight and retry once after upstream 401/403. It also includes build/release scripts, ownership wrappers, validated XCFramework structure, and a type-checked HarmonyOS AVPlayer POC. The AAR, Swift adapter, and HAR still require real-device validation. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

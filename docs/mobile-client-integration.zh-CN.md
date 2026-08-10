@@ -326,4 +326,4 @@ URL 查询参数重新启动时命中同一缓存，源站没有新增请求。�
 
 ## 当前仓库差距
 
-当前仓库已经通过 C ABI 和三端 Adapter 提供 create/start/stop/destroy、不透明来源注册、手动刷新/移除、动态端口结果和 Host 缓存目录注入。Core C ABI 刷新回调支持单飞，并在上游 401/403 后只重试一次。仓库还包含构建/发布脚本、所有权封装、XCFramework 结构校验以及通过类型检查的鸿蒙 AVPlayer POC。AAR、Swift Adapter 和 HAR 仍需真机验证，托管语言刷新回调 Adapter 仍未完成。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
+当前仓库已经通过 C ABI 和三端 Adapter 提供 create/start/stop/destroy、不透明来源注册、手动刷新/移除、动态端口结果和 Host 缓存目录注入。Core 和托管语言刷新回调都支持单飞，并在上游 401/403 后只重试一次。仓库还包含构建/发布脚本、所有权封装、XCFramework 结构校验以及通过类型检查的鸿蒙 AVPlayer POC。AAR、Swift Adapter 和 HAR 仍需真机验证。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
