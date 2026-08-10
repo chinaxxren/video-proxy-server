@@ -277,6 +277,16 @@ build_ios_xcframework() {
     -library "$simulator_dir/libproxy_server.a" \
     -headers "$OUT_DIR/include" \
     -output "$framework"
+  [[ -f "$framework/Info.plist" ]] || {
+    echo "iOS XCFramework is missing Info.plist" >&2
+    return 1
+  }
+  local slice_count
+  slice_count="$(find "$framework" -mindepth 2 -maxdepth 2 -type f -name libproxy_server.a | wc -l | tr -d ' ')"
+  [[ "$slice_count" == "2" ]] || {
+    echo "Expected device and simulator XCFramework slices, found $slice_count" >&2
+    return 1
+  }
   local swift_flags=()
   if [[ "$P2P_ENABLED" == "1" ]]; then
     swift_flags=(-D MEDIA_PROXY_CACHE_ENABLE_P2P -Xcc -DMEDIA_PROXY_CACHE_ENABLE_P2P)

@@ -153,8 +153,8 @@ refreshSource(identity, reason) -> new Source
 ## iOS Adapter
 
 构建脚本会把 Rust 静态库、C 头文件和 module map 打包为
-`MediaProxyCache.xcframework`；生产级 Swift 封装仍需实现。
-iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装模板。
+`MediaProxyCache.xcframework`，并校验设备和模拟器切片。
+iOS 压缩包还会在 `adapter/MediaProxyCache.swift` 中附带所有权封装。
 模板通过 `MediaProxyCacheCore` 导入 C ABI；每次 iOS 构建都会针对打包的头文件和
 module map 执行 `swiftc -typecheck`。模板会串行化 handle 访问，避免并发调用 start、
 stop 和 close 产生竞态。
@@ -316,10 +316,10 @@ URL 查询参数重新启动时命中同一缓存，源站没有新增请求。�
 2. 将现有 Range、并发请求、损坏恢复、缓存清理、HLS 和网络策略单元及桌面集成测试持续作为发布门禁。
 3. 使用 Media3 在真机上验证已打包的 Android AAR。
 4. 根据 Android POC 固化共享生命周期和错误合同。
-5. 构建 iOS XCFramework/Swift Adapter，并验证 AVPlayer。
+5. 使用真机 AVPlayer 验证已打包的 iOS XCFramework/Swift Adapter。
 6. 构建鸿蒙 HAR/N-API Adapter，并验证 AVPlayer。
 7. 完成跨平台验收矩阵后，再将 SDK 标记为生产可用。
 
 ## 当前仓库差距
 
-当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装模板、原生 XCFramework 生成以及通过类型检查的鸿蒙 AVPlayer POC。尚未提供已验证的 AAR、生产级 Swift 或经过真机验证的 HAR 包，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。
+当前仓库已经提供 create/start/stop/destroy C ABI、动态端口结果、Host 缓存目录注入、Android JNI Bridge、HarmonyOS N-API Bridge、构建/发布脚本、所有权封装、XCFramework 结构校验以及通过类型检查的鸿蒙 AVPlayer POC。AAR、Swift Adapter 和 HAR 仍需真机验证，不透明请求注册和来源刷新回调合同也仍未实现。本文档是剩余移动 SDK 工作的实现与验收合同，不代表这些平台 Adapter 已经完成真机验证。

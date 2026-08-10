@@ -157,9 +157,9 @@ The callback must not expose the signed URL through logs or error messages.
 ## iOS Adapter
 
 The build script packages the Rust static libraries, C header, and module map as
-`MediaProxyCache.xcframework`. A production Swift wrapper is still required.
-The iOS archive also includes `adapter/MediaProxyCache.swift` as an ownership
-wrapper template. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
+`MediaProxyCache.xcframework` and verifies its device and simulator slices.
+The iOS archive also includes `adapter/MediaProxyCache.swift` as the ownership
+wrapper. It imports the C ABI as `MediaProxyCacheCore`; every iOS build
 runs `swiftc -typecheck` against the packaged header and module map. The template
 serializes handle access so concurrent start, stop, and close calls cannot race.
 
@@ -333,10 +333,10 @@ Each platform POC should demonstrate:
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
 3. Validate the packaged Android AAR with Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
-5. Build the iOS XCFramework/Swift adapter and validate AVPlayer.
+5. Validate the packaged iOS XCFramework/Swift adapter with AVPlayer on real devices.
 6. Build the HarmonyOS HAR/N-API adapter and validate AVPlayer.
 7. Run the cross-platform acceptance matrix before declaring the SDK production-ready.
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership-wrapper templates, native XCFramework generation, and a type-checked HarmonyOS AVPlayer POC. It does not yet provide validated AAR, production Swift, or real-device-validated HAR packages, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI with create/start/stop/destroy, dynamic-port discovery, and a Host-provided cache directory. It also includes Android JNI and HarmonyOS N-API bridges, build/release scripts, ownership wrappers, validated XCFramework structure, and a type-checked HarmonyOS AVPlayer POC. The AAR, Swift adapter, and HAR still require real-device validation, and the opaque request registry/source-refresh callback contract is still missing. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
