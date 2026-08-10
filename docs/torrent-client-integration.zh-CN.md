@@ -31,6 +31,7 @@ LIBRQBIT_ENABLED=1 PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
 手动运行 `mobile-native` 时选择 `include_librqbit`。产物名称包含 `-librqbit`，
 `build-features.txt` 记录 `librqbit_enabled=1`。iOS 打包时会自动定义
 `MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT`。
+推送版本标签（`v*`）时，Release 产物会自动启用 librqbit。
 
 ## 生命周期
 

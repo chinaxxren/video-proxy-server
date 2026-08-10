@@ -36,6 +36,7 @@ LIBRQBIT_ENABLED=1 PLATFORM=harmony ./scripts/build-mobile.sh dist/mobile
 In `mobile-native`, select `include_librqbit`. Artifacts contain `-librqbit`
 and `build-features.txt` records `librqbit_enabled=1`. iOS adapters define
 `MEDIA_PROXY_CACHE_ENABLE_LIBRQBIT` automatically during packaging.
+Version tags (`v*`) enable librqbit automatically for release artifacts.
 
 ## Lifecycle
 
