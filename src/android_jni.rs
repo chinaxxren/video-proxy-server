@@ -25,7 +25,7 @@ use jni::sys::{jboolean, jint, jlong};
 use jni::{errors::ThrowRuntimeExAndDefault, EnvUnowned, JValue, JavaVM};
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
@@ -40,19 +40,20 @@ static REFRESH_CONTEXTS: LazyLock<Mutex<HashMap<jlong, Vec<Box<AndroidRefreshCon
 struct AndroidRefreshContext {
     vm: JavaVM,
     provider: Global<JObject<'static>>,
-    buffers: Mutex<Vec<CString>>,
 }
 
 unsafe extern "C" fn android_refresh_callback(
     context: *mut c_void,
     source_id: u64,
-) -> *const c_char {
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
     let Some(context) = (context as *const AndroidRefreshContext).as_ref() else {
-        return std::ptr::null();
+        return 0;
     };
     context
         .vm
-        .attach_current_thread(|env| -> jni::errors::Result<*const c_char> {
+        .attach_current_thread(|env| -> jni::errors::Result<usize> {
             let value = env.call_method(
                 &context.provider,
                 jni::jni_str!("refreshSource"),
@@ -61,20 +62,17 @@ unsafe extern "C" fn android_refresh_callback(
             )?;
             let object = value.into_object()?;
             if object.as_raw().is_null() {
-                return Ok(std::ptr::null());
+                return Ok(0);
             }
             let value = JString::cast_local(env, object)?.try_to_string(env)?;
-            let value = CString::new(value)
-                .map_err(|_| jni::errors::Error::NullPtr("refresh URL contains NUL"))?;
-            let pointer = value.as_ptr();
-            context
-                .buffers
-                .lock()
-                .map_err(|_| jni::errors::Error::NullPtr("refresh buffers unavailable"))?
-                .push(value);
-            Ok(pointer)
+            let bytes = value.as_bytes();
+            if buffer.is_null() || bytes.is_empty() || bytes.len() > capacity {
+                return Ok(bytes.len());
+            }
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+            Ok(bytes.len())
         })
-        .unwrap_or(std::ptr::null())
+        .unwrap_or(0)
 }
 
 fn register_handle(handle: *mut ProxyServerHandle) -> Option<jlong> {
@@ -366,7 +364,6 @@ pub extern "system" fn Java_com_example_mediaproxy_MediaProxyCache_nativeSetSour
         let context = Box::new(AndroidRefreshContext {
             vm: env.get_java_vm()?,
             provider: env.new_global_ref(&provider)?,
-            buffers: Mutex::new(Vec::new()),
         });
         let context_pointer = (&*context as *const AndroidRefreshContext)
             .cast_mut()

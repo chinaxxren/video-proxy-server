@@ -9,7 +9,12 @@ extern "C" {
 #endif
 
 typedef struct ProxyServerHandle ProxyServerHandle;
-typedef const char *(*ProxySourceRefreshCallback)(void *context, uint64_t source_id);
+typedef size_t (*ProxySourceRefreshCallback)(
+    void *context,
+    uint64_t source_id,
+    uint8_t *buffer,
+    size_t capacity
+);
 
 ProxyServerHandle *proxy_server_create(uint16_t port, const char *cache_dir);
 ProxyServerHandle *proxy_server_create_with_hosts(
@@ -28,8 +33,9 @@ uint64_t proxy_source_register(ProxyServerHandle *handle, const char *identity, 
 uint8_t proxy_source_refresh(ProxyServerHandle *handle, uint64_t source_id, const char *url);
 // Invalidates the ID. Existing playback requests may finish, future requests fail.
 uint8_t proxy_source_remove(ProxyServerHandle *handle, uint64_t source_id);
-// The callback may run on a Core worker thread. Core copies the returned UTF-8
-// string before the callback returns; ownership remains with the Host.
+// The callback may run on a Core worker thread. Write the refreshed URL as
+// UTF-8 bytes (without a trailing NUL) and return its length. Return zero on
+// failure. A length greater than capacity is rejected.
 uint8_t proxy_source_set_refresh_callback(
     ProxyServerHandle *handle,
     ProxySourceRefreshCallback callback,

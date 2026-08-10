@@ -62,8 +62,12 @@ pub struct ProxyServerHandle {
     rqbit_commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<RqbitCommand>>>>,
 }
 
-pub type ProxySourceRefreshCallback =
-    unsafe extern "C" fn(context: *mut c_void, source_id: u64) -> *const c_char;
+pub type ProxySourceRefreshCallback = unsafe extern "C" fn(
+    context: *mut c_void,
+    source_id: u64,
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize;
 
 fn source_registry(handle: &ProxyServerHandle) -> Option<crate::source_registry::SourceRegistry> {
     handle
@@ -141,14 +145,21 @@ pub unsafe extern "C" fn proxy_source_set_refresh_callback(
     let provider = callback.map(|callback| {
         let context = context as usize;
         Arc::new(move |source_id| {
-            let value = unsafe { callback(context as *mut c_void, source_id) };
-            if value.is_null() {
+            let mut buffer = vec![0u8; 16 * 1024];
+            let length = unsafe {
+                callback(
+                    context as *mut c_void,
+                    source_id,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                )
+            };
+            if length == 0 || length > buffer.len() {
                 return Err(crate::utils::error::ProxyError::Request(
                     "source refresh callback returned no URL".into(),
                 ));
             }
-            CStr::from_ptr(value)
-                .to_str()
+            std::str::from_utf8(&buffer[..length])
                 .map(str::to_owned)
                 .map_err(|_| {
                     crate::utils::error::ProxyError::Request(
@@ -1104,10 +1115,15 @@ mod tests {
     unsafe extern "C" fn source_refresh_callback(
         _context: *mut c_void,
         _source_id: u64,
-    ) -> *const c_char {
-        static URL: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-        URL.get_or_init(|| CString::new("https://media.example/video.mp4?token=rotated").unwrap())
-            .as_ptr()
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> usize {
+        let url = b"https://media.example/video.mp4?token=rotated";
+        if buffer.is_null() || url.len() > capacity {
+            return url.len();
+        }
+        std::ptr::copy_nonoverlapping(url.as_ptr(), buffer, url.len());
+        url.len()
     }
 
     #[test]

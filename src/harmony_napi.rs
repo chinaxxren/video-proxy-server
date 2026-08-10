@@ -21,7 +21,7 @@ use napi::bindgen_prelude::Uint8Array;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_void, CString};
 use std::sync::{mpsc, Mutex};
 use std::time::Duration;
 
@@ -29,15 +29,16 @@ type HarmonyRefreshFunction = ThreadsafeFunction<(String,), ErrorStrategy::Fatal
 
 struct HarmonyRefreshContext {
     provider: HarmonyRefreshFunction,
-    buffers: Mutex<Vec<CString>>,
 }
 
 unsafe extern "C" fn harmony_refresh_callback(
     context: *mut c_void,
     source_id: u64,
-) -> *const c_char {
+    buffer: *mut u8,
+    capacity: usize,
+) -> usize {
     let Some(context) = (context as *const HarmonyRefreshContext).as_ref() else {
-        return std::ptr::null();
+        return 0;
     };
     let (sender, receiver) = mpsc::sync_channel(1);
     let status = context.provider.call_with_return_value_raw::<String, _>(
@@ -49,20 +50,17 @@ unsafe extern "C" fn harmony_refresh_callback(
         },
     );
     if status != Status::Ok {
-        return std::ptr::null();
+        return 0;
     }
     let Ok(Some(value)) = receiver.recv_timeout(Duration::from_secs(10)) else {
-        return std::ptr::null();
+        return 0;
     };
-    let Ok(value) = CString::new(value) else {
-        return std::ptr::null();
-    };
-    let pointer = value.as_ptr();
-    let Ok(mut buffers) = context.buffers.lock() else {
-        return std::ptr::null();
-    };
-    buffers.push(value);
-    pointer
+    let bytes = value.as_bytes();
+    if buffer.is_null() || bytes.is_empty() || bytes.len() > capacity {
+        return bytes.len();
+    }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+    bytes.len()
 }
 
 #[cfg(feature = "p2p")]
@@ -277,10 +275,7 @@ impl MediaProxyCache {
             .refresh_contexts
             .lock()
             .map_err(|_| Error::new(Status::GenericFailure, "refresh contexts unavailable"))?;
-        let context = Box::new(HarmonyRefreshContext {
-            provider,
-            buffers: Mutex::new(Vec::new()),
-        });
+        let context = Box::new(HarmonyRefreshContext { provider });
         let context_pointer = (&*context as *const HarmonyRefreshContext)
             .cast_mut()
             .cast();

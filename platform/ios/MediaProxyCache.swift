@@ -3,28 +3,36 @@ import MediaProxyCacheCore
 
 private final class SourceRefreshContext: @unchecked Sendable {
     let provider: @Sendable (UInt64) -> URL?
-    private let lock = NSLock()
-    private var buffers: [UnsafeMutablePointer<CChar>] = []
 
     init(provider: @escaping @Sendable (UInt64) -> URL?) { self.provider = provider }
 
-    func resolve(_ sourceID: UInt64) -> UnsafePointer<CChar>? {
-        guard let value = provider(sourceID)?.absoluteString, let buffer = strdup(value) else { return nil }
-        lock.lock()
-        buffers.append(buffer)
-        lock.unlock()
-        return UnsafePointer(buffer)
+    func resolve(
+        _ sourceID: UInt64,
+        buffer: UnsafeMutablePointer<UInt8>?,
+        capacity: Int
+    ) -> Int {
+        guard let value = provider(sourceID)?.absoluteString else { return 0 }
+        let bytes = Array(value.utf8)
+        guard let buffer, !bytes.isEmpty, bytes.count <= capacity else { return bytes.count }
+        bytes.withUnsafeBufferPointer { source in
+            buffer.update(from: source.baseAddress!, count: source.count)
+        }
+        return bytes.count
     }
-
-    deinit { buffers.forEach { free($0) } }
 }
 
 private func sourceRefreshBridge(
     context: UnsafeMutableRawPointer?,
-    sourceID: UInt64
-) -> UnsafePointer<CChar>? {
-    guard let context else { return nil }
-    return Unmanaged<SourceRefreshContext>.fromOpaque(context).takeUnretainedValue().resolve(sourceID)
+    sourceID: UInt64,
+    buffer: UnsafeMutablePointer<UInt8>?,
+    capacity: Int
+) -> Int {
+    guard let context else { return 0 }
+    return Unmanaged<SourceRefreshContext>.fromOpaque(context).takeUnretainedValue().resolve(
+        sourceID,
+        buffer: buffer,
+        capacity: capacity
+    )
 }
 
 public struct TorrentFile: Codable, Equatable, Sendable {
