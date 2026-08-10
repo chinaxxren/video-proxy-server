@@ -2,6 +2,19 @@
 
 [English](CHANGELOG.md)
 
+## 0.4.1 - 2026-08-10
+
+### 修复
+
+- 单独启用 `harmony-napi` 时自动包含完整的 librqbit N-API 方法集合。
+- Android CI 在需要时通过 SDK 预览 channel 安装固定版本 NDK。
+
+### 新增
+
+- 将可重复的 localhost BitTorrent Peer Wire 传输与损坏分片拒绝测试加入 CI。
+- 增加 Criterion 解析性能基准和 Release 资产自动校验。
+- BitTorrent 分片失败后启用后续候补 Peer，不再忽略并发上限之外的节点。
+
 ## 0.4.0 - 2026-08-10
 
 ### 新增

@@ -1,6 +1,6 @@
 [package]
 name = "proxy-server"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -77,3 +77,8 @@ napi-derive = { version = "2.16.13", default-features = false, features = ["stri
 tokio = { version = "1.0", default-features = false, features = ["test-util"] }
 tempfile = "3"
 proptest = "1"
+criterion = { version = "0.7", default-features = false }
+
+[[bench]]
+name = "core"
+harness = false

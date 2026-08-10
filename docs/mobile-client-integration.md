@@ -6,6 +6,12 @@ This document describes the proposed integration of Media Proxy Cache into iOS, 
 
 > Status: integration preview, not a platform-certified SDK. The repository provides the Rust core, C ABI, lifecycle APIs, and iOS/Android/HarmonyOS adapter templates and package builders. Package assembly is automated; real-device playback remains host-specific validation.
 
+Validation completed on macOS: the iOS Simulator application played and sought
+through a real localhost HTTP Range origin; Android native libraries build for
+`arm64-v8a`, `armeabi-v7a`, and `x86_64`, and AAR packaging checks its JNI
+libraries and Kotlin API. HarmonyOS feature and adapter checks pass, but an OHOS
+SDK/device was not available. These checks do not replace real-device acceptance.
+
 ## Goal
 
 Compile one Rust cache core for each supported platform and expose a small platform-native API. Application code supplies media identity and the current signed source URL; the SDK returns a localhost playback URL for the platform media player.

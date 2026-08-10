@@ -6,6 +6,11 @@
 
 > 当前状态：接入预览，并非平台认证 SDK。仓库已提供 Rust Core、C ABI、生命周期 API、三端 Adapter 模板及打包脚本；产物组装已自动化，真机播放仍需由宿主应用按设备矩阵验收。
 
+已在 macOS 完成的验证：iOS Simulator 应用通过真实 localhost HTTP Range
+源站完成播放与 Seek；Android 原生库可构建 `arm64-v8a`、`armeabi-v7a` 和
+`x86_64`，AAR 打包会检查 JNI 库和 Kotlin API。鸿蒙 feature 与 Adapter
+检查通过，但当前没有 OHOS SDK/设备。以上检查不能替代真机验收。
+
 ## 目标
 
 为每个平台编译同一套 Rust 缓存核心，并暴露小型平台原生 API。应用提供媒体身份和当前 signed URL，SDK 返回供平台播放器使用的 localhost 播放 URL。

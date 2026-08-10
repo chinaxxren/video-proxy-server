@@ -2,6 +2,19 @@
 
 [简体中文](CHANGELOG.zh-CN.md)
 
+## 0.4.1 - 2026-08-10
+
+### Fixed
+
+- Standalone `harmony-napi` builds now enable the complete librqbit-backed N-API method set.
+- Android CI installs the pinned NDK from the SDK preview channel when required.
+
+### Added
+
+- Repeatable localhost BitTorrent peer-wire transfer and corrupt-piece rejection tests in CI.
+- Criterion parser benchmarks and automated Release asset verification.
+- Failed BitTorrent pieces are retried with later backup peers instead of ignoring peers beyond the concurrency limit.
+
 ## 0.4.0 - 2026-08-10
 
 ### Added

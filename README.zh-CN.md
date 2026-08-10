@@ -35,6 +35,7 @@
 ```bash
 cargo build --locked
 cargo test --locked
+cargo bench --locked --bench core
 ```
 
 解析器属性测试通过 `proptest` 纳入普通测试套件，发布门禁不需要额外安装模糊测试工具。
@@ -141,6 +142,17 @@ Windows x86_64 和 Linux x86_64 压缩包。也可以手动运行工作流，只
 Actions Artifacts 而不创建 GitHub Release。每个归档都会附带对应的 `.sha256` 文件；
 macOS/Linux 可运行 `shasum -a 256 -c <归档>.sha256` 校验，Windows 可运行
 `Get-FileHash <归档> -Algorithm SHA256` 校验。
+
+正式宣布发布前，检查桌面端、iOS 和 Android 的预期资产是否齐全：
+
+```bash
+./scripts/verify-release-assets.sh v0.4.1
+```
+
+当前平台验证状态：iOS Simulator 已通过真实 HTTP Range 播放与 Seek；Android
+三个原生 ABI 均已在本机构建，AAR 由打包脚本检查结构与 API。鸿蒙在未安装
+鸿蒙设备工具链的环境中完成 feature 构建、N-API 声明和打包脚本检查。这些结果
+不等同于真机认证。
 
 独立的 `.github/workflows/mobile.yml` 会在 GitHub runner 上构建 iOS 和 Android
 原生库，并在 tag 推送时作为 Release 资产发布。鸿蒙构建默认不启用；需要设置仓库变量

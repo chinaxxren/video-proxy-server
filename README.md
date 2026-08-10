@@ -35,6 +35,7 @@ A Rust HTTP media proxy with byte-range caching and HLS support. The server list
 ```bash
 cargo build --locked
 cargo test --locked
+cargo bench --locked --bench core
 ```
 
 Parser property tests run as part of the normal test suite through `proptest`;
@@ -217,6 +218,19 @@ also be run manually to produce downloadable Actions artifacts without creating
 a GitHub Release. Each archive includes a matching `.sha256` file; verify a
 download on macOS/Linux with `shasum -a 256 -c <archive>.sha256` or on Windows
 with `Get-FileHash <archive> -Algorithm SHA256`.
+
+Before announcing a release, verify that every expected desktop, iOS, and
+Android asset is present:
+
+```bash
+./scripts/verify-release-assets.sh v0.4.1
+```
+
+Current platform validation: real HTTP Range playback and seeking pass in the
+iOS Simulator; all three Android native ABIs build locally and the AAR is
+structurally and API checked by its packaging script. HarmonyOS feature builds,
+N-API declarations, and packaging scripts are checked without an installed
+HarmonyOS device toolchain. These results are not real-device certification.
 
 The separate `.github/workflows/mobile.yml` workflow builds iOS and Android
 native libraries on GitHub-hosted runners and publishes them as Release assets
