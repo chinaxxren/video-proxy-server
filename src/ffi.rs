@@ -1101,6 +1101,46 @@ mod tests {
         }
     }
 
+    unsafe extern "C" fn source_refresh_callback(
+        _context: *mut c_void,
+        _source_id: u64,
+    ) -> *const c_char {
+        static URL: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+        URL.get_or_init(|| CString::new("https://media.example/video.mp4?token=rotated").unwrap())
+            .as_ptr()
+    }
+
+    #[test]
+    fn ffi_source_refresh_callback_updates_registered_source() {
+        let cache = tempfile::tempdir().unwrap();
+        let path = CString::new(cache.path().to_str().unwrap()).unwrap();
+        let identity = CString::new("asset-1").unwrap();
+        let url = CString::new("https://media.example/video.mp4?token=initial").unwrap();
+        unsafe {
+            let handle = proxy_server_create(0, path.as_ptr());
+            assert_ne!(proxy_server_start(handle), 0);
+            let id = proxy_source_register(handle, identity.as_ptr(), url.as_ptr());
+            assert_ne!(id, 0);
+            assert_eq!(
+                proxy_source_set_refresh_callback(
+                    handle,
+                    Some(source_refresh_callback),
+                    ptr::null_mut()
+                ),
+                1
+            );
+            let server = (*handle).server.lock().unwrap().as_ref().unwrap().clone();
+            server.source_registry().refresh_from_provider(id).unwrap();
+            assert!(server
+                .source_registry()
+                .resolve(id)
+                .unwrap()
+                .url
+                .contains("rotated"));
+            proxy_server_destroy(handle);
+        }
+    }
+
     #[test]
     fn ffi_rejects_null_and_non_utf8_paths() {
         unsafe {
