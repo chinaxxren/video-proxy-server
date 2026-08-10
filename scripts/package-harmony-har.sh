@@ -33,10 +33,27 @@ test -n "$har" && test -f "$har" || { echo "HarmonyOS HAR was not produced" >&2;
 contents="$(tar -tzf "$har")"
 for required in \
   package/Index.d.ts \
+  package/oh-package.json5 \
   package/libs/arm64-v8a/libproxy_server.so \
   package/libs/armeabi-v7a/libproxy_server.so; do
   grep -Fqx "$required" <<<"$contents" || {
     echo "HarmonyOS HAR is missing $required" >&2
+    exit 1
+  }
+done
+declarations="$(tar -xOzf "$har" package/Index.d.ts)"
+for api in \
+  addAuthorizedTorrent \
+  addAuthorizedTorrentFile \
+  torrentFiles \
+  selectTorrentFiles \
+  torrentStatus \
+  pauseTorrent \
+  resumeTorrent \
+  setTorrentDownloadLimit \
+  removeTorrent; do
+  grep -Fq "$api(" <<<"$declarations" || {
+    echo "HarmonyOS HAR declaration is missing $api" >&2
     exit 1
   }
 done
