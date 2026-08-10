@@ -6,7 +6,8 @@ use crate::ffi::{
 };
 use crate::ffi::{
     proxy_server_create_with_hosts, proxy_server_destroy, proxy_server_start, proxy_server_stop,
-    proxy_source_refresh, proxy_source_register, proxy_source_remove, ProxyServerHandle,
+    proxy_source_refresh, proxy_source_register, proxy_source_remove,
+    proxy_source_set_refresh_callback, ProxyServerHandle,
 };
 #[cfg(feature = "p2p-librqbit")]
 use crate::ffi::{
@@ -17,10 +18,52 @@ use crate::ffi::{
 use crate::harmony_config::HarmonyConfiguration;
 #[cfg(feature = "p2p-librqbit")]
 use napi::bindgen_prelude::Uint8Array;
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use std::ffi::CString;
-use std::sync::Mutex;
+use std::ffi::{c_char, c_void, CString};
+use std::sync::{mpsc, Mutex};
+use std::time::Duration;
+
+type HarmonyRefreshFunction = ThreadsafeFunction<(String,), ErrorStrategy::Fatal>;
+
+struct HarmonyRefreshContext {
+    provider: HarmonyRefreshFunction,
+    buffers: Mutex<Vec<CString>>,
+}
+
+unsafe extern "C" fn harmony_refresh_callback(
+    context: *mut c_void,
+    source_id: u64,
+) -> *const c_char {
+    let Some(context) = (context as *const HarmonyRefreshContext).as_ref() else {
+        return std::ptr::null();
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let status = context.provider.call_with_return_value_raw::<String, _>(
+        (source_id.to_string(),),
+        ThreadsafeFunctionCallMode::Blocking,
+        move |result| {
+            let _ = sender.send(result.ok());
+            Ok(())
+        },
+    );
+    if status != Status::Ok {
+        return std::ptr::null();
+    }
+    let Ok(Some(value)) = receiver.recv_timeout(Duration::from_secs(10)) else {
+        return std::ptr::null();
+    };
+    let Ok(value) = CString::new(value) else {
+        return std::ptr::null();
+    };
+    let pointer = value.as_ptr();
+    let Ok(mut buffers) = context.buffers.lock() else {
+        return std::ptr::null();
+    };
+    buffers.push(value);
+    pointer
+}
 
 #[cfg(feature = "p2p")]
 fn register_p2p_directory(
@@ -118,6 +161,9 @@ unsafe fn query_torrent_json(
 #[napi]
 pub struct MediaProxyCache {
     handle: Mutex<Option<usize>>,
+    // Boxes keep C callback context addresses stable as providers are replaced.
+    #[allow(clippy::vec_box)]
+    refresh_contexts: Mutex<Vec<Box<HarmonyRefreshContext>>>,
 }
 
 #[napi]
@@ -138,6 +184,7 @@ impl MediaProxyCache {
         }
         Ok(Self {
             handle: Mutex::new(Some(handle as usize)),
+            refresh_contexts: Mutex::new(Vec::new()),
         })
     }
 
@@ -219,6 +266,38 @@ impl MediaProxyCache {
     }
 
     #[napi]
+    pub fn set_source_refresh_provider(&self, provider: HarmonyRefreshFunction) -> Result<bool> {
+        let handle_guard = self
+            .handle
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "proxy handle unavailable"))?;
+        let handle =
+            handle_guard.ok_or_else(|| Error::new(Status::GenericFailure, "proxy is closed"))?;
+        let mut contexts = self
+            .refresh_contexts
+            .lock()
+            .map_err(|_| Error::new(Status::GenericFailure, "refresh contexts unavailable"))?;
+        let context = Box::new(HarmonyRefreshContext {
+            provider,
+            buffers: Mutex::new(Vec::new()),
+        });
+        let context_pointer = (&*context as *const HarmonyRefreshContext)
+            .cast_mut()
+            .cast();
+        let installed = unsafe {
+            proxy_source_set_refresh_callback(
+                handle as *mut ProxyServerHandle,
+                Some(harmony_refresh_callback),
+                context_pointer,
+            ) != 0
+        };
+        if installed {
+            contexts.push(context);
+        }
+        Ok(installed)
+    }
+
+    #[napi]
     pub fn close(&self) -> Result<()> {
         let handle = self
             .handle
@@ -227,6 +306,9 @@ impl MediaProxyCache {
             .take();
         if let Some(handle) = handle {
             unsafe { proxy_server_destroy(handle as *mut ProxyServerHandle) }
+        }
+        if let Ok(mut contexts) = self.refresh_contexts.lock() {
+            contexts.clear();
         }
         Ok(())
     }
@@ -468,6 +550,10 @@ impl MediaProxyCache {
         };
         if let Some(handle) = handle {
             unsafe { proxy_server_destroy(handle as *mut ProxyServerHandle) }
+        }
+        match self.refresh_contexts.lock() {
+            Ok(mut contexts) => contexts.clear(),
+            Err(poisoned) => poisoned.into_inner().clear(),
         }
     }
 }

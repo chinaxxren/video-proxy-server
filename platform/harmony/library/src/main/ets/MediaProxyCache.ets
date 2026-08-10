@@ -6,6 +6,7 @@ interface NativeMediaProxyCache {
   registerSource(identity: string, url: string): string;
   refreshSource(sourceId: string, url: string): boolean;
   removeSource(sourceId: string): boolean;
+  setSourceRefreshProvider(provider: (sourceId: string) => string | null): boolean;
   close(): void;
   registerP2pDirectory(manifestJson: string, pieceDirectory: string): string;
   verifyP2pSource(sourceId: string): boolean;
@@ -84,6 +85,10 @@ export class MediaProxyCache {
   removeSource(sourceId: string): boolean {
     if (!/^[1-9][0-9]*$/.test(sourceId)) throw new Error('Invalid media source ID');
     return this.core.removeSource(sourceId);
+  }
+
+  setSourceRefreshProvider(provider: (sourceId: string) => string | null): boolean {
+    return this.core.setSourceRefreshProvider(provider);
   }
 
   playbackUrl(sourceId: string): string {
