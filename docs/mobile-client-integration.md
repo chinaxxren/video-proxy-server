@@ -329,7 +329,7 @@ Each platform POC should demonstrate:
 
 ## Recommended Delivery Order
 
-1. Complete automatic 401/403 source-refresh callback retries. Opaque source registration, manual refresh/removal, start/stop, dynamic port, and Host cache-directory injection are available through the C ABI and all three adapters.
+1. Add managed-language refresh callback adapters. Core C ABI now performs single-flight refresh and one bounded retry after upstream 401/403; all three adapters expose opaque registration and manual refresh/removal.
 2. Keep the existing unit and desktop integration suites for Range, concurrent requests, corruption recovery, cleanup, HLS, and network policy as release gates.
 3. Validate the packaged Android AAR with Media3 on real devices.
 4. Freeze the shared lifecycle and error contracts after the Android POC.
@@ -339,4 +339,4 @@ Each platform POC should demonstrate:
 
 ## Current Repository Gap
 
-The repository now exposes a C ABI and three adapters with create/start/stop/destroy, opaque source registration, manual refresh/removal, dynamic-port discovery, and a Host-provided cache directory. It also includes build/release scripts, ownership wrappers, validated XCFramework structure, and a type-checked HarmonyOS AVPlayer POC. The AAR, Swift adapter, and HAR still require real-device validation, and automatic 401/403 refresh callback retries remain incomplete. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.
+The repository now exposes a C ABI and three adapters with create/start/stop/destroy, opaque source registration, manual refresh/removal, dynamic-port discovery, and a Host-provided cache directory. Core C ABI refresh callbacks are single-flight and retry once after upstream 401/403. It also includes build/release scripts, ownership wrappers, validated XCFramework structure, and a type-checked HarmonyOS AVPlayer POC. The AAR, Swift adapter, and HAR still require real-device validation, and managed-language callback adapters remain incomplete. Treat this document as the implementation and acceptance contract for the remaining mobile SDK work, not as a claim that those platform adapters have been validated on real devices.

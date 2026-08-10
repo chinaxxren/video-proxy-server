@@ -66,6 +66,8 @@ enum OriginMode {
     /// 「只回源一次」这个断言即使合并根本没生效也照样成立——测试通过，
     /// 但什么都没证明。加一段延迟才能保证它们真的在合并窗口里重叠。
     Slow,
+    /// 只有 `token=fresh` 才授权，用于验证 opaque 来源自动刷新。
+    RefreshAuth,
 }
 
 /// [`OriginMode::Slow`] 每次响应前的延迟。
@@ -174,6 +176,12 @@ async fn serve_origin<B>(req: &Request<B>, mode: OriginMode) -> Response<OriginB
     if mode == OriginMode::Slow {
         tokio::time::sleep(ORIGIN_DELAY).await;
     }
+    if mode == OriginMode::RefreshAuth && req.uri().query() != Some("token=fresh") {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Full::new(Bytes::new()).boxed_unsync())
+            .unwrap();
+    }
 
     let range = req
         .headers()
@@ -268,6 +276,10 @@ struct Proxy {
 impl Proxy {
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}/playback", self.port)
+    }
+
+    fn media_url(&self, source_id: u64) -> String {
+        format!("http://127.0.0.1:{}/media/{source_id}", self.port)
     }
 
     fn stop(&self) {
@@ -476,6 +488,48 @@ async fn wait_until_cached(proxy: &Proxy, origin: &Origin, range: &str) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("区间 {range} 始终没有进入缓存");
+}
+
+#[tokio::test]
+async fn opaque_source_refreshes_once_after_upstream_401() {
+    let origin = spawn_origin(OriginMode::RefreshAuth);
+    let proxy = spawn_proxy(None);
+    wait_until_listening(proxy.port).await;
+
+    let registry = proxy.server.source_registry();
+    let source_id = registry
+        .register(
+            "user-1|asset-1|revision-1",
+            &format!("{}?token=expired", origin.url()),
+        )
+        .unwrap();
+    let refreshed_url = format!("{}?token=fresh", origin.url());
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let refresh_count = refreshes.clone();
+    registry
+        .set_refresh_provider(Some(Arc::new(move |_| {
+            refresh_count.fetch_add(1, Ordering::SeqCst);
+            Ok(refreshed_url.clone())
+        })))
+        .unwrap();
+
+    let response = local_http::Client::new()
+        .get(proxy.media_url(source_id))
+        .header("Range", "bytes=0-1023")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status().as_u16(),
+        StatusCode::PARTIAL_CONTENT.as_u16()
+    );
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        expected_bytes(0, 1023)
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(origin.hits(), 2);
+    proxy.stop();
 }
 
 #[tokio::test]

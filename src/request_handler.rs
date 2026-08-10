@@ -97,7 +97,38 @@ impl RequestHandler {
             DataRequest::new(&req)?
         };
 
-        let response = match (is_head, data_request.get_type()) {
+        let response = match self.dispatch_data_request(&data_request, is_head).await {
+            Ok(response) => response,
+            Err(ProxyError::UpstreamAuthorizationExpired(_))
+                if data_request.source_id().is_some() =>
+            {
+                let source_id = data_request.source_id().expect("guarded source ID");
+                self.source_registry
+                    .refresh_from_provider_if_current(source_id, data_request.get_url())?;
+                let source = self.source_registry.resolve(source_id).ok_or_else(|| {
+                    ProxyError::Request("registered media source does not exist".into())
+                })?;
+                let refreshed = DataRequest::from_registered_source(&req, source_id, &source)?;
+                self.dispatch_data_request(&refreshed, is_head)
+                    .await
+                    .map_err(|error| error.with_source_id(Some(source_id)))?
+            }
+            Err(error) => return Err(error.with_source_id(data_request.source_id())),
+        };
+
+        let response = full_content_if_no_range_requested(response, &data_request);
+
+        // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
+        // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
+        Ok(guard_response(response, permit))
+    }
+
+    async fn dispatch_data_request(
+        &self,
+        data_request: &DataRequest,
+        is_head: bool,
+    ) -> Result<Response<AppBody>> {
+        match (is_head, data_request.get_type()) {
             (true, crate::data_request::RequestType::M3u8) => {
                 let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
                 Response::builder()
@@ -107,7 +138,7 @@ impl RequestHandler {
                     .body(empty_body())
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 HEAD 响应失败: {}", e)))
             }
-            (true, _) => self.source_manager.process_head(&data_request).await,
+            (true, _) => self.source_manager.process_head(data_request).await,
             (false, crate::data_request::RequestType::M3u8) => {
                 // 处理 m3u8 请求
                 let content = self.hls_handler.handle_m3u8(data_request.get_url()).await?;
@@ -120,14 +151,8 @@ impl RequestHandler {
                     .map_err(|e| ProxyError::Request(format!("构建 m3u8 响应失败: {}", e)))
             }
             // 非播放列表一律走字节范围缓存管线（HLS 分片也在内）。
-            (false, _) => self.source_manager.process_request(&data_request).await,
-        }?;
-
-        let response = full_content_if_no_range_requested(response, &data_request);
-
-        // 并发许可跟随响应体，而不是在本方法返回时释放。流式媒体响应可能持续
-        // 很久，只限制响应构造阶段无法阻止大量上游连接和文件句柄同时存活。
-        Ok(guard_response(response, permit))
+            (false, _) => self.source_manager.process_request(data_request).await,
+        }
     }
 
     #[cfg(feature = "p2p-librqbit")]

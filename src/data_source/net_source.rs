@@ -125,6 +125,8 @@ impl NetSource {
                 }
                 // 416 是客户端语义错误，重试不会改变结果。
                 Err(error @ ProxyError::InvalidRange(_)) => return Err(error),
+                // 旧凭据不会因退避而恢复，立即交给 opaque 来源刷新层。
+                Err(error @ ProxyError::UpstreamAuthorizationExpired(_)) => return Err(error),
                 Err(error) => {
                     log_info!("Request", "第 {} 次尝试失败: {}", attempt, error);
                     last_error = Some(error);
