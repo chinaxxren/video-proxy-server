@@ -21,14 +21,19 @@ jobs:
       - run: cargo check --locked --all-targets
       - run: git diff --check
   feature-matrix:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - p2p-librqbit
-          - p2p-librqbit,android-jni
-          - p2p-librqbit,harmony-napi
+        include:
+          - features: p2p-librqbit
+            runner: ubuntu-latest
+          # JNI host tests require a JVM-capable linker environment. The
+          # Android NDK build itself remains enforced by mobile.yml.
+          - features: p2p-librqbit,android-jni
+            runner: macos-14
+          - features: p2p-librqbit,harmony-napi
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
