@@ -192,6 +192,7 @@ verify_native_symbols() {
         Java_com_example_mediaproxy_MediaProxyCache_nativeRemoveTorrent \
         Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentFilesJson \
         Java_com_example_mediaproxy_MediaProxyCache_nativeTorrentStatusJson \
+        Java_com_example_mediaproxy_MediaProxyCache_nativeSelectTorrentFiles \
         Java_com_example_mediaproxy_MediaProxyCache_nativeSetTorrentPaused \
         Java_com_example_mediaproxy_MediaProxyCache_nativeSetTorrentDownloadLimit; do
         rg -q "[[:space:]]${symbol}$" <<<"$symbols" || {
