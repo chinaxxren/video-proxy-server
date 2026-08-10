@@ -2,6 +2,11 @@ name: quality
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -38,6 +43,11 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # librqbit 8.1.1 pulls quick-xml 0.37 through librqbit-upnp. The
+          # affected UPnP parser is unreachable because the Core always sets
+          # enable_upnp_port_forwarding=false. Remove these exceptions when a
+          # stable librqbit release upgrades quick-xml to 0.41 or newer.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
   scripts:
     runs-on: ubuntu-latest
     steps:
