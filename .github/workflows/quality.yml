@@ -15,6 +15,22 @@ jobs:
       - run: cargo test --locked --all-targets --features p2p
       - run: cargo check --locked --all-targets
       - run: git diff --check
+  feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - p2p-librqbit
+          - p2p-librqbit,android-jni
+          - p2p-librqbit,harmony-napi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo clippy --locked --lib --features '${{ matrix.features }}' -- -D warnings
+      # Platform runtimes provide JNI/N-API symbols when loading the final library.
+      # A host-side lib test validates Rust code without linking a macOS/Linux cdylib.
+      - run: cargo test --locked --lib --features '${{ matrix.features }}'
   security:
     runs-on: ubuntu-latest
     steps:
