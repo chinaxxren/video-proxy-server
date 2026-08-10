@@ -36,6 +36,11 @@ jobs:
             runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        if: contains(matrix.features, 'android-jni')
+        with:
+          distribution: temurin
+          java-version: "17"
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo clippy --locked --lib --features '${{ matrix.features }}' -- -D warnings
       # Platform runtimes provide JNI/N-API symbols when loading the final library.
