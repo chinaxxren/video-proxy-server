@@ -38,7 +38,7 @@ jobs:
         run: |
           tar -czf media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile ios ios-sim include build-features.txt
           shasum -a 256 media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-ios${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-ios${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
@@ -89,7 +89,7 @@ jobs:
         run: |
           tar -czf media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile android include build-features.txt
           sha256sum media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-android${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-android${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
@@ -156,7 +156,7 @@ jobs:
         run: |
           tar -czf media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz -C dist/mobile harmony include build-features.txt
           sha256sum media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.tar.gz > media-proxy-cache-${GITHUB_REF_NAME}-harmony${P2P_SUFFIX}${LIBRQBIT_SUFFIX}.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}
           path: media-proxy-cache-${{ github.ref_name }}-harmony${{ env.P2P_SUFFIX }}${{ env.LIBRQBIT_SUFFIX }}.*
