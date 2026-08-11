@@ -2,6 +2,18 @@
 
 [简体中文](CHANGELOG.zh-CN.md)
 
+## 0.4.2 - 2026-08-11
+
+### Fixed
+
+- Preserve the established mutation-lock ordering during cache cleanup to prevent a cleanup/write deadlock.
+- Keep cache accounting intact when physical eviction fails.
+
+### Changed
+
+- Simplify mixed cache/network streaming and remove the small-prefix full-refetch path.
+- Reduce background-task cleanup scans and clarify disk-usage accounting names.
+
 ## 0.4.1 - 2026-08-10
 
 ### Fixed

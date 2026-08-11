@@ -29,6 +29,7 @@ mod tests {
 
     struct DeleteTrackingStorage {
         deleted: Arc<Notify>,
+        fail_delete: bool,
     }
 
     impl StorageEngine for DeleteTrackingStorage {
@@ -66,7 +67,11 @@ mod tests {
 
         async fn delete(&self, _key: &str) -> Result<()> {
             self.deleted.notify_one();
-            Ok(())
+            if self.fail_delete {
+                Err(ProxyError::Storage("injected delete failure".to_string()))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -76,6 +81,7 @@ mod tests {
         let manager = StorageManager::new(
             DeleteTrackingStorage {
                 deleted: deleted.clone(),
+                fail_delete: false,
             },
             StorageManagerConfig {
                 max_cache_size: 0,
@@ -99,6 +105,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_delete_failure_preserves_cache_accounting() {
+        let deleted = Arc::new(Notify::new());
+        let manager = StorageManager::new(
+            DeleteTrackingStorage {
+                deleted: deleted.clone(),
+                fail_delete: true,
+            },
+            StorageManagerConfig {
+                max_cache_size: 0,
+                max_file_count: 0,
+                cleanup_interval: Duration::from_millis(5),
+                external_cache_dirs: Vec::new(),
+            },
+        );
+        manager
+            .write(
+                "asset",
+                futures_util::stream::iter([Ok(Bytes::from_static(b"data"))]),
+                (0, 3),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), deleted.notified())
+            .await
+            .expect("cleanup did not attempt deletion");
+        assert_eq!(manager.get_size("asset").await.unwrap(), Some(4));
+    }
+
+    #[tokio::test]
     async fn cleanup_counts_external_p2p_cache_toward_the_shared_budget() {
         let directory = tempfile::tempdir().unwrap();
         let p2p_piece = directory.path().join("manifest").join("0.piece");
@@ -108,6 +144,7 @@ mod tests {
         let manager = StorageManager::new(
             DeleteTrackingStorage {
                 deleted: deleted.clone(),
+                fail_delete: false,
             },
             StorageManagerConfig {
                 max_cache_size: 4,
@@ -140,6 +177,7 @@ mod tests {
         let manager = StorageManager::new(
             DeleteTrackingStorage {
                 deleted: deleted.clone(),
+                fail_delete: false,
             },
             StorageManagerConfig {
                 max_cache_size: 4,
@@ -173,6 +211,7 @@ mod tests {
         let manager = StorageManager::new(
             DeleteTrackingStorage {
                 deleted: deleted.clone(),
+                fail_delete: false,
             },
             StorageManagerConfig {
                 max_cache_size: 4,
@@ -566,42 +605,33 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     victims
                 };
 
-                // 阶段二：批量持锁验证并移除簿记，磁盘 IO 在锁外执行。
-                //
-                // 将所有淘汰操作合并到一次全局写锁获取，避免每个条目都单独获取锁。
-                // mutation_locks 仍按条目单独持有，因为它保护的是该 key 的并发写入
-                // 竞争（写入任务与清理任务之间），而全局锁保护的是簿记数据结构本身。
-                let verified_victims = {
+                // 阶段二：同 key 的淘汰与写入共用变更锁。锁顺序必须始终是
+                // mutation shard -> bookkeeping，和 write() 保持一致，避免死锁。
+                for entry in to_remove {
+                    let shard = mutation_shard(&entry.key);
+                    let _mutation = mutation_locks[shard].lock().await;
                     let mut entries = cache_entries.write().await;
                     let mut total = total_size.write().await;
-                    let mut to_delete = Vec::new();
 
-                    for entry in to_remove {
-                        let shard = mutation_shard(&entry.key);
-                        let _mutation = mutation_locks[shard].lock().await;
+                    // 选中后若被读取或重写，last_access 会变化；该快照已经过期，
+                    // 不能删除刚写入的新内容。
+                    let unchanged = entries
+                        .get(&entry.key)
+                        .map(|current| current.last_access == entry.last_access)
+                        .unwrap_or(false);
+                    if !unchanged {
+                        continue;
+                    }
 
-                        // 选中后若被读取或重写，last_access 会变化；该快照已经过期，
-                        // 不能删除刚写入的新内容。
-                        let unchanged = entries
-                            .get(&entry.key)
-                            .map(|current| current.last_access == entry.last_access)
-                            .unwrap_or(false);
-
-                        if unchanged {
-                            // 提前移除簿记：后续磁盘操作无论成败，该条目都不应再被读取。
+                    match engine.delete(&entry.key).await {
+                        Ok(()) => {
                             if let Some(removed) = entries.remove(&entry.key) {
                                 *total = total.saturating_sub(removed.disk_usage);
-                                to_delete.push(entry.key.clone());
                             }
                         }
-                    }
-                    to_delete
-                };
-
-                // 锁已释放，磁盘 IO 不阻塞并发读写。
-                for key in verified_victims {
-                    if let Err(e) = engine.delete(&key).await {
-                        log_info!("Cache", "清理缓存条目失败 {}: {}", key, e);
+                        Err(e) => {
+                            log_info!("Cache", "清理缓存条目失败 {}: {}", entry.key, e)
+                        }
                     }
                 }
             }

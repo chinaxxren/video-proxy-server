@@ -201,10 +201,7 @@ impl MixedSourceHandler {
 }
 
 /// 从流中精确读取 `limit` 字节,切掉多余数据,检测不足。
-fn take_bytes<S>(
-    stream: S,
-    limit: usize,
-) -> impl Stream<Item = Result<Bytes>> + Send + Unpin
+fn take_bytes<S>(stream: S, limit: usize) -> impl Stream<Item = Result<Bytes>> + Send + Unpin
 where
     S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
 {

@@ -37,6 +37,7 @@ Thumbs.db
 # Generated iOS player POC artifacts
 /dist/ios-player-poc/
 /examples/ios-player-poc/MediaProxyCachePlayerPOC.xcodeproj/
+/examples/ios-player-poc/.claude/
 /dist/android-player-poc/
 /examples/android-player-poc/.gradle/
 /examples/android-player-poc/app/build/
