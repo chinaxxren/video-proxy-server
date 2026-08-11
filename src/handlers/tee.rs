@@ -19,6 +19,8 @@ pub struct BackgroundTasks {
     handles: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
+const CLEANUP_THRESHOLD: usize = 64;
+
 impl BackgroundTasks {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
@@ -32,7 +34,10 @@ impl BackgroundTasks {
             .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        handles.retain(|handle| !handle.is_finished());
+        // 延迟清理：只在累积超过阈值时扫描，避免每次 spawn 都遍历。
+        if handles.len() >= CLEANUP_THRESHOLD {
+            handles.retain(|handle| !handle.is_finished());
+        }
         handles.push(tokio::spawn(future).abort_handle());
     }
 
@@ -130,25 +135,26 @@ pub async fn forward_upstream(
     while let Some(item) = upstream.next().await {
         match item {
             Ok(chunk) => {
-                // Bytes 是引用计数的，clone 只加一次计数，不复制数据。
-                if cache_open && !send_to_cache(&cache_tx, Ok(chunk.clone())).await {
-                    cache_open = false;
-                }
-                if client_open && client_tx.send(Ok(chunk)).await.is_err() {
-                    log_info!("Cache", "客户端已断开，继续写入缓存");
+                // 先喂客户端,再喂缓存:减少客户端等待时间。
+                // Bytes 是引用计数的,clone 只加一次计数,不复制数据。
+                if client_open && client_tx.send(Ok(chunk.clone())).await.is_err() {
+                    log_info!("Cache", "客户端已断开,继续写入缓存");
                     client_open = false;
+                }
+                if cache_open && !send_to_cache(&cache_tx, Ok(chunk)).await {
+                    cache_open = false;
                 }
                 if !client_open && !cache_open {
                     break;
                 }
             }
             Err(error) => {
-                if cache_open {
-                    // 让写入端看到错误，它才不会把这段标记成完整区间。
-                    send_to_cache(&cache_tx, Err(error.clone())).await;
-                }
                 if client_open {
-                    let _ = client_tx.send(Err(error)).await;
+                    let _ = client_tx.send(Err(error.clone())).await;
+                }
+                if cache_open {
+                    // 让写入端看到错误,它才不会把这段标记成完整区间。
+                    send_to_cache(&cache_tx, Err(error)).await;
                 }
                 break;
             }

@@ -564,32 +564,37 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     victims
                 };
 
-                // 阶段二：同 key 的淘汰与写入共用变更锁。不同 key 分布到固定
-                // 数量的锁分片，避免全局串行，也避免锁表随缓存键无界增长。
+                // 阶段二：持锁验证并移除簿记，磁盘 IO 在锁外执行。
                 for entry in to_remove {
                     let shard = mutation_shard(&entry.key);
                     let _mutation = mutation_locks[shard].lock().await;
-                    let mut entries = cache_entries.write().await;
-                    let mut total = total_size.write().await;
 
-                    // 选中后若被读取或重写，last_access 会变化；该快照已经过期，
-                    // 不能删除刚写入的新内容。
-                    let unchanged = entries
-                        .get(&entry.key)
-                        .map(|current| current.last_access == entry.last_access)
-                        .unwrap_or(false);
-                    if !unchanged {
-                        continue;
-                    }
+                    // 持写锁验证 last_access 未变，移除簿记，释放锁。
+                    let should_delete = {
+                        let mut entries = cache_entries.write().await;
+                        let mut total = total_size.write().await;
 
-                    match engine.delete(&entry.key).await {
-                        Ok(()) => {
+                        // 选中后若被读取或重写，last_access 会变化；该快照已经过期，
+                        // 不能删除刚写入的新内容。
+                        let unchanged = entries
+                            .get(&entry.key)
+                            .map(|current| current.last_access == entry.last_access)
+                            .unwrap_or(false);
+                        if !unchanged {
+                            false
+                        } else {
+                            // 提前移除簿记：后续磁盘操作无论成败，该条目都不应再被读取。
                             if let Some(removed) = entries.remove(&entry.key) {
                                 *total = total.saturating_sub(removed.total_size);
                             }
+                            true
                         }
-                        Err(e) => {
-                            log_info!("Cache", "清理缓存条目失败 {}: {}", entry.key, e)
+                    };
+
+                    // 锁已释放，磁盘 IO 不阻塞并发读写。
+                    if should_delete {
+                        if let Err(e) = engine.delete(&entry.key).await {
+                            log_info!("Cache", "清理缓存条目失败 {}: {}", entry.key, e);
                         }
                     }
                 }

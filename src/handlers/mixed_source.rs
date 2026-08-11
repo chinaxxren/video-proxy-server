@@ -15,7 +15,6 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
-const MIN_CACHE_SIZE: usize = 8192; // 最小缓存处理大小
 
 pub struct MixedSourceHandler {
     cache_handler: Arc<CacheHandler>,
@@ -86,55 +85,6 @@ impl MixedSourceHandler {
         // 开区间哨兵时会溢出 usize 并 panic。
         let cache_size = usize::try_from(cached_end - start)
             .map_err(|_| ProxyError::InvalidRange("缓存段长度超出可表示范围".to_string()))?;
-
-        // 如果缓存部分太小，直接从网络获取整个范围
-        if cache_size < MIN_CACHE_SIZE {
-            log_info!(
-                "Cache",
-                "缓存范围过小 ({} 字节), 直接从网络获取整个范围: {}-{}",
-                cache_size,
-                start,
-                end
-            );
-
-            let range = format!("bytes={}-{}", start, end);
-            let fetched = self.fetch_with_timeout(url, &range).await?;
-            // 上游可以合法地只返回请求区间的前缀，按实际长度收窄 `end`，
-            // 否则 `Content-Length` 会超出真实响应体长度。见
-            // [`clamp_end_to_upstream_length`]。
-            let end = clamp_end_to_upstream_length(start, end, fetched.content_length);
-            let (headers, meta, network_stream) = fetched.into_parts();
-            let total_file_size = meta.total_size.unwrap_or(0);
-
-            // 这条快路径同样要写回缓存。否则「缓存段太小」的请求永远只走网络，
-            // 缓存一直停在那不足 8KB 的开头，下一次请求还是全量回源。
-            let client_stream = tee_to_cache(
-                Box::pin(network_stream),
-                self.cache_handler.clone(),
-                key.to_string(),
-                (start, end),
-                // 混合源路径不参与去重：进到这里说明缓存里已有可用前缀，
-                // 每个请求要补的尾段各不相同，没有「同一个区间被重复拉取」
-                // 可言。去重只装在完全走网络那条路径上。
-                None,
-                self.tasks.clone(),
-            );
-
-            log_info!(
-                "Cache",
-                "创建响应 - 范围: {}-{}, 总大小: {}",
-                start,
-                end,
-                total_file_size
-            );
-            return self.response_builder.build_partial_content_response(
-                Box::new(client_stream),
-                headers,
-                start,
-                end,
-                total_file_size,
-            );
-        }
 
         // 预先发起网络请求
         let range = format!("bytes={}-{}", cached_end, end);
@@ -241,193 +191,54 @@ impl MixedSourceHandler {
         cache_size: usize,
         network_size: usize,
     ) -> impl Stream<Item = Result<Bytes>> + Send + Unpin {
-        struct StreamState {
-            cached_stream: Option<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>>,
-            network_stream: Option<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>,
-            using_cache: bool,
-            cache_received: usize,
-            network_received: usize,
-            cache_size: usize,
-            network_size: usize,
-            error_occurred: bool,
-            chunk_count: usize,
-        }
+        use futures_util::StreamExt;
 
-        let state = StreamState {
-            cached_stream: Some(cached_stream),
-            network_stream: Some(network_stream),
-            using_cache: true,
-            cache_received: 0,
-            network_received: 0,
-            cache_size,
-            network_size,
-            error_occurred: false,
-            chunk_count: 0,
-        };
+        let cache_limited = take_bytes(cached_stream, cache_size);
+        let network_limited = take_bytes(Box::pin(network_stream), network_size);
 
-        Box::pin(futures_util::stream::unfold(
-            state,
-            move |mut state| async move {
-                if state.error_occurred {
-                    return None;
-                }
-
-                if state.using_cache && state.cache_received < state.cache_size {
-                    if let Some(ref mut stream) = state.cached_stream {
-                        match stream.next().await {
-                            Some(Ok(chunk)) => {
-                                if chunk.is_empty() {
-                                    return Some((Ok(Bytes::new()), state));
-                                }
-                                let remaining = state.cache_size - state.cache_received;
-                                let chunk_size = chunk.len().min(remaining);
-
-                                if chunk_size > 0 {
-                                    // slice 而非 to_vec：Bytes 的切片只是同一块
-                                    // 内存上的新视图，加一次引用计数即可。to_vec
-                                    // 会把整条响应体在这里再复制一遍。
-                                    let data = chunk.slice(..chunk_size);
-                                    state.cache_received += chunk_size;
-                                    state.chunk_count += 1;
-
-                                    log_info!("Cache", "发送缓存数据 #{} - 大小: {} 字节, 已发送: {}/{} 字节 ({:.1}%)",
-                                    state.chunk_count,
-                                    chunk_size,
-                                    state.cache_received,
-                                    state.cache_size,
-                                    (state.cache_received as f64 / state.cache_size as f64 * 100.0));
-
-                                    if state.cache_received >= state.cache_size {
-                                        state.using_cache = false;
-                                        state.cached_stream = None;
-                                        state.chunk_count = 0;
-                                        log_info!("Cache", "缓存数据发送完毕，切换到网络数据");
-                                    }
-
-                                    return Some((Ok(data), state));
-                                }
-                            }
-                            Some(Err(e)) => {
-                                log_info!("Cache", "读取缓存数据错误: {}", e);
-                                state.error_occurred = true;
-                                state.using_cache = false;
-                                state.cached_stream = None;
-                                return Some((Err(e), state));
-                            }
-                            None => {
-                                if state.cache_received < state.cache_size {
-                                    log_info!(
-                                        "Cache",
-                                        "警告：缓存数据不足 - 已接收: {} 字节, 期望: {} 字节",
-                                        state.cache_received,
-                                        state.cache_size
-                                    );
-                                    state.error_occurred = true;
-                                    return Some((
-                                        Err(ProxyError::Network("缓存数据不足".to_string())),
-                                        state,
-                                    ));
-                                }
-
-                                state.using_cache = false;
-                                state.cached_stream = None;
-                                state.chunk_count = 0;
-                                log_info!("Cache", "缓存数据发送完毕，切换到网络数据");
-                            }
-                        }
-                    }
-                }
-
-                if !state.using_cache && state.network_received < state.network_size {
-                    if let Some(ref mut stream) = state.network_stream {
-                        match stream.as_mut().next().await {
-                            Some(Ok(chunk)) => {
-                                if chunk.is_empty() {
-                                    return Some((Ok(Bytes::new()), state));
-                                }
-                                let remaining = state.network_size - state.network_received;
-                                let chunk_size = chunk.len().min(remaining);
-
-                                if chunk_size > 0 {
-                                    let data = chunk.slice(..chunk_size);
-                                    state.network_received += chunk_size;
-                                    state.chunk_count += 1;
-
-                                    log_info!("Cache", "发送网络数据 #{} - 大小: {} 字节, 已发送: {}/{} 字节 ({:.1}%)",
-                                    state.chunk_count,
-                                    chunk_size,
-                                    state.network_received,
-                                    state.network_size,
-                                    (state.network_received as f64 / state.network_size as f64 * 100.0));
-
-                                    if state.network_received >= state.network_size {
-                                        state.network_stream = None;
-                                        log_info!(
-                                            "Cache",
-                                            "网络数据发送完毕 - 总计发送: {} 字节",
-                                            state.network_received
-                                        );
-                                    }
-
-                                    return Some((Ok(data), state));
-                                }
-                            }
-                            Some(Err(e)) => {
-                                log_info!("Cache", "读取网络数据错误: {}", e);
-                                state.error_occurred = true;
-                                state.network_stream = None;
-                                return Some((Err(e), state));
-                            }
-                            None => {
-                                if state.network_received < state.network_size {
-                                    log_info!(
-                                        "Cache",
-                                        "警告：网络数据不足 - 已接收: {} 字节, 期望: {} 字节",
-                                        state.network_received,
-                                        state.network_size
-                                    );
-                                    state.error_occurred = true;
-                                    return Some((
-                                        Err(ProxyError::Network("网络数据不足".to_string())),
-                                        state,
-                                    ));
-                                }
-
-                                state.network_stream = None;
-                                log_info!(
-                                    "Cache",
-                                    "网络数据发送完毕 - 总计发送: {} 字节",
-                                    state.network_received
-                                );
-                                return None;
-                            }
-                        }
-                    }
-                }
-
-                if state.cache_received >= state.cache_size
-                    && state.network_received >= state.network_size
-                {
-                    log_info!(
-                        "Cache",
-                        "数据传输完成 - 缓存: {} 字节, 网络: {} 字节, 总计: {} 字节",
-                        state.cache_received,
-                        state.network_received,
-                        state.cache_received + state.network_received
-                    );
-                    return None;
-                }
-
-                // 走到这里说明两侧都没有可读数据，且计数没达到预期。返回 None 结束
-                // 流即可 —— 再改 state 也没有意义，它随即被丢弃。
-                if state.using_cache {
-                    log_info!("Cache", "缓存数据发送完毕，切换到网络数据");
-                }
-
-                None
-            },
-        ))
+        Box::pin(cache_limited.chain(network_limited))
     }
+}
+
+/// 从流中精确读取 `limit` 字节,切掉多余数据,检测不足。
+fn take_bytes<S>(
+    stream: S,
+    limit: usize,
+) -> impl Stream<Item = Result<Bytes>> + Send + Unpin
+where
+    S: Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
+{
+    Box::pin(futures_util::stream::unfold(
+        (stream, 0usize, limit),
+        |(mut stream, mut taken, limit)| async move {
+            if taken >= limit {
+                return None;
+            }
+
+            match stream.next().await {
+                Some(Ok(chunk)) if chunk.is_empty() => {
+                    // 跳过空块,继续读取。
+                    Some((Ok(Bytes::new()), (stream, taken, limit)))
+                }
+                Some(Ok(chunk)) => {
+                    let remaining = limit.saturating_sub(taken);
+                    let chunk_size = chunk.len().min(remaining);
+                    taken = taken.saturating_add(chunk_size);
+                    let data = chunk.slice(..chunk_size);
+                    Some((Ok(data), (stream, taken, limit)))
+                }
+                Some(Err(e)) => Some((Err(e), (stream, limit, limit))),
+                None if taken < limit => Some((
+                    Err(ProxyError::Network(format!(
+                        "流提前结束：期望 {} 字节,实际 {} 字节",
+                        limit, taken
+                    ))),
+                    (stream, limit, limit),
+                )),
+                None => None,
+            }
+        },
+    ))
 }
 
 #[cfg(test)]
