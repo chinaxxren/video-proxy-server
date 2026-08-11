@@ -409,7 +409,9 @@ async fn external_cache_size(directories: &[PathBuf]) -> u64 {
 #[derive(Clone)]
 struct CacheEntry {
     key: String,
-    total_size: u64, // 文件的总大小
+    /// 该条目占用的磁盘空间（字节数），用于 LRU 淘汰时的容量记账。
+    /// 注意：这是缓存引擎报告的实际磁盘占用，不是上游资源的 `Content-Length`。
+    disk_usage: u64,
     last_access: SystemTime,
 }
 
@@ -490,7 +492,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     key.clone(),
                     CacheEntry {
                         key,
-                        total_size: size,
+                        disk_usage: size,
                         // UNIX_EPOCH 让上一次运行留下的条目在 LRU 里排最前，
                         // 优先于本次运行访问过的条目被淘汰。
                         last_access: SystemTime::UNIX_EPOCH,
@@ -557,7 +559,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                         {
                             break;
                         }
-                        current_total = current_total.saturating_sub(entry.total_size);
+                        current_total = current_total.saturating_sub(entry.disk_usage);
                         current_count -= 1;
                         victims.push(entry);
                     }
@@ -585,7 +587,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                         } else {
                             // 提前移除簿记：后续磁盘操作无论成败，该条目都不应再被读取。
                             if let Some(removed) = entries.remove(&entry.key) {
-                                *total = total.saturating_sub(removed.total_size);
+                                *total = total.saturating_sub(removed.disk_usage);
                             }
                             true
                         }
@@ -625,12 +627,12 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
 
             if let Some(entry) = entries.get_mut(key) {
                 // 更新文件的总大小（如果新写入的范围扩展了文件）
-                if end_pos > entry.total_size {
+                if end_pos > entry.disk_usage {
                     // saturating：记账漂移时宁可低估，不要在减法上 panic。
                     *total = total
-                        .saturating_sub(entry.total_size)
+                        .saturating_sub(entry.disk_usage)
                         .saturating_add(end_pos);
-                    entry.total_size = end_pos;
+                    entry.disk_usage = end_pos;
                 }
                 entry.last_access = SystemTime::now();
             } else {
@@ -638,7 +640,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
                     key.to_string(),
                     CacheEntry {
                         key: key.to_string(),
-                        total_size: end_pos,
+                        disk_usage: end_pos,
                         last_access: SystemTime::now(),
                     },
                 );
@@ -667,7 +669,7 @@ impl<E: StorageEngine + 'static> StorageManager<E> {
     pub async fn get_size(&self, key: &str) -> Result<Option<u64>> {
         // 从缓存条目中获取大小
         if let Some(entry) = self.cache_entries.read().await.get(key) {
-            return Ok(Some(entry.total_size));
+            return Ok(Some(entry.disk_usage));
         }
 
         // 如果缓存中没有，从存储引擎获取
