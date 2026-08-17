@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.11
+      - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-audit
       # librqbit 8.1.1 pulls quick-xml 0.37 through librqbit-upnp. The affected
