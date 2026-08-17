@@ -77,7 +77,7 @@ napi-derive = { version = "2.16.13", default-features = false, features = ["stri
 tokio = { version = "1.0", default-features = false, features = ["test-util"] }
 tempfile = "3"
 proptest = "1"
-criterion = { version = "0.7", default-features = false }
+criterion = { version = "0.8", default-features = false }
 
 [[bench]]
 name = "core"
